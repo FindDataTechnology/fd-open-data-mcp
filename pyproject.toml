@@ -1,0 +1,47 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "fd-open-data-mcp"
+dynamic = ["version"]
+description = "Open-data ontology MCP: a semantic concept layer over multi-datasource financial/economic data"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "FindDataOfficial" }]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+]
+dependencies = [
+    "click>=8.0",
+    "sqlalchemy>=2.0",
+    "pydantic>=2.0",
+    "fastmcp>=2.0",
+    "pandas>=2.0",
+    "fd-open-data-protocol",
+    "pyyaml>=6.0",
+]
+
+[tool.uv.sources]
+fd-open-data-protocol = { path = "../fd-open-data-protocol" }
+
+[tool.pytest.ini_options]
+markers = [
+    "network: marks tests that call real upstream APIs (skipped by default; set RUN_NETWORK_TESTS=1 to run)",
+]
+
+[project.optional-dependencies]
+data = ["akshare>=1.17", "yfinance>=0.2", "world_bank_data>=0.1", "edgartools>=2.0", "wbgapi>=1.0"]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+fd-open-data-mcp = "fd_open_data_mcp.cli:cli"
+
+[tool.setuptools.dynamic]
+version = { attr = "fd_open_data_mcp.__version__" }
+
+[tool.setuptools.packages.find]
+include = ["fd_open_data_mcp", "fd_open_data_mcp.*"]

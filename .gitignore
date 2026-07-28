@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+fd_open_data_mcp/metadata/*.db
+fd_open_data_mcp/metadata/*.db-wal
+fd_open_data_mcp/metadata/*.db-shm
+.pytest_cache/
+.coverage
