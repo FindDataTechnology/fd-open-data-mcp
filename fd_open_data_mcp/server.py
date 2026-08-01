@@ -190,6 +190,33 @@ def fetch(concept_id: int, entity_type: str, entity_id: int, date: str) -> dict:
         s.close()
 
 
+# ─── Crawl planning ─────────────────────────────────────────────────────────
+@mcp.tool
+def plan_crawl(
+    concept_ids: list[int], entity_type: str, start: str, end: str,
+    entity_ids: list[int] | None = None, frequency: str | None = None,
+) -> dict:
+    """Plan a concept crawl -> CrawlPlan artifact (concepts in, methods out).
+
+    Compiles desired concepts + entity scope + date range into a ranked, failover-aware
+    CrawlPlan. Does not fetch. Unroutable concepts (no confirmed binding) and unmapped
+    entities (no per-source identifier) are reported, not silently dropped.
+    """
+    from fd_open_data_mcp.crawl.plan import DateRange, EntityScope
+    from fd_open_data_mcp.crawl.planner import plan_crawl as _plan
+
+    s = _session()
+    try:
+        plan = _plan(
+            s, concept_ids,
+            EntityScope(entity_type=entity_type, entity_ids=entity_ids or None),
+            DateRange(start=start, end=end, frequency=frequency),
+        )
+        return plan.model_dump(mode="json")
+    finally:
+        s.close()
+
+
 # ─── Scheduled refresh ──────────────────────────────────────────────────────
 @mcp.tool
 def generate_refresh_schedules() -> dict:

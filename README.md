@@ -101,3 +101,88 @@ uv run --with pytest pytest -q
   production runner refines per-function date-format / payload-shape quirks.
 
 See `openspec/changes/add-fd-open-data-mcp/` for the full spec.
+
+---
+
+### Usage Examples
+
+#### Query NBS GDP Data
+```python
+from fd_open_data_mcp.fetch.runner import run_upstream
+
+result = run_upstream(
+    source='nbs-gdp', 
+    command='get_gdp_quarterly',
+    params={'start_year': 2020}
+)
+print(result.head())
+```
+
+#### Query Steel Industry Production
+```python
+result = run_upstream(
+    source='cisa-industry',
+    command='get_steel_production',
+    params={}
+)
+print(result.head())
+```
+
+#### Query Metal Futures Pricing
+```python
+result = run_upstream(
+    source='shfe-metal-futures',
+    command='get_metal_pricing',
+    params={}
+)
+print(result.head())
+```
+
+### CLI Usage
+```bash
+# List all data sources
+fd-open-data-mcp list-sources
+
+# Read specific data
+fd-open-data-mcp read \
+  --source nbs-gdp \
+  --function get_gdp_quarterly \
+  --params '{"start_year": 2020}'
+```
+
+### MCP Server Mode
+```bash
+uv run fd-open-data-mcp serve
+# Then connect from Claude/Codex/etc.
+```
+
+
+---
+
+## Rate Limits & Best Practices
+
+### Recommended Refresh Intervals
+
+| Data Source Type | Refresh Interval | Notes |
+|------------------|------------------|-------|
+| **GDP/Macro** | Weekly | Stable data, updates quarterly/monthly |
+| **Industry Stats** | Daily | Can change frequently |
+| **Futures Prices** | Hourly during market hours | Volatile pricing |
+| **Fund Statistics** | Monthly | Updates monthly |
+| **Market Indices** | Real-time | High volatility |
+
+### API Rate Limiting
+
+- **Government APIs**: Respect 10 requests/minute default limits
+- **Exchange APIs**: Follow exchange-specific rate policies  
+- **Third-party Data**: Check individual terms of service
+- **Recommendation**: Implement exponential backoff on 429 errors
+
+### Caching Strategy
+
+All fetch results are automatically cached based on data frequency:
+- High-frequency data (futures): Cache for 1 hour
+- Medium-frequency data (industry stats): Cache for 24 hours
+- Low-frequency data (GDP, annual reports): Cache for 1 week
+
+Use `fd-open-data-mcp read` to check cache status.

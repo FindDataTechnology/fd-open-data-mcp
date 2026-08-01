@@ -51,8 +51,17 @@ def _bindings_for_source(session: Session, concept_id: int, source_name: str) ->
 
 
 def _build_params(fn: Function, identifier: str, date: str, binding=None) -> dict:
-    """Best-effort param mapping: entity id -> symbol/economy; date -> start/end;
-    indicator code -> binding's column name (for wbgapi)."""
+    """Param mapping: delegate to the adapter registry if one is registered for
+    ``(source, command)`` (design.md D4); otherwise fall back to the legacy
+    best-effort name-guessing. The adapter is the authority where present."""
+    from fd_open_data_mcp.adapters import adapter_for
+
+    adapter = adapter_for(fn.source.name, fn.command)
+    if adapter is not None:
+        return adapter.build_params(fn, identifier, date, binding)
+
+    # legacy best-effort: entity id -> symbol/economy; date -> start/end;
+    # indicator code -> binding's column name (for wbgapi).
     params: dict = {}
     for p in (fn.parameters or []):
         name = p.get("name")
@@ -69,8 +78,18 @@ def _build_params(fn: Function, identifier: str, date: str, binding=None) -> dic
     return params
 
 
-def _extract_value(result, column_name: str, date: str):
-    """Best-effort: pull the value for (date, column) from a DataFrame result."""
+def _extract_value(result, column_name: str, date: str, source: Optional[str] = None, command: Optional[str] = None):
+    """Value extraction: delegate to the adapter registry if one is registered for
+    ``(source, command)`` (design.md D4); otherwise fall back to the legacy
+    best-effort DataFrame lookup. Returns ``None`` when no value is found (callers
+    treat ``None`` as a fetch failure and fail over)."""
+    from fd_open_data_mcp.adapters import adapter_for
+
+    if source and command:
+        adapter = adapter_for(source, command)
+        if adapter is not None:
+            return adapter.extract_value(result, column_name, date)
+
     try:
         import pandas as pd
     except ImportError:
@@ -127,7 +146,7 @@ def dispatch_one(
                 record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
                 continue
             latency = _ms(t0)
-            value = _extract_value(result, binding.column.name, date)
+            value = _extract_value(result, binding.column.name, date, source, fn.command)
             if value is None:
                 record_fetch_outcome(session, source, concept_id, "error", latency)
                 continue

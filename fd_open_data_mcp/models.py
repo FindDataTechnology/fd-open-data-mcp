@@ -108,7 +108,7 @@ class FunctionColumn(Base):
     name = Column(String(255), nullable=False)
     type = Column(String(64), nullable=True)
     description = Column(String, nullable=True)
-    meaning = Column(String(64), nullable=False, default="unknown")  # unknown when desc is "-" / empty
+    meaning = Column(String, nullable=False, default="unknown")  # unknown when desc is "-" / empty
     semantic_type = Column(String(64), nullable=True)  # hint from source (e.g. cn-gov: title/date/url/category)
     frequency = Column(String(32), nullable=True)  # column-level cadence; defaults to the function's
     datasource = Column(String(64), nullable=True)  # column-level source; defaults to the function's (composite cols)

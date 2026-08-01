@@ -34,7 +34,7 @@ markers = [
 ]
 
 [project.optional-dependencies]
-data = ["akshare>=1.17", "yfinance>=0.2", "world_bank_data>=0.1", "edgartools>=2.0", "wbgapi>=1.0"]
+data = ["akshare>=1.17", "yfinance>=0.2", "world_bank_data>=0.1", "edgartools>=2.0", "wbgapi>=1.0", "requests>=2.31", "beautifulsoup4>=4.12", "scrapling>=0.4.7"]
 dev = ["pytest>=8.0"]
 
 [project.scripts]

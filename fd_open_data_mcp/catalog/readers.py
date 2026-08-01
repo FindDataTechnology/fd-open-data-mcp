@@ -149,6 +149,40 @@ def read_callable(module_path: str, func_name: str, scanner_mode: str) -> tuple[
     return records, []
 
 
+def read_fd_world_adapter(
+    adapter_sources: list[str], scanner_mode: str
+) -> tuple[list[dict], list[str]]:
+    """Read curated functions from fd-world source adapters (ckan, cnstats, ...).
+
+    Calls each adapter's ``discover()`` directly, returning the static curated
+    function metadata. This does NOT require the upstream package
+    (akshare/ckanapi/wbgapi) to be installed - the curated lists live in code
+    (e.g. ``CKAN_FUNCTIONS``/``CNSTATS_FUNCTIONS``). Fetch-time still needs the
+    upstream package; registry/metadata ingestion does not.
+    """
+    try:
+        from fd_world.sources.config import get_adapter
+    except Exception as e:  # noqa: BLE001
+        return [], [f"cannot import fd_world.sources.config (is fd-world installed?): {e}"]
+    records: list[dict] = []
+    errors: list[str] = []
+    for source_name in adapter_sources:
+        try:
+            adapter = get_adapter(source_name)
+            if adapter is None:
+                errors.append(f"fd-world has no adapter for '{source_name}'")
+                continue
+            items = adapter.discover() or []
+        except Exception as e:  # noqa: BLE001
+            errors.append(f"fd-world adapter '{source_name}'.discover() raised: {e}")
+            continue
+        for raw in items:
+            rec = _norm_record(raw, raw.get("name") or raw.get("command"), scanner_mode)
+            if rec:
+                records.append(rec)
+    return records, errors
+
+
 def read_mcp(server_cwd: str, scanner_mode: str) -> tuple[list[dict], list[str]]:
     """Best-effort FastMCP tool introspection. Requires the provider installed + importable."""
     cwd = Path(server_cwd)
@@ -249,6 +283,8 @@ def read_provider(provider_name: str) -> tuple[list[dict], list[str]]:
         return read_dict_by_path(cfg["dict_path"](), cfg["dict_attr"], mode)
     if kind == "callable":
         return read_callable(cfg["callable_module"], cfg["callable_func"], mode)
+    if kind == "fd_world_adapter":
+        return read_fd_world_adapter(cfg["adapter_sources"], mode)
     if kind == "mcp":
         return read_mcp(cfg["server_cwd"](), mode)
     return [], [f"unknown reader kind '{kind}' for {provider_name}"]

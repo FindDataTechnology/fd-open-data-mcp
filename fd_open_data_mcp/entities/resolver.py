@@ -86,26 +86,69 @@ def _yfinance_symbol(code: str, exchange: Optional[str], market: Optional[str]) 
     return code  # US / unknown: use as-is
 
 
+def _bulk_upsert_identifiers(session: Session, rows: list[dict]) -> None:
+    """Bulk upsert identifier rows (entity_type, entity_id, source, identifier).
+
+    Uses psycopg2 ``execute_values`` for a true single-statement bulk insert when on
+    Postgres (essential for tens of thousands of rows over a remote connection);
+    falls back to per-row executemany on other dialects (e.g. SQLite in tests).
+    """
+    if not rows:
+        return
+    from datetime import datetime, timezone
+
+    now = datetime.now(timezone.utc)
+    data = [(r["entity_type"], r["entity_id"], r["source"], r["identifier"], now) for r in rows]
+    sql = """
+        INSERT INTO entity_source_identifiers (entity_type, entity_id, source, identifier, created_at)
+        VALUES %s
+        ON CONFLICT (entity_type, entity_id, source) DO UPDATE SET identifier = EXCLUDED.identifier
+    """
+    raw = session.connection().connection  # underlying DBAPI connection
+    is_postgres = type(raw).__module__.startswith("psycopg2")
+    try:
+        if is_postgres:
+            from psycopg2.extras import execute_values
+            cur = raw.cursor()
+            try:
+                execute_values(cur, sql, data)
+            finally:
+                cur.close()
+        else:
+            # sqlite / other dialects (tests): SQLAlchemy executemany with :param placeholders.
+            # SQLite >= 3.24 supports ON CONFLICT ... DO UPDATE SET ... = EXCLUDED.<col>.
+            from sqlalchemy import text
+            session.execute(text(sql.replace("%s", "(:et, :eid, :src, :id, :ts)")),
+                            [{"et": r[0], "eid": r[1], "src": r[2], "id": r[3], "ts": r[4]} for r in data])
+    except ImportError:
+        from sqlalchemy import text
+        session.execute(text(sql.replace("%s", "(:et, :eid, :src, :id, :ts)")),
+                        [{"et": r[0], "eid": r[1], "src": r[2], "id": r[3], "ts": r[4]} for r in data])
+    session.commit()
+
+
 def seed_stock_identifiers(session: Session, db_path: Optional[str] = None) -> dict:
     """Seed akshare (code as-is) + yfinance (code + exchange suffix) for all symbols."""
     from fd_open_data_mcp.entities.taxonomy import list_entities
 
     stocks = list_entities("stock", db_path)
-    ak = yf = ed = 0
+    rows: list[dict] = []
     for st in stocks:
         code = st.get("code")
         if not code:
             continue
         eid = st["id"]
-        add_identifier(session, "stock", eid, "akshare", code)
-        ak += 1
+        rows.append({"entity_type": "stock", "entity_id": eid, "source": "akshare", "identifier": code})
         yf_sym = _yfinance_symbol(code, st.get("exchange"), st.get("market"))
-        add_identifier(session, "stock", eid, "yfinance", yf_sym)
-        yf += 1
+        rows.append({"entity_type": "stock", "entity_id": eid, "source": "yfinance", "identifier": yf_sym})
         if (st.get("market") or "").upper() == "US":
-            add_identifier(session, "stock", eid, "edgar", code)
-            ed += 1
-    return {"akshare": ak, "yfinance": yf, "edgar": ed}
+            rows.append({"entity_type": "stock", "entity_id": eid, "source": "edgar", "identifier": code})
+    _bulk_upsert_identifiers(session, rows)
+    return {
+        "akshare": sum(1 for r in rows if r["source"] == "akshare"),
+        "yfinance": sum(1 for r in rows if r["source"] == "yfinance"),
+        "edgar": sum(1 for r in rows if r["source"] == "edgar"),
+    }
 
 
 def seed_country_identifiers(session: Session, db_path: Optional[str] = None) -> dict:
@@ -113,15 +156,17 @@ def seed_country_identifiers(session: Session, db_path: Optional[str] = None) ->
     from fd_open_data_mcp.entities.taxonomy import list_entities
 
     countries = list_entities("country", db_path)
-    wb = wg = 0
+    rows: list[dict] = []
     for c in countries:
         iso = c.get("iso_code")
         if not iso:
             continue
-        add_identifier(session, "country", c["id"], "worldbank", iso)
-        wb += 1
+        rows.append({"entity_type": "country", "entity_id": c["id"], "source": "worldbank", "identifier": iso})
         iso3 = _iso2_to_iso3(iso)
         if iso3:
-            add_identifier(session, "country", c["id"], "wbgapi", iso3)
-            wg += 1
-    return {"worldbank": wb, "wbgapi": wg}
+            rows.append({"entity_type": "country", "entity_id": c["id"], "source": "wbgapi", "identifier": iso3})
+    _bulk_upsert_identifiers(session, rows)
+    return {
+        "worldbank": sum(1 for r in rows if r["source"] == "worldbank"),
+        "wbgapi": sum(1 for r in rows if r["source"] == "wbgapi"),
+    }

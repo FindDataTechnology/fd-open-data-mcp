@@ -135,6 +135,74 @@ def generate_schedules_cmd():
         s.close()
 
 
+@cli.command("plan-crawl")
+@click.option("--concept-id", "concept_ids", type=int, multiple=True, required=True,
+              help="Wanted concept id (repeatable).")
+@click.option("--entity-type", required=True, help="Entity type of the scope.")
+@click.option("--entity-id", "entity_ids", type=int, multiple=True,
+              help="Explicit entity id (repeatable). Omit for a filter/all scope.")
+@click.option("--start", required=True, help="Date range start (e.g. 2024-01-01).")
+@click.option("--end", required=True, help="Date range end (e.g. 2024-12-31).")
+@click.option("--frequency", default=None, help="Cadence hint for the executor.")
+@click.option("--out", "-o", default=None, help="Write the plan to this file (JSON).")
+def plan_crawl_cmd(concept_ids, entity_type, entity_ids, start, end, frequency, out):
+    """Plan a concept crawl -> CrawlPlan (concepts in, methods out)."""
+    from fd_open_data_mcp.crawl.plan import DateRange, EntityScope
+    from fd_open_data_mcp.crawl.planner import plan_crawl as _plan
+    from fd_open_data_mcp.db import get_database
+
+    s = get_database().get_session()
+    try:
+        plan = _plan(
+            s, list(concept_ids),
+            EntityScope(entity_type=entity_type, entity_ids=list(entity_ids) or None),
+            DateRange(start=start, end=end, frequency=frequency),
+        )
+    finally:
+        s.close()
+    data = plan.model_dump(mode="json")
+    if out:
+        with open(out, "w") as f:
+            json.dump(data, f, ensure_ascii=False, indent=2, default=str)
+        click.echo(
+            f"CrawlPlan: {len(plan.wanted_concepts)} concept(s), "
+            f"{len(plan.unroutable)} unroutable, {len(plan.unmapped)} unmapped -> {out}"
+        )
+    else:
+        _echo(data)
+
+
+@cli.command("migrate-data")
+@click.argument("source", type=click.Choice([
+    "astock", "astock-hk", "astock-us",
+    "astock-balance", "astock-profit", "astock-cashflow",
+]))
+@click.option("--symbol", default=None, help="Scope to one symbol (sampling/verification).")
+@click.option("--limit", type=int, default=None, help="Cap rows per column (sampling).")
+def migrate_data_cmd(source, symbol, limit):
+    """Migrate legacy crawled data into semantic_observations (reshape, not re-crawl)."""
+    from fd_open_data_mcp.crawl.migrate import (
+        migrate_astock_daily, migrate_stock_daily, migrate_financials,
+    )
+    from fd_open_data_mcp.db import get_database
+
+    s = get_database().get_session()
+    try:
+        if source == "astock":
+            _echo(migrate_astock_daily(s, symbol=symbol, limit=limit))
+        elif source == "astock-hk":
+            _echo(migrate_stock_daily(s, "astock_hk_daily", symbol=symbol, limit=limit))
+        elif source == "astock-us":
+            _echo(migrate_stock_daily(s, "astock_us_daily", symbol=symbol, limit=limit))
+        elif source in ("astock-balance", "astock-profit", "astock-cashflow"):
+            table = {"astock-balance": "astock_balance_sheet",
+                     "astock-profit": "astock_profit_sheet",
+                     "astock-cashflow": "astock_cash_flow"}[source]
+            _echo(migrate_financials(s, table, symbol=symbol, limit=limit))
+    finally:
+        s.close()
+
+
 @cli.command("list-cnreport-rules")
 @click.option("--indicator", default=None)
 @click.option("--document-type", default=None)

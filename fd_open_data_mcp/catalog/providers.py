@@ -52,13 +52,12 @@ PROVIDERS: dict[str, dict] = {
         "source_url": "https://github.com/ranaroussi/yfinance",
     },
     "world": {
-        "label": "World Bank / CKAN / CNStats (fd-world aggregator)",
-        "reader": "callable",
-        "callable_module": "fd_world.core.registry",
-        "callable_func": "list_functions",
+        "label": "CKAN + Chinese NBS Statistics (via fd-world)",
+        "reader": "fd_world_adapter",
+        "adapter_sources": ["ckan", "cnstats"],
         "scanner_mode": "upstream-curated",
-        "upstream": "world_bank_data",
-        "source_url": "https://data.worldbank.org/",
+        "upstream": None,
+        "source_url": "https://data.gov/",
     },
     "cn-report": {
         "label": "China financial reports (fd-cn-report)",

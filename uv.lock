@@ -497,6 +497,15 @@ wheels = [
 ]
 
 [[package]]
+name = "cssselect"
+version = "1.5.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/8e/5a/6d6fcf922709391fac986f0a03ad4546f4f45b94d10aeb6c1ee041599993/cssselect-1.5.0.tar.gz", hash = "sha256:3cbe82dd7acbee9ba9e5723b5f9e4749826912f1fb31cd7f92aabed5fde15b15", size = 47598, upload-time = "2026-07-27T09:17:34.189Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/60/e9/6734502f67533a752ea8b1c8f7f227c94eecf300252ba8bf23e3e59d8a36/cssselect-1.5.0-py3-none-any.whl", hash = "sha256:1d1aded98e82bdde447ded990a191fd6916177c4f0c914fb62eccd58e2ffcdcc", size = 20797, upload-time = "2026-07-27T09:17:33.04Z" },
+]
+
+[[package]]
 name = "curl-cffi"
 version = "0.15.0"
 source = { registry = "https://pypi.org/simple" }
@@ -720,7 +729,10 @@ dependencies = [
 [package.optional-dependencies]
 data = [
     { name = "akshare" },
+    { name = "beautifulsoup4" },
     { name = "edgartools" },
+    { name = "requests" },
+    { name = "scrapling" },
     { name = "wbgapi" },
     { name = "world-bank-data" },
     { name = "yfinance" },
@@ -732,6 +744,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "akshare", marker = "extra == 'data'", specifier = ">=1.17" },
+    { name = "beautifulsoup4", marker = "extra == 'data'", specifier = ">=4.12" },
     { name = "click", specifier = ">=8.0" },
     { name = "edgartools", marker = "extra == 'data'", specifier = ">=2.0" },
     { name = "fastmcp", specifier = ">=2.0" },
@@ -740,6 +753,8 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.0" },
     { name = "pyyaml", specifier = ">=6.0" },
+    { name = "requests", marker = "extra == 'data'", specifier = ">=2.31" },
+    { name = "scrapling", marker = "extra == 'data'", specifier = ">=0.4.7" },
     { name = "sqlalchemy", specifier = ">=2.0" },
     { name = "wbgapi", marker = "extra == 'data'", specifier = ">=1.0" },
     { name = "world-bank-data", marker = "extra == 'data'", specifier = ">=0.1" },
@@ -2775,6 +2790,23 @@ wheels = [
 ]
 
 [[package]]
+name = "scrapling"
+version = "0.4.12"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cssselect" },
+    { name = "lxml" },
+    { name = "orjson" },
+    { name = "tld" },
+    { name = "typing-extensions" },
+    { name = "w3lib" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/12/a1/f1dc696450c65bd2b12e0b2b5c88de9d38ddec3f13f584c1859e12725f2b/scrapling-0.4.12.tar.gz", hash = "sha256:c6f06d0ea54208d430d47402c4e66760280718dc5b116fa99985beb7b9a517f4", size = 167523, upload-time = "2026-07-26T20:24:03.506Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/7d/64/845a2c5e4dbda0403e0662d553b94c84bd08a60f9ded5b04abcb9994e43e/scrapling-0.4.12-py3-none-any.whl", hash = "sha256:bff83185a226f14c1e50e4408a2d24c93bc6ffe4b83a904d2f11ad1ad3823a91", size = 169304, upload-time = "2026-07-26T20:24:01.958Z" },
+]
+
+[[package]]
 name = "secretstorage"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -2926,6 +2958,15 @@ wheels = [
 ]
 
 [[package]]
+name = "tld"
+version = "0.13.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/5c/5d/76b4383ac4e5b5e254e50c09807b3e13820bed6d6c11cd540264988d6802/tld-0.13.2.tar.gz", hash = "sha256:d983fa92b9d717400742fca844e29d5e18271079c7bcfabf66d01b39b4a14345", size = 467175, upload-time = "2026-03-06T23:50:34.498Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/9e/90/39a85a4b63c84213e78b3c17d22e1bf45328acf8ebb33ef93be30d0a3911/tld-0.13.2-py2.py3-none-any.whl", hash = "sha256:9b8fdbdb880e7ba65b216a4937f2c94c49a7226723783d5838fc958ac76f4e0c", size = 296743, upload-time = "2026-03-06T23:50:32.465Z" },
+]
+
+[[package]]
 name = "tomli"
 version = "2.4.1"
 source = { registry = "https://pypi.org/simple" }
@@ -3069,6 +3110,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/a2/65/b7c6c443ccc58678c91e1e973bbe2a878591538655d6e1d47f24ba1c51f3/uvicorn-0.51.0.tar.gz", hash = "sha256:f6f4b69b657c312f516dd2d268ab9ae6f254b11e4bac504f37b2ab58b24dd0b0", size = 94412, upload-time = "2026-07-08T10:59:05.962Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/45/ec/dbb7e5a6b91f86bfb9eb7d2988a2730907b6a729875b949c7f022e8b88fa/uvicorn-0.51.0-py3-none-any.whl", hash = "sha256:5d38af6cd620f2ae3849fb44fd4879e0890aa1febe8d47eb355fb45d93fe6a5b", size = 73219, upload-time = "2026-07-08T10:59:04.44Z" },
+]
+
+[[package]]
+name = "w3lib"
+version = "2.4.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/c0/91/b2eb59c2cf243de5de1e91c963655df78c015509f51297685a8c86a27b8c/w3lib-2.4.1.tar.gz", hash = "sha256:8dd69ee39ff6398d708c793abc779c334a69bac7cee1cdf71736c669ed6be864", size = 48494, upload-time = "2026-03-20T09:50:27.477Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/66/c3/f8b216cbd742e5b84c40f045204c764ccb7524d2aeab021054ec69446b0a/w3lib-2.4.1-py3-none-any.whl", hash = "sha256:40930132907e68de906a5b89331ab8c8ff4f01bd35b5539ef7896017d814138d", size = 21695, upload-time = "2026-03-20T09:50:26.187Z" },
 ]
 
 [[package]]
