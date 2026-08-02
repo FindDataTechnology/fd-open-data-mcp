@@ -44,9 +44,10 @@ htmlcov/
 .nox/
 
 # Environment variables (keep secrets private!)
-.env.local
-.env.localOverrides
-*.local.env
+.env                    # Default configuration (use .env.example as template)
+.env.local              # Local overrides with sensitive data (API keys, etc.)
+.env.localOverrides     # Additional local overrides
+*.local.env            # Any other local env files
 
 # Database files
 *.db
@@ -59,3 +60,4 @@ metadata/*.db
 # OS files
 .DS_Store
 Thumbs.db
+.env
