@@ -3,6 +3,7 @@ import pandas as pd
 import pytest
 
 import fd_open_data_mcp.fetch.dispatch as dispatch_mod
+import fd_open_data_mcp.fetch.instrumentation as instr_mod
 from fd_open_data_mcp.models import (
     Concept, ConceptBinding, EntitySourceIdentifier, Execution, FetchLog,
     Function, FunctionColumn, Schedule, SemanticObservation, Source,
@@ -44,7 +45,7 @@ def test_generate_schedules(session):
 def test_refresh_concept_success(session, monkeypatch):
     cid, _ = _setup_price_close(session)
     df = pd.DataFrame({"日期": ["2024-07-26"], "收盘": [1850.0]})
-    monkeypatch.setattr(dispatch_mod, "run_upstream", lambda s, c, p: df)
+    monkeypatch.setattr(instr_mod, "run_upstream", lambda s, c, p: df)
     r = refresh_concept(session, cid, "stock", 1, "2024-07-26")
     assert r["status"] == "success"
     assert session.query(Execution).filter_by(concept_id=cid, status="success").first() is not None
@@ -58,7 +59,7 @@ def test_refresh_concept_failure(session, monkeypatch):
     def _fail(s, c, p):
         raise dispatch_mod.FetchError("boom")
 
-    monkeypatch.setattr(dispatch_mod, "run_upstream", _fail)
+    monkeypatch.setattr(instr_mod, "run_upstream", _fail)
     r = refresh_concept(session, cid, "stock", 1, "2024-07-26")
     assert r["status"] == "failed"
     assert session.query(Execution).filter_by(concept_id=cid, status="failed").first() is not None
@@ -69,7 +70,7 @@ def test_run_schedule(session, monkeypatch):
     generate_schedules(session)
     sched = session.query(Schedule).filter_by(concept_id=cid).first()
     df = pd.DataFrame({"日期": ["2024-07-26"], "收盘": [1850.0]})
-    monkeypatch.setattr(dispatch_mod, "run_upstream", lambda s, c, p: df)
+    monkeypatch.setattr(instr_mod, "run_upstream", lambda s, c, p: df)
     refresh_concept(session, cid, "stock", 1, "2024-07-26")  # cache an obs
     r = run_schedule(session, sched.id)
     assert r["schedule_id"] == sched.id

@@ -146,6 +146,9 @@ def run_wbgapi(command: str, params: dict) -> Any:
 
 
 def run_upstream(source: str, command: str, params: dict) -> Any:
+    if source == "cn-report":
+        from fd_open_data_mcp.adapters.cnreport import run_cnreport
+        return run_cnreport(command, params)
     if source == "akshare":
         return run_akshare(command, params)
     if source == "yfinance":

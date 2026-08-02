@@ -261,5 +261,59 @@ def register_discovered_cmd():
         s.close()
 
 
+@cli.command("seed-proxy-health")
+def seed_proxy_health_cmd():
+    """Seed proxy pool, ban-rules, and rate-limits with sensible defaults."""
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.proxy.seed import seed_all
+
+    s = get_database().get_session()
+    try:
+        _echo(seed_all(s))
+    finally:
+        s.close()
+
+
+@cli.command("probe-cycle")
+def probe_cycle_cmd():
+    """Run one proxy-health probe cycle (recover OPEN circuits, retire burned)."""
+    from fd_open_data_mcp.probe.job import run_probe_cycle
+
+    _echo(run_probe_cycle())
+
+
+@cli.command("proxy-health")
+@click.option("--outcomes", type=int, default=5, help="recent outcomes per source")
+def proxy_health_cmd(outcomes):
+    """Snapshot proxy-pool + circuit states + recent outcomes (operational view).
+
+    Surfaces ``alert: sources_all_proxies_open`` when a source has no healthy
+    proxy - ops should add/rotate proxy IPs for that source."""
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.models import Proxy
+    from fd_open_data_mcp.proxy import circuit
+
+    s = get_database().get_session()
+    try:
+        proxies = [
+            {"id": p.id, "scheme": p.scheme, "ip": p.ip,
+             "status": p.status, "label": p.label}
+            for p in s.query(Proxy).all()
+        ]
+    finally:
+        s.close()
+    circuits = circuit.all_circuits()
+    outcome_snap = {}
+    for c in circuits:
+        outcome_snap[c["source"]] = circuit.recent_outcomes(c["source"], outcomes)
+    alert_sources = circuit.sources_all_proxies_open(None)
+    _echo({
+        "proxies": proxies,
+        "circuits": circuits,
+        "recent_outcomes": outcome_snap,
+        "alert": {"sources_all_proxies_open": alert_sources},
+    })
+
+
 if __name__ == "__main__":
     cli()

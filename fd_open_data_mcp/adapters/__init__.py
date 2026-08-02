@@ -72,3 +72,6 @@ def registered() -> list[tuple[str, str]]:
 # Load akshare adapters so they register at package import. Imported last so
 # `register` is defined before akshare.py imports it (no cycle).
 from fd_open_data_mcp.adapters import akshare as _akshare_adapters  # noqa: E402,F401
+
+# Load cnreport adapters
+from fd_open_data_mcp.adapters import cnreport as _cnreport_adapters  # noqa: E402,F401

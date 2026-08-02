@@ -2,6 +2,7 @@
 import pandas as pd
 
 import fd_open_data_mcp.fetch.dispatch as dispatch_mod
+import fd_open_data_mcp.fetch.instrumentation as instr_mod
 from fd_open_data_mcp.catalog.importer import import_provider
 from fd_open_data_mcp.entities.resolver import add_identifier, seed_stock_identifiers
 from fd_open_data_mcp.fetch.dispatch import read
@@ -13,7 +14,7 @@ from fd_open_data_mcp.semantic.concepts import consume_indicator_defs
 
 def test_full_pipeline(session, monkeypatch):
     df = pd.DataFrame({"日期": ["2024-07-26"], "收盘": [1850.0]})
-    monkeypatch.setattr(dispatch_mod, "run_upstream", lambda s, c, p: df)
+    monkeypatch.setattr(instr_mod, "run_upstream", lambda s, c, p: df)
 
     # 1. import akshare catalog
     import_provider("akshare", session)

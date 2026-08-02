@@ -23,6 +23,7 @@ dependencies = [
     "pandas>=2.0",
     "fd-open-data-protocol",
     "pyyaml>=6.0",
+    "redis>=5.0",
 ]
 
 [tool.uv.sources]

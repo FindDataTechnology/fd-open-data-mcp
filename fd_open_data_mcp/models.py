@@ -255,6 +255,9 @@ class FetchLog(Base):
     latency_ms = Column(Integer, nullable=True)
     status = Column(String(32), nullable=False)  # ok / 429 / timeout / 5xx / error
     detail = Column(String, nullable=True)
+    # source-proxy-health: which proxy was used and how the outcome was classified.
+    proxy_id = Column(Integer, nullable=True, index=True)
+    classification = Column(String(16), nullable=True)  # ok / transient / ban / blocked
     timestamp = Column(DateTime, nullable=False, default=_now)
 
     def toDict(self) -> dict:
@@ -263,6 +266,7 @@ class FetchLog(Base):
             "entity_type": self.entity_type, "entity_id": self.entity_id,
             "latency_ms": self.latency_ms, "status": self.status,
             "detail": self.detail,
+            "proxy_id": self.proxy_id, "classification": self.classification,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 
@@ -304,4 +308,140 @@ class Execution(Base):
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "detail": self.detail,
+        }
+
+
+# --- source-proxy-health (add-source-proxy-health) -------------------------------------
+# Reliability binds to (source, proxy_id), not source alone: a ban is an IP-level
+# event, so the same source may be fine through proxy B while proxy A is blocked.
+
+class Proxy(Base):
+    """An upstream proxy IP in the pool. `scheme='direct'` means no upstream proxy
+    (the cluster's own egress), ranked first so proxies are only used when direct is
+    banned. Permanently-banned proxies are retired; replacements start clean."""
+    __tablename__ = "proxies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scheme = Column(String(16), nullable=False)  # direct / http / https / socks5
+    ip = Column(String(64), nullable=False)      # "direct" for scheme=direct, else the IP
+    port = Column(Integer, nullable=True)
+    auth = Column(String(255), nullable=True)    # "user:pass" or None
+    status = Column(String(16), nullable=False, default="active")  # active / retired
+    label = Column(String(64), nullable=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+    retired_at = Column(DateTime, nullable=True)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "scheme": self.scheme, "ip": self.ip, "port": self.port,
+            "status": self.status, "label": self.label,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "retired_at": self.retired_at.isoformat() if self.retired_at else None,
+        }
+
+
+class SourceProxyHealth(Base):
+    """Cold aggregate of per-(source, proxy_id) circuit health. Hot state (state,
+    fail_streak, cooldown_until) is mirrored in Redis by the circuit updater; this
+    table is the auditable record + the source of `accessibility` derivation."""
+    __tablename__ = "source_proxy_health"
+    __table_args__ = (
+        UniqueConstraint("source", "proxy_id", name="uq_source_proxy"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(64), nullable=False, index=True)
+    proxy_id = Column(Integer, ForeignKey("proxies.id", ondelete="CASCADE"), nullable=False, index=True)
+    state = Column(String(16), nullable=False, default="closed")  # closed / open / half_open
+    fail_streak = Column(Integer, nullable=False, default=0)
+    success_streak = Column(Integer, nullable=False, default=0)
+    last_fetch_at = Column(DateTime, nullable=True)
+    last_success_at = Column(DateTime, nullable=True)
+    banned_at = Column(DateTime, nullable=True)
+    cooldown_until = Column(DateTime, nullable=True)
+    open_cycles = Column(Integer, nullable=False, default=0)  # K-counter for permanent retirement
+    permanent = Column(Boolean, nullable=False, default=False)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "source": self.source, "proxy_id": self.proxy_id, "state": self.state,
+            "fail_streak": self.fail_streak, "success_streak": self.success_streak,
+            "last_success_at": self.last_success_at.isoformat() if self.last_success_at else None,
+            "banned_at": self.banned_at.isoformat() if self.banned_at else None,
+            "cooldown_until": self.cooldown_until.isoformat() if self.cooldown_until else None,
+            "open_cycles": self.open_cycles, "permanent": self.permanent,
+        }
+
+
+class BanRule(Base):
+    """Per-source ban-classification rule. Matched in priority order (desc); first
+    match wins. rule_type: status (http status code/pattern), error (exception
+    message substring), body (response body regex). classification: ok / transient
+    / ban / blocked. `streak_min` gates the rule (e.g. RemoteDisconnected -> ban
+    only after streak >= 3)."""
+    __tablename__ = "ban_rules"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(64), nullable=False, index=True)
+    rule_type = Column(String(16), nullable=False)  # status / error / body
+    pattern = Column(String(255), nullable=False)
+    classification = Column(String(16), nullable=False)  # ok / transient / ban / blocked
+    streak_min = Column(Integer, nullable=False, default=0)
+    priority = Column(Integer, nullable=False, default=0)
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "source": self.source, "rule_type": self.rule_type,
+            "pattern": self.pattern, "classification": self.classification,
+            "streak_min": self.streak_min, "priority": self.priority, "enabled": self.enabled,
+        }
+
+
+class SourceRateLimit(Base):
+    """Per-source politeness rate limit (token bucket). Distinct from refresh
+    frequency scheduling (scheduled-refresh). Enforced at fetch time against
+    Redis `rate:{source}:{proxy_id}`."""
+    __tablename__ = "source_rate_limits"
+    __table_args__ = (
+        UniqueConstraint("source", name="uq_source_rate_limit"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(64), nullable=False, index=True)
+    max_qps = Column(Float, nullable=False, default=1.0)
+    max_concurrent = Column(Integer, nullable=False, default=4)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "source": self.source, "max_qps": self.max_qps,
+            "max_concurrent": self.max_concurrent,
+        }
+
+
+class SourceProbe(Base):
+    """Per-source probe command used by the probe job to test whether a banned
+    ``(source, proxy_id)`` has recovered. Data-driven (not code) so onboarding a
+    new source is a row insert, not a code change. ``params`` is a JSON dict of
+    the upstream call's kwargs (a cheap, known-good fetch - the result is not
+    used, only whether the call is classified as a ban)."""
+    __tablename__ = "source_probes"
+    __table_args__ = (
+        UniqueConstraint("source", name="uq_source_probe"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source = Column(String(64), nullable=False, index=True)
+    command = Column(String(128), nullable=False)
+    params = Column(JSON, nullable=False, default=dict)
+    enabled = Column(Boolean, nullable=False, default=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "source": self.source, "command": self.command,
+            "params": self.params, "enabled": self.enabled,
         }

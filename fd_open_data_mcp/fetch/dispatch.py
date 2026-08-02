@@ -24,7 +24,8 @@ from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.entities.resolver import check_applicability, resolve_identifier
 from fd_open_data_mcp.fetch.cache import is_stale, read_cache, write_cache
-from fd_open_data_mcp.fetch.runner import FetchError, returned_columns, run_upstream
+from fd_open_data_mcp.fetch.instrumentation import SourceUnavailable, instrumented_fetch
+from fd_open_data_mcp.fetch.runner import FetchError, returned_columns
 from fd_open_data_mcp.models import Concept, ConceptBinding, Function
 from fd_open_data_mcp.ranking.scorer import rank_sources_for_concept, record_fetch_outcome
 from fd_open_data_mcp.semantic.bindings import dispatch_candidates, promote_on_sample
@@ -138,7 +139,19 @@ def dispatch_one(
             params = _build_params(fn, identifier, date, binding)
             t0 = datetime.now(timezone.utc)
             try:
-                result = run_upstream(source, fn.command, params)
+                # Routed through the shared instrumentation: per-fetch proxy
+                # selection + ban classification + circuit recording. Raises
+                # SourceUnavailable when every proxy for this source is OPEN ->
+                # fail over to the next source (real-time, per-fetch).
+                result = instrumented_fetch(
+                    source, fn.command, params,
+                    session=session,
+                    concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
+                )
+            except SourceUnavailable:
+                # all proxies for this source are down -> next source in the ranked chain
+                record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
+                continue
             except FetchError:
                 record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
                 continue

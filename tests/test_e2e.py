@@ -6,6 +6,7 @@ import pandas as pd
 import pytest
 
 import fd_open_data_mcp.fetch.dispatch as dispatch_mod
+import fd_open_data_mcp.fetch.instrumentation as instr_mod
 from fd_open_data_mcp.fetch.dispatch import read
 from fd_open_data_mcp.models import (
     Concept, ConceptBinding, EntitySourceIdentifier, Function, FunctionColumn, Source,
@@ -44,7 +45,7 @@ def test_read_dispatches_then_caches(session, monkeypatch):
         calls.append((source, command, params))
         return df
 
-    monkeypatch.setattr(dispatch_mod, "run_upstream", fake_run)
+    monkeypatch.setattr(instr_mod, "run_upstream", fake_run)
 
     res = read(session, c.id, "stock", 1, ["2024-07-26"])
     assert res[0]["value"] == 1850.0
@@ -79,7 +80,7 @@ def test_read_failover_on_primary_failure(session, monkeypatch):
             raise dispatch_mod.FetchError("429")
         return df
 
-    monkeypatch.setattr(dispatch_mod, "run_upstream", fake_run)
+    monkeypatch.setattr(instr_mod, "run_upstream", fake_run)
 
     res = read(session, c.id, "stock", 1, ["2024-07-26"])
     assert res[0]["value"] == 1850.0

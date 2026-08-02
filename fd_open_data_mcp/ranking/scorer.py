@@ -99,6 +99,14 @@ def record_fetch_outcome(
     else:
         row.fail_count += 1
         row.accessibility = max(ACCESS_MIN, row.accessibility - FAIL_STEP)
+    # source-proxy-health: if every registered proxy for this source is OPEN,
+    # floor accessibility so the next dispatch ranks a healthy source higher.
+    try:
+        from fd_open_data_mcp.proxy.pool import all_proxies_unhealthy
+        if all_proxies_unhealthy(session, source):
+            row.accessibility = ACCESS_MIN
+    except Exception:  # noqa: BLE001 - never let ranking break on proxy check
+        pass
     session.commit()
 
 
