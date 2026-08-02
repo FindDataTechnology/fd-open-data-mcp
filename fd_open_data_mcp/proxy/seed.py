@@ -44,6 +44,19 @@ BAN_RULES: dict[str, list[tuple]] = {
         ("status", "429", "ban", 0, 100),
         ("status", "5xx", "transient", 0, 90),
     ],
+    # nbs-gdp is the ONLY one of the 21 "industry" runners that actually hits a
+    # network (data.stats.gov.cn via requests.post). The other 20 are mock stubs
+    # returning hardcoded DataFrames - no network => no bans => no proxy-health
+    # config needed until they're implemented for real.
+    "nbs-gdp": [
+        ("status", "429", "ban", 0, 100),
+        ("status", "403", "ban", 0, 100),
+        ("status", "404", "transient", 0, 95),   # endpoint moved, not an IP ban
+        ("status", "5xx", "transient", 0, 90),
+        ("error", "RemoteDisconnected", "ban", 3, 80),
+        ("error", "ConnectionError", "ban", 3, 80),
+        ("error", "timeout", "transient", 0, 70),
+    ],
 }
 
 # source -> (max_qps, max_concurrent). Conservative for IP-rate-limited sources.
@@ -53,16 +66,20 @@ RATE_LIMITS: dict[str, tuple[float, int]] = {
     "edgar": (0.5, 2),
     "worldbank": (2.0, 4),
     "wbgapi": (2.0, 4),
+    "nbs-gdp": (0.5, 2),   # gov site (data.stats.gov.cn) - polite
 }
 
 # source -> (command, params) for the probe job's recovery probe. A cheap,
 # known-good fetch; the result is unused (only whether it's classified as a ban).
 PROBES: dict[str, tuple[str, dict]] = {
-    "akshare": ("stock_zh_a_hist", {
+    # Use the Tencent endpoint (stock_zh_a_hist_tx) as the probe - it is the
+    # reliable path on overseas IPs (eastmoney stock_zh_a_hist gets IP-banned).
+    "akshare": ("stock_zh_a_hist_tx", {
         "symbol": "000001", "period": "daily",
         "start_date": "20260701", "end_date": "20260701", "adjust": "qfq",
     }),
     "yfinance": ("ticker_history", {"symbol": "AAPL", "period": "1d"}),
+    "nbs-gdp": ("get_gdp_quarterly", {"start_year": 2024}),
 }
 
 

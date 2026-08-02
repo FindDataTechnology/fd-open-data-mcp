@@ -190,15 +190,9 @@ def run_upstream(source: str, command: str, params: dict) -> Any:
     if source == "fin_platforms":
         from fd_open_data_mcp.adapters.fin_platforms import run_fin_platforms
         return run_fin_platforms(command, params)
-        from fd_open_data_mcp.adapters.cme_agricultural import run_cme_agricultural
-        return run_cme_agricultural(command, params)
-    # TODO: Add remaining adapters (chemicals, electronics, nonferrous, flowers_kifc, fin_platforms)
-        from fd_open_data_mcp.adapters.shfe_futures import run_shfe_futures
-        return run_shfe_futures(command, params)
     if source == "sac-securities":
         from fd_open_data_mcp.adapters.sac_securities import run_sac_securities
         return run_sac_securities(command, params)
-    # TODO: Add remaining adapters (agriculture, chemicals, electronics, etc.)
     raise FetchError(f"no runner for source {source}")
 
 

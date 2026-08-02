@@ -133,7 +133,7 @@ def record_outcome(source: str, proxy_id: int, classification: str) -> dict:
         mapping["cooldown_until"] = str(st["cooldown_until"])
     if st.get("banned_at"):
         mapping["banned_at"] = st["banned_at"]
-    r.hset(k, mapping=map(str, {k: v for k, v in mapping.items() if v is not None}))
+    r.hset(k, mapping={k: str(v) for k, v in mapping.items() if v is not None})
     return st
 
 
@@ -173,7 +173,7 @@ def probe_transition(source: str, proxy_id: int, probe_ok: bool) -> dict:
     }
     if st.get("cooldown_until"):
         mapping["cooldown_until"] = str(st["cooldown_until"])
-    r.hset(_key(source, proxy_id), mapping=map(str, {k: v for k, v in mapping.items() if v is not None}))
+    r.hset(_key(source, proxy_id), mapping={k: str(v) for k, v in mapping.items() if v is not None})
     return st
 
 

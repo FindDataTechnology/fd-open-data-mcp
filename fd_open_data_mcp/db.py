@@ -22,6 +22,15 @@ import os
 from pathlib import Path
 from typing import Optional
 
+# Load environment variables from .env files
+try:
+    from dotenv import load_dotenv
+    load_dotenv(dotenv_path=".env.local", override=True)
+    load_dotenv(dotenv_path=".env", override=False)
+except ImportError:
+    # python-dotenv not installed, skip loading
+    pass
+
 from sqlalchemy import Engine, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
 

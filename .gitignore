@@ -1,12 +1,61 @@
+# Python
 __pycache__/
 *.py[cod]
-*.egg-info/
-.eggs/
+*$py.class
+*.so
+.Python
 build/
+develop-eggs/
 dist/
-.venv/
-fd_open_data_mcp/metadata/*.db
-fd_open_data_mcp/metadata/*.db-wal
-fd_open_data_mcp/metadata/*.db-shm
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.venv
+venv/
+ENV/
+env/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# Testing
 .pytest_cache/
 .coverage
+htmlcov/
+.tox/
+.nox/
+
+# Environment variables (keep secrets private!)
+.env.local
+.env.localOverrides
+*.local.env
+
+# Database files
+*.db
+*.db-journal
+metadata/*.db
+
+# Logs
+*.log
+
+# OS files
+.DS_Store
+Thumbs.db

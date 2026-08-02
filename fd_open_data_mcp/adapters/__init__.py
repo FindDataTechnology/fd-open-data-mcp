@@ -73,5 +73,11 @@ def registered() -> list[tuple[str, str]]:
 # `register` is defined before akshare.py imports it (no cycle).
 from fd_open_data_mcp.adapters import akshare as _akshare_adapters  # noqa: E402,F401
 
-# Load cnreport adapters
-from fd_open_data_mcp.adapters import cnreport as _cnreport_adapters  # noqa: E402,F401
+# Load cnreport adapters (optional - requires fd-cn-report/cnreport_tools).
+# Guarded so environments without fd-cn-report (e.g. the scraw crawler image)
+# don't fail to import the whole adapters package; the cn-report source is
+# simply unavailable there.
+try:
+    from fd_open_data_mcp.adapters import cnreport as _cnreport_adapters  # noqa: E402,F401
+except ImportError:
+    pass
