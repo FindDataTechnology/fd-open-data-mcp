@@ -57,3 +57,10 @@ version = { attr = "fd_open_data_mcp.__version__" }
 
 [tool.setuptools.packages.find]
 include = ["fd_open_data_mcp", "fd_open_data_mcp.*"]
+
+[project.urls]
+Homepage = "https://github.com/FindDataTechnology/fd-open-data-mcp"
+Repository = "https://github.com/FindDataTechnology/fd-open-data-mcp"
+Documentation = "https://github.com/FindDataTechnology/fd-open-data-mcp#readme"
+Issues = "https://github.com/FindDataTechnology/fd-open-data-mcp/issues"
+Changelog = "https://github.com/FindDataTechnology/fd-open-data-mcp/releases"
