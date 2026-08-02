@@ -24,6 +24,7 @@ def _get_config() -> dict:
         "proxy_server": os.environ.get("PLAYWRIGHT_PROXY_SERVER"),
         "proxy_username": os.environ.get("PLAYWRIGHT_PROXY_USERNAME"),
         "proxy_password": os.environ.get("PLAYWRIGHT_PROXY_PASSWORD"),
+        "cdp_url": os.environ.get("BROWSER_CDP_URL"),  # ponytail: remote browser support
     }
 
 
@@ -46,29 +47,37 @@ def get_browser():
         )
     
     config = _get_config()
-    logger.info(f"Starting Playwright browser: {config['browser_type']}")
-    
+
+    # ponytail: remote browser if BROWSER_CDP_URL is set, else local
+    if config["cdp_url"]:
+        logger.info(f"Connecting to remote browser via CDP: {config['cdp_url']}")
+    else:
+        logger.info(f"Starting local Playwright browser: {config['browser_type']}")
+
     with sync_playwright() as p:
         # Select browser type
         browser_type = getattr(p, config["browser_type"])
-        
-        # Build launch options
-        launch_opts = {
-            "headless": config["headless"],
-            "slow_mo": config["slow_mo"],
-        }
-        
-        # Add proxy if configured
-        if config["proxy_server"]:
-            proxy_opts = {"server": config["proxy_server"]}
-            if config["proxy_username"]:
-                proxy_opts["username"] = config["proxy_username"]
-                proxy_opts["password"] = config["proxy_password"]
-            launch_opts["proxy"] = proxy_opts
-        
-        # Launch browser
-        browser = browser_type.launch(**launch_opts)
-        
+
+        if config["cdp_url"]:
+            # Connect to remote browser via CDP
+            browser = browser_type.connect_over_cdp(config["cdp_url"])
+        else:
+            # Launch local browser
+            launch_opts = {
+                "headless": config["headless"],
+                "slow_mo": config["slow_mo"],
+            }
+
+            # Add proxy if configured
+            if config["proxy_server"]:
+                proxy_opts = {"server": config["proxy_server"]}
+                if config["proxy_username"]:
+                    proxy_opts["username"] = config["proxy_username"]
+                    proxy_opts["password"] = config["proxy_password"]
+                launch_opts["proxy"] = proxy_opts
+
+            browser = browser_type.launch(**launch_opts)
+
         try:
             yield browser
         finally:
