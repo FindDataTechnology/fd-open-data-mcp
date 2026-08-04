@@ -27,25 +27,36 @@ from fd_open_data_mcp.models import BanRule
 
 logger = logging.getLogger(__name__)
 
-# In-memory rule cache: source -> (loaded_at, [rules]). TTL 60s so rule edits
-# propagate without a restart.
-_CACHE: dict[str, tuple[float, list[BanRule]]] = {}
+# In-memory rule cache: source -> (loaded_at, [dict]). TTL 60s so rule edits
+# propagate without a restart. We cache plain dicts to avoid ORM detached instance
+# errors when the DB session closes after use.
+_CACHE: dict[str, tuple[float, list[dict]]] = {}
 _TTL = 60.0
 
 
-def _load_rules(session: Session, source: str) -> list[BanRule]:
+def _load_rules(session: Session, source: str) -> list[dict]:
     now = time.time()
     cached = _CACHE.get(source)
     if cached and now - cached[0] < _TTL:
         return cached[1]
-    rules = (
+    ban_rules = (
         session.query(BanRule)
         .filter(BanRule.source == source, BanRule.enabled.is_(True))
         .order_by(BanRule.priority.desc())
         .all()
     )
-    _CACHE[source] = (now, rules)
-    return rules
+    # Convert ORM objects to plain dicts to avoid detached instance errors
+    rules_dicts = [
+        {
+            "streak_min": br.streak_min,
+            "rule_type": br.rule_type,
+            "pattern": br.pattern,
+            "classification": br.classification,
+        }
+        for br in ban_rules
+    ]
+    _CACHE[source] = (now, rules_dicts)
+    return rules_dicts
 
 
 def _status_matches(pattern: str, http_status: Optional[int]) -> bool:
@@ -89,15 +100,15 @@ def classify(
     """Classify an outcome. Returns ok / transient / ban / blocked."""
     rules = _load_rules(session, source)
     for rule in rules:
-        if rule.streak_min and fail_streak < rule.streak_min:
+        if rule["streak_min"] and fail_streak < rule["streak_min"]:
             continue
         matched = (
-            (rule.rule_type == "status" and _status_matches(rule.pattern, http_status))
-            or (rule.rule_type == "error" and _error_matches(rule.pattern, error))
-            or (rule.rule_type == "body" and _body_matches(rule.pattern, body))
+            (rule["rule_type"] == "status" and _status_matches(rule["pattern"], http_status))
+            or (rule["rule_type"] == "error" and _error_matches(rule["pattern"], error))
+            or (rule["rule_type"] == "body" and _body_matches(rule["pattern"], body))
         )
         if matched:
-            return rule.classification
+            return rule["classification"]
     # default
     if http_status is not None and 200 <= http_status < 300:
         return "ok"

@@ -35,6 +35,7 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
+from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
@@ -193,6 +194,67 @@ class EntitySourceIdentifier(Base):
         return {
             "entity_type": self.entity_type, "entity_id": self.entity_id,
             "source": self.source, "identifier": self.identifier,
+        }
+
+
+# --- Entity Graph (Phase 2: add-entity-graph-vector-search) ------------------------
+
+class Entity(Base):
+    """Unified entity registry for all entity types.
+
+    Stores companies, stocks, countries, cities, industries as a single table
+    with entity_type discriminator. The graph edges go via entity_relationships.
+    """
+    __tablename__ = "entities"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_type = Column(String(32), nullable=False, index=True)
+    code = Column(String(128), nullable=False)
+    name_en = Column(String(255), nullable=True)
+    name_zh = Column(String(255), nullable=True)
+    metadata_json = Column(JSONB, nullable=True)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    __table_args__ = (
+        UniqueConstraint("entity_type", "code", name="uq_entity_type_code"),
+    )
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "entity_type": self.entity_type, "code": self.code,
+            "name_en": self.name_en, "name_zh": self.name_zh,
+            "metadata": self.metadata_json, "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class EntityRelationship(Base):
+    """Entity-to-entity relationships with temporal validity.
+
+    Supports any relation type (listed_as, operates_in, located_in, member_of, etc.).
+    Temporal columns allow tracking changes over time.
+    """
+    __tablename__ = "entity_relationships"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_id = Column(Integer, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True)
+    relation_type = Column(String(64), nullable=False, index=True)
+    target_id = Column(Integer, ForeignKey("entities.id", ondelete="CASCADE"), nullable=False, index=True)
+    valid_from = Column(DateTime, nullable=True)
+    valid_to = Column(DateTime, nullable=True)
+    metadata_json = Column(JSONB, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+    __table_args__ = (
+        UniqueConstraint("source_id", "relation_type", "target_id", "valid_from", name="uq_rel_edges"),
+    )
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "source_id": self.source_id, "relation_type": self.relation_type,
+            "target_id": self.target_id,
+            "valid_from": self.valid_from.isoformat() if self.valid_from else None,
+            "valid_to": self.valid_to.isoformat() if self.valid_to else None,
+            "metadata": self.metadata_json,
         }
 
 

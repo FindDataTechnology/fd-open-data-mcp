@@ -1,5 +1,15 @@
 """Pytest fixtures: each test gets a fresh isolated SQLite DB."""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+
 import pytest
+
+# Add project root to Python path for local imports (for smoke tests)
+project_root = Path(__file__).parent.parent
+if str(project_root) not in sys.path:
+    sys.path.insert(0, str(project_root))
 
 from fd_open_data_mcp import db as dbmod
 

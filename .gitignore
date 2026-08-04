@@ -48,6 +48,16 @@ htmlcov/
 .env.local              # Local overrides with sensitive data (API keys, etc.)
 .env.localOverrides     # Additional local overrides
 *.local.env            # Any other local env files
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# Environment variables (keep secrets private!)
+.env                    # Default configuration (use .env.example as template)
+.env.local              # Local overrides with sensitive data (API keys, etc.)
+.env.localOverrides     # Additional local overrides
+*.local.env            # Any other local env files
 
 # Database files
 *.db

@@ -1,0 +1,2 @@
+include .env.example
+recursive-include fd_open_data_mcp/catalog/seeds *.json

@@ -33,6 +33,10 @@ def _p(*parts: str) -> str:
 
 # reader kinds: "db" (shipped registry.db), "dict" (in-code REGISTRY dict),
 # "callable" (a list_functions() function), "mcp" (FastMCP tool introspection).
+#
+# Note: Some datasources use this PROVIDERS dict + custom readers (legacy path),
+# while others use protocol-compliant CATALOG declarations discovered via
+# discover_datasources() (new path). This hybrid architecture supports gradual migration.
 PROVIDERS: dict[str, dict] = {
     "akshare": {
         "label": "AKShare (Chinese financial data)",

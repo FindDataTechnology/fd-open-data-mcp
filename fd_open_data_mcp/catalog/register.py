@@ -12,8 +12,115 @@ from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.catalog.enrich import derive_meaning
 from fd_open_data_mcp.models import (
-    Concept, ConceptBinding, Function, FunctionColumn, Source,
+    Concept, ConceptBinding, Entity, EntityRelationship, Function, FunctionColumn, Source,
 )
+
+
+def upsert_entity(session: Session, entity_spec: Any, source_name: str = None) -> tuple[Entity, str]:
+    """Upsert an Entity from protocol schema into the database.
+
+    Args:
+        session: SQLAlchemy session
+        entity_spec: Entity object from fd_open_data_protocol.schema
+        source_name: Optional source name for metadata tracking
+
+    Returns:
+        Tuple of (Entity instance, status: "created"|"updated")
+    """
+    # Find existing entity by (entity_type, code)
+    entity = session.query(Entity).filter_by(
+        entity_type=entity_spec.entity_type,
+        code=entity_spec.code,
+    ).first()
+
+    if entity is None:
+        # Create new entity
+        entity = Entity(
+            entity_type=entity_spec.entity_type,
+            code=entity_spec.code,
+            name_en=entity_spec.name_en,
+            name_zh=entity_spec.name_zh,
+            metadata_json=entity_spec.metadata or {},
+        )
+        if source_name:
+            entity.metadata_json["source"] = source_name
+        session.add(entity)
+        session.flush()
+        return entity, "created"
+    else:
+        # Update existing entity
+        updated = False
+        if entity_spec.name_en and entity.name_en != entity_spec.name_en:
+            entity.name_en = entity_spec.name_en
+            updated = True
+        if entity_spec.name_zh and entity.name_zh != entity_spec.name_zh:
+            entity.name_zh = entity_spec.name_zh
+            updated = True
+
+        # Merge metadata
+        if entity_spec.metadata:
+            current_metadata = entity.metadata_json or {}
+            current_metadata.update(entity_spec.metadata)
+            if source_name:
+                current_metadata["source"] = source_name
+            entity.metadata_json = current_metadata
+            updated = True
+
+        return entity, "updated" if updated else "unchanged"
+
+
+def upsert_entity_relationship(
+    session: Session,
+    source_entity: Entity,
+    relationship_spec: Any,
+) -> tuple[EntityRelationship, str]:
+    """Upsert an EntityRelationship from protocol schema into the database.
+
+    Args:
+        session: SQLAlchemy session
+        source_entity: Source Entity instance
+        relationship_spec: EntityRelationship object from fd_open_data_protocol.schema
+
+    Returns:
+        Tuple of (EntityRelationship instance, status: "created"|"updated"|"skipped")
+    """
+    # Find target entity
+    target_entity = session.query(Entity).filter_by(
+        entity_type=relationship_spec.target_entity_type,
+        code=relationship_spec.target_code,
+    ).first()
+
+    if target_entity is None:
+        # Target entity doesn't exist yet - skip this relationship
+        # (it will be created when the target entity is registered)
+        return None, "skipped"
+
+    # Check if relationship already exists
+    rel = session.query(EntityRelationship).filter_by(
+        source_id=source_entity.id,
+        relation_type=relationship_spec.relation_type,
+        target_id=target_entity.id,
+    ).first()
+
+    if rel is None:
+        # Create new relationship
+        rel = EntityRelationship(
+            source_id=source_entity.id,
+            relation_type=relationship_spec.relation_type,
+            target_id=target_entity.id,
+            metadata_json=relationship_spec.metadata or {},
+        )
+        session.add(rel)
+        session.flush()
+        return rel, "created"
+    else:
+        # Update metadata if provided
+        if relationship_spec.metadata:
+            current_metadata = rel.metadata_json or {}
+            current_metadata.update(relationship_spec.metadata)
+            rel.metadata_json = current_metadata
+            return rel, "updated"
+        return rel, "unchanged"
 
 
 def register_datasource(manifest: Any, session: Session) -> dict:
@@ -112,10 +219,77 @@ def register_datasource(manifest: Any, session: Session) -> dict:
             ))
             binding_count += 1
 
+    # entities -> entities table (coverage declarations)
+    entity_count = 0
+    for espec in manifest.entities:
+        # For explicit coverage, create individual entity records
+        # For universe coverage, we just note that this source covers this entity type
+        if espec.coverage == "explicit" and espec.codes:
+            for code in espec.codes:
+                entity = session.query(Entity).filter_by(
+                    entity_type=espec.entity_type, code=code,
+                ).first()
+                if entity is None:
+                    entity = Entity(
+                        entity_type=espec.entity_type, code=code,
+                        metadata_json={"source": manifest.name, "coverage": "explicit"},
+                    )
+                    session.add(entity)
+                    session.flush()
+                    entity_count += 1
+                else:
+                    # Update metadata to note this source covers it
+                    metadata = entity.metadata_json or {}
+                    metadata["source"] = manifest.name
+                    entity.metadata_json = metadata
+
+    # entity_definitions -> entities table (canonical entity metadata)
+    entity_def_count = 0
+    relationship_count = 0
+    entity_map: dict[tuple[str, str], Entity] = {}  # (entity_type, code) -> Entity
+
+    if hasattr(manifest, 'entity_definitions') and manifest.entity_definitions:
+        # First pass: create/update all entities
+        for entity_spec in manifest.entity_definitions:
+            entity, status = upsert_entity(session, entity_spec, manifest.name)
+            entity_map[(entity_spec.entity_type, entity_spec.code)] = entity
+            if status == "created":
+                entity_def_count += 1
+
+        # Second pass: create relationships (after all entities exist)
+        for entity_spec in manifest.entity_definitions:
+            if entity_spec.relationships:
+                source_entity = entity_map.get((entity_spec.entity_type, entity_spec.code))
+                if source_entity:
+                    for rel_spec in entity_spec.relationships:
+                        rel, rel_status = upsert_entity_relationship(session, source_entity, rel_spec)
+                        if rel_status == "created":
+                            relationship_count += 1
+
+    # relationships -> store resolver info in source metadata
+    # We don't create relationship records yet - we just note that this source
+    # can resolve these relationships via the resolver_module
+    if manifest.relationships:
+        source_metadata = src.metadata_json or {} if hasattr(src, 'metadata_json') else {}
+        source_metadata["relationship_resolvers"] = [
+            {
+                "relation_type": rspec.relation_type,
+                "source_entity_type": rspec.source_entity_type,
+                "target_entity_type": rspec.target_entity_type,
+                "resolver_module": rspec.resolver_module,
+            }
+            for rspec in manifest.relationships
+        ]
+        if hasattr(src, 'metadata_json'):
+            src.metadata_json = source_metadata
+
     session.commit()
     return {
         "name": manifest.name, "functions": fn_count, "columns": col_count,
         "concepts": concept_count, "bindings": binding_count,
+        "entities": entity_count + entity_def_count,
+        "entity_definitions": entity_def_count,
+        "relationships": relationship_count,
     }
 
 
