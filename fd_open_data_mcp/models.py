@@ -35,10 +35,15 @@ from sqlalchemy import (
     String,
     UniqueConstraint,
 )
-from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
 from sqlalchemy.orm import declarative_base, relationship
 
 Base = declarative_base()
+
+# Postgres stores JSONB; SQLite (unit tests) can't compile that type, so the
+# shared alias degrades to generic JSON there. One instance reused across
+# columns is fine — Column copies the type on attach.
+JSONB = _PG_JSONB().with_variant(JSON(), "sqlite")
 
 
 def _now() -> datetime:
@@ -79,17 +84,28 @@ class Function(Base):
     verified = Column(Boolean, nullable=False, default=True)
     scanner_mode = Column(String(32), nullable=False, default="upstream-curated")
     frequency = Column(String(32), nullable=True)  # daily/weekly/monthly/yearly/irregular/unknown
+    real_sources = Column(JSONB, nullable=True)  # real data sources this function calls
+    bulk_history = Column(Boolean, nullable=False, default=False)  # one call returns the full dated series (series-mode crawl)
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
     source = relationship("Source", back_populates="functions")
     columns = relationship("FunctionColumn", back_populates="function", cascade="all, delete-orphan", lazy="selectin")
 
+    def get_primary_real_source(self) -> Optional[dict]:
+        """Get the primary real source (priority=0) or None if not declared."""
+        if not self.real_sources:
+            return None
+        # Sort by priority and return the first one
+        sorted_sources = sorted(self.real_sources, key=lambda x: x.get("priority", 0))
+        return sorted_sources[0] if sorted_sources else None
+
     def toDict(self) -> dict:
         return {
             "command": self.command, "category": self.category, "description": self.description,
             "parameters": self.parameters or [], "verified": self.verified,
             "scanner_mode": self.scanner_mode, "frequency": self.frequency,
+            "real_sources": self.real_sources, "bulk_history": self.bulk_history,
             "columns": [c.toDict() for c in self.columns] if self.columns else [],
         }
 
@@ -142,6 +158,7 @@ class Concept(Base):
     entity_type = Column(String(32), nullable=False)  # country/city/stock/fund/bond/index/future/crypto/organization/industry
     source = Column(String(64), nullable=True)  # origin indicator_def source
     verified = Column(Boolean, nullable=False, default=True)
+    deprecated = Column(Boolean, nullable=False, default=False)  # retired duplicate; excluded from discovery + dispatch
     created_at = Column(DateTime, default=_now)
 
     bindings = relationship("ConceptBinding", back_populates="concept", cascade="all, delete-orphan")
@@ -152,6 +169,7 @@ class Concept(Base):
             "category": self.category, "unit": self.unit, "measure": self.measure,
             "frequency": self.frequency,
             "entity_type": self.entity_type, "source": self.source, "verified": self.verified,
+            "deprecated": self.deprecated,
         }
 
 
@@ -320,6 +338,7 @@ class FetchLog(Base):
     # source-proxy-health: which proxy was used and how the outcome was classified.
     proxy_id = Column(Integer, nullable=True, index=True)
     classification = Column(String(16), nullable=True)  # ok / transient / ban / blocked
+    real_source = Column(String(64), nullable=True, index=True)  # real data source (e.g., "eastmoney")
     timestamp = Column(DateTime, nullable=False, default=_now)
 
     def toDict(self) -> dict:
@@ -327,6 +346,7 @@ class FetchLog(Base):
             "source": self.source, "concept_id": self.concept_id,
             "entity_type": self.entity_type, "entity_id": self.entity_id,
             "latency_ms": self.latency_ms, "status": self.status,
+            "real_source": self.real_source,
             "detail": self.detail,
             "proxy_id": self.proxy_id, "classification": self.classification,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
@@ -367,6 +387,70 @@ class Execution(Base):
         return {
             "id": self.id, "schedule_id": self.schedule_id, "concept_id": self.concept_id,
             "status": self.status,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "detail": self.detail,
+        }
+
+
+# --- crawl-control-center (add-fund-crawl-control-center) ---------------------------
+# A crawl policy is a *scope* statement: which concepts x which entities x which
+# date policy x which frequency get crawled, on what cron, in which executor mode.
+# The reconciler (refresh/reconciler.py) executes due policies; the legacy
+# `schedules` table above stays dormant (concept-only, no executor binding).
+
+class CrawlPolicy(Base):
+    __tablename__ = "crawl_policies"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), unique=True, nullable=False, index=True)
+    enabled = Column(Boolean, nullable=False, default=True)
+    concept_ids = Column(JSONB, nullable=False)            # explicit concept id list
+    entity_type = Column(String(32), nullable=False)
+    entity_ids = Column(JSONB, nullable=True)              # NULL = all entities of the type
+    date_policy = Column(JSONB, nullable=False)            # {mode: since_last|trailing|explicit, days?, start?, end?}
+    frequency = Column(String(32), nullable=False, default="daily")   # plan hint: daily/weekly/monthly/quarterly
+    mode = Column(String(16), nullable=False, default="per_date")     # series | per_date
+    source_filter = Column(JSONB, nullable=True)           # NULL = all ranked sources
+    force = Column(Boolean, nullable=False, default=False)  # override POLICY_MAX_FETCHES guardrail
+    cron_expr = Column(String(128), nullable=False)
+    timezone = Column(String(64), nullable=False, default="UTC")
+    last_run_at = Column(DateTime, nullable=True)
+    created_at = Column(DateTime, default=_now)
+
+    runs = relationship("PolicyRun", back_populates="policy", cascade="all, delete-orphan")
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "name": self.name, "enabled": self.enabled,
+            "concept_ids": self.concept_ids, "entity_type": self.entity_type,
+            "entity_ids": self.entity_ids, "date_policy": self.date_policy,
+            "frequency": self.frequency, "mode": self.mode,
+            "source_filter": self.source_filter, "force": self.force,
+            "cron_expr": self.cron_expr, "timezone": self.timezone,
+            "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class PolicyRun(Base):
+    __tablename__ = "policy_runs"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    policy_id = Column(Integer, ForeignKey("crawl_policies.id", ondelete="CASCADE"), nullable=False, index=True)
+    status = Column(String(32), nullable=False, default="running")  # running / success / failed / refused
+    plan_json = Column(JSONB, nullable=True)               # the compiled CrawlPlan
+    job_ref = Column(String(255), nullable=True)           # scrapyd job id or k8s Job name
+    started_at = Column(DateTime, nullable=False, default=_now)
+    finished_at = Column(DateTime, nullable=True)
+    detail = Column(String, nullable=True)
+
+    policy = relationship("CrawlPolicy", back_populates="runs")
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "policy_id": self.policy_id, "status": self.status,
+            "plan_json": self.plan_json, "job_ref": self.job_ref,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "detail": self.detail,

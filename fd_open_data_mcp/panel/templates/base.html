@@ -1,0 +1,48 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% block title %}Crawl Control Center{% endblock %}</title>
+  <script src="/panel/static/htmx.min.js"></script>
+  <style>
+    :root { --accent:#2563eb; --muted:#6b7280; --bg:#f8fafc; }
+    * { box-sizing:border-box; }
+    body { font-family:system-ui,-apple-system,sans-serif; margin:0; background:var(--bg); color:#1e293b; }
+    nav { background:#0f172a; color:#fff; padding:.6rem 1rem; display:flex; gap:1.2rem; align-items:center; }
+    nav a { color:#cbd5e1; text-decoration:none; font-size:.95rem; }
+    nav a:hover { color:#fff; }
+    main { max-width:1100px; margin:1.5rem auto; padding:0 1rem; }
+    table { width:100%; border-collapse:collapse; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.08); }
+    th,td { text-align:left; padding:.5rem .7rem; border-bottom:1px solid #e2e8f0; font-size:.9rem; }
+    th { background:#f1f5f9; }
+    a.btn,button.btn,button.link { color:var(--accent); text-decoration:none; cursor:pointer; background:none; border:none; font-size:.9rem; padding:0; }
+    .badge { display:inline-block; padding:.1rem .5rem; border-radius:999px; font-size:.75rem; }
+    .running{background:#dbeafe;color:#1d4ed8} .success{background:#dcfce7;color:#166534}
+    .failed{background:#fee2e2;color:#991b1b} .refused{background:#fef3c7;color:#92400e}
+    form fieldset { border:1px solid #e2e8f0; border-radius:8px; padding:1rem; margin-bottom:1rem; background:#fff; }
+    form legend { font-weight:600; padding:0 .4rem; }
+    label { display:block; margin:.5rem 0 .2rem; font-size:.85rem; color:#475569; }
+    input[type=text],input[type=date],input[type=number],select { width:100%; padding:.45rem .6rem; border:1px solid #cbd5e1; border-radius:6px; font-size:.9rem; }
+    .row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem; }
+    .row2 { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
+    .concepts { max-height:300px; overflow:auto; border:1px solid #e2e8f0; border-radius:6px; padding:.5rem; background:#fff; }
+    .concepts fieldset { border:none; padding:.2rem 0 .4rem; }
+    .concepts legend { font-weight:600; font-size:.85rem; color:#334155; }
+    .concepts label { font-size:.85rem; }
+    #estimate { margin-top:.6rem; font-size:.9rem; }
+    .muted { color:var(--muted); font-size:.85rem; }
+    .grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
+    .pill-row { display:flex; gap:1.5rem; align-items:center; }
+  </style>
+</head>
+<body>
+  <nav>
+    <strong>fd Crawl Control</strong>
+    <a href="/panel/policies">Policies</a>
+    <a href="/panel/runs">Runs</a>
+    <a href="/panel/policies/new">+ New</a>
+  </nav>
+  <main>{% block content %}{% endblock %}</main>
+</body>
+</html>

@@ -14,6 +14,11 @@ from fd_open_data_mcp.db import get_database
 
 mcp = FastMCP(name="fd-open-data-mcp")
 
+# Attach the crawl-policy control-plane tools (add-fund-crawl-control-center).
+from fd_open_data_mcp.policy_tools import register_policy_tools
+
+register_policy_tools(mcp)
+
 
 def _session():
     return get_database().get_session()
@@ -723,17 +728,39 @@ def fetch(concept_id: int, entity_type: str, entity_id: int, date: str) -> dict:
 # ─── Crawl planning ─────────────────────────────────────────────────────────
 @mcp.tool
 def plan_crawl(
-    concept_ids: list[int], entity_type: str, start: str, end: str,
+    concept_ids: list[int], entity_type: str,
+    start: str | None = None, end: str | None = None,
     entity_ids: list[int] | None = None, frequency: str | None = None,
+    since_last: bool = False,
+    mode: str = "per_date",
 ) -> dict:
     """Plan a concept crawl -> CrawlPlan artifact (concepts in, methods out).
 
     Compiles desired concepts + entity scope + date range into a ranked, failover-aware
     CrawlPlan. Does not fetch. Unroutable concepts (no confirmed binding) and unmapped
     entities (no per-source identifier) are reported, not silently dropped.
+
+    If ``since_last`` is True, the plan's ``date_range.start`` is derived from the minimum
+    per-concept ``max(date)`` already in ``semantic_observations`` (incremental crawl).
+    Either ``start`` or ``since_last`` must be provided. If both, ``start`` wins.
+    ``end`` defaults to today if not provided.
+
+    ``mode`` is ``per_date`` (one request per concept x entity x date) or ``series``
+    (one request per concept x entity against a bulk_history endpoint; the pipeline
+    explodes the returned frame). Series mode refuses concepts bound only to non-bulk
+    functions.
     """
+    import datetime as dt
     from fd_open_data_mcp.crawl.plan import DateRange, EntityScope
     from fd_open_data_mcp.crawl.planner import plan_crawl as _plan
+
+    # Validation
+    if not start and not since_last:
+        raise ValueError("Either 'start' or 'since_last' must be provided")
+    if not end:
+        end = dt.date.today().isoformat()
+    if start and since_last:
+        since_last = False
 
     s = _session()
     try:
@@ -741,6 +768,7 @@ def plan_crawl(
             s, concept_ids,
             EntityScope(entity_type=entity_type, entity_ids=entity_ids or None),
             DateRange(start=start, end=end, frequency=frequency),
+            since_last=since_last, mode=mode,
         )
         return plan.model_dump(mode="json")
     finally:

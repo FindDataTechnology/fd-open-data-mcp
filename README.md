@@ -82,6 +82,54 @@ fd-open-data-mcp serve          # FastMCP, stdio transport
 `rank_sources`, `read`, `fetch`, `generate_refresh_schedules`,
 `list_schedules`, `run_schedule`.
 
+## Crawl control center (panel + reconciler)
+
+Policies describe *what to crawl*: concepts × entity scope × date range ×
+frequency × mode. A `CrawlPolicy` is created from the panel, compiled by the
+reconciler into a `CrawlPlan`, and executed by `scraw-fd-open-data-mcp` into
+`semantic_observations`.
+
+```bash
+# Serve the control panel (default http://0.0.0.0:8000)
+FD_OPEN_DATA_MCP_DATABASE_URL=<db url> fd-open-data-mcp panel
+
+# Run the reconciler once (due policies -> launch; closes stale runs)
+python -m fd_open_data_mcp.refresh.reconciler
+```
+
+**Env vars:**
+- `PANEL_TOKEN` — if set, `/panel/*` requires it (header `X-Panel-Token`,
+  `?token=`, or cookie).
+- `POLICY_MAX_FETCHES` (default `50000`) — plan-size guardrail; a due policy
+  whose fetch estimate exceeds it is refused (recorded as a failed run) unless
+  the policy has `force` set.
+- `RECONCILER_LAUNCHER` — `scrapyd` (default) or `k8s` (`K8sJobLauncher`).
+- `SCRAPYD_URL` / `SCRAW_PLAN_DIR` (scrapyd launcher), `SCRAW_K8S_NAMESPACE` /
+  `SCRAW_K8S_IMAGE` / `SCRAW_K8S_DATABASE_URL` / `SCRAW_K8S_REDIS_URL`
+  (k8s launcher).
+- `FD_PROXY_POOL=off` — local dev: bypass the cluster proxy pool (its free
+  proxies break akshare/eastmoney).
+
+**Policy example** (via panel, or MCP `policy_create`):
+
+```
+name:        fund-nav-daily
+entity_type: fund
+concepts:    nav.unit, nav.accumulated
+mode:        per_date          # or "series" (one bulk fetch per entity)
+date_policy: since_last        # start = observation watermarks
+frequency:   daily
+source:      akshare
+cron:        45 6 * * * UTC
+```
+
+Two cadence notes: `series` mode backfills history in one bulk fetch per entity
+(explicit range), while `since_last` `per_date` is the steady-state incremental
+mode (only new dates since each concept's watermark; entities with no watermark
+are not backfilled — run an explicit-range backfill first). See
+`openspec/changes/add-fund-crawl-control-center/docs/phase7-validation.md` for
+the validated pilot (76k nav observations on the live DB).
+
 ## Tests
 
 ```bash

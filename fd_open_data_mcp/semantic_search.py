@@ -20,6 +20,17 @@ from fd_open_data_mcp.server import mcp
 MODEL_PATH = "/Users/chengsishi/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 MODEL_NAME = "all-MiniLM-L6-v2"
 
+# Lazy singleton: load the sentence-transformer model once per process, not per call
+# (avoids re-loading 103 weights on every semantic_search/ai_search invocation).
+_MODEL: Optional[SentenceTransformer] = None
+
+
+def _get_model() -> SentenceTransformer:
+    global _MODEL
+    if _MODEL is None:
+        _MODEL = SentenceTransformer(MODEL_PATH)
+    return _MODEL
+
 
 @mcp.tool()
 def semantic_search(
@@ -39,8 +50,8 @@ def semantic_search(
     Returns:
         List of matching concepts with scores, ordered by similarity
     """
-    # Load the embedding model
-    model = SentenceTransformer(MODEL_PATH)
+    # Load the embedding model (lazy singleton)
+    model = _get_model()
     embedding_dim = model.get_embedding_dimension()
 
     # Get database session
@@ -67,6 +78,9 @@ def semantic_search(
             filter_clauses.append("c.frequency = :frequency")
             params["frequency"] = frequency
 
+        # Exclude deprecated concepts (spec entity-semantic-search: discovery excludes deprecated)
+        filter_clauses.append("COALESCE(c.deprecated, false) = false")
+
         where_clause = " AND ".join(filter_clauses) if filter_clauses else "1=1"
 
         sql = f"""
@@ -81,6 +95,11 @@ def semantic_search(
         """
 
         result = session.execute(text(sql), params)
+
+        # Concepts with at least one binding (for binding-aware ranking)
+        bound_ids = {
+            row[0] for row in session.execute(text("SELECT DISTINCT concept_id FROM concept_bindings"))
+        }
 
         candidates = []
         for row in result:
@@ -110,10 +129,18 @@ def semantic_search(
                 "entity_type": row.entity_type,
                 "source": row.source,
                 "similarity": similarity,
+                "has_binding": row.id in bound_ids,
             })
 
-        # Sort by similarity and take top K
-        candidates.sort(key=lambda x: x["similarity"], reverse=True)
+        # Binding-aware ranking (spec entity-semantic-search): bound concepts rank
+        # above zero-binding concepts when similarity is within a 0.05 band.
+        # Bucket similarity into 0.05-wide bins; within a bin, bound first, then
+        # exact similarity. Concepts >0.05 apart are ordered by bin (similarity).
+        def _rank_key(c):
+            sim = c["similarity"]
+            return (round(sim / 0.05), 1 if c["has_binding"] else 0, sim)
+
+        candidates.sort(key=_rank_key, reverse=True)
         results = candidates[:limit]
 
         print(f"[semantic_search] Found {len(results)} results")
@@ -139,8 +166,8 @@ def re_embed_concept(concept_id: int) -> dict:
     Returns:
         Result dictionary with status
     """
-    # Load the embedding model
-    model = SentenceTransformer(MODEL_PATH)
+    # Load the embedding model (lazy singleton)
+    model = _get_model()
 
     # Get database session
     db = dbmod.get_database()

@@ -1,0 +1,34 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Policies</h2>
+<table>
+  <tr><th>ID</th><th>Name</th><th>Entity</th><th>Concepts</th><th>Mode</th><th>Freq</th><th>Cron ({{ 'tz' }})</th><th>Last run</th><th>Enabled</th><th></th></tr>
+  {% for p in policies %}
+  <tr>
+    <td>{{ p.id }}</td>
+    <td><a href="/panel/policies/{{ p.id }}">{{ p.name }}</a></td>
+    <td>{{ p.entity_type }}{% if p.entity_ids %}<span class="muted"> ({{ p.entity_ids|length }} ids)</span>{% else %}<span class="muted"> (all)</span>{% endif %}</td>
+    <td class="muted">{{ p.concept_ids|length }}</td>
+    <td>{{ p.mode }}</td>
+    <td>{{ p.frequency }}</td>
+    <td class="muted">{{ p.cron_expr }} {{ p.timezone }}</td>
+    <td class="muted">{{ p.last_run_at or '—' }}</td>
+    <td>
+      <form method="post" action="/panel/policies/{{ p.id }}/toggle">
+        <button type="submit" class="badge {{ 'success' if p.enabled else 'refused' }}">{{ 'ON' if p.enabled else 'OFF' }}</button>
+      </form>
+    </td>
+    <td>
+      <form method="post" action="/panel/policies/{{ p.id }}/run-now">
+        <button type="submit" class="btn" title="bypasses cron, not guardrails">run-now</button>
+      </form>
+      <form method="post" action="/panel/policies/{{ p.id }}/delete" onsubmit="return confirm('delete policy {{ p.id }}?')">
+        <button type="submit" class="link" style="color:#dc2626">delete</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="10" class="muted">No policies yet. <a href="/panel/policies/new">Create one</a>.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

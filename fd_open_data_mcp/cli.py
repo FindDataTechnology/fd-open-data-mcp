@@ -30,12 +30,45 @@ def migrate_cmd():
     click.echo(f"Initialized {r['table_count']} tables at {r['database_url']}")
 
 
+@cli.command("migrate-astock-daily")
+@click.option("--symbol", "symbols", multiple=True,
+              help="Restrict to one or more 6-digit symbols (default: all astock_daily).")
+def migrate_astock_daily_cmd(symbols):
+    """Bulk-migrate astock_daily OHLCV into semantic_observations.
+
+    Idempotent (ON CONFLICT DO NOTHING). Backfills stocks missing from the
+    semantic layer (e.g. 中国银行 601988, 平安银行 000001) from the legacy
+    astock_daily table into System-B stock concepts (price.open/close/high/low,
+    price.volume, price.amount).
+    """
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.migrate import migrate_astock_daily
+
+    s = get_database().get_session()
+    try:
+        _echo(migrate_astock_daily(s, symbols=list(symbols) or None))
+    finally:
+        s.close()
+
+
 @cli.command("serve")
 def serve_cmd():
     """Run the FastMCP server (stdio transport)."""
     from fd_open_data_mcp.server import main
 
     main()
+
+
+@cli.command("panel")
+@click.option("--host", default="0.0.0.0", show_default=True)
+@click.option("--port", default=8000, show_default=True)
+def panel_cmd(host, port):
+    """Serve the crawl control-center panel (add-fund-crawl-control-center)."""
+    import uvicorn
+
+    from fd_open_data_mcp.panel.app import app
+
+    uvicorn.run(app, host=host, port=port)
 
 
 @cli.command("import-catalog")
@@ -92,6 +125,46 @@ def seed_entities_cmd():
         s.close()
 
 
+@cli.command("repair-stock-identifiers")
+@click.option("--apply", is_flag=True, default=False,
+              help="Write canonical identifiers (default: dry-run report only).")
+def repair_stock_identifiers_cmd(apply):
+    """Report/fix stock source-identifier drift.
+
+    A stock's akshare identifier must equal its 6-digit code; yfinance must be
+    the code with the .SS/.SZ/.HK suffix. Drift (e.g. 中国银行 -> akshare "02211"
+    instead of "601988") breaks fetch() ranked dispatch. Dry-run lists drift;
+    --apply re-seeds canonical akshare + yfinance for all stock entities
+    (cn-report identifiers are never touched).
+    """
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.entities.resolver import repair_stock_identifiers
+
+    s = get_database().get_session()
+    try:
+        _echo(repair_stock_identifiers(s, apply=apply))
+    finally:
+        s.close()
+
+
+@cli.command("deprecation-map")
+def deprecation_map_cmd():
+    """Print the deprecated -> canonical concept alias record.
+
+    Lists every deprecated concept (e.g. PRICE_CLOSE) and its canonical
+    replacement (e.g. price.close) so callers can migrate off deprecated
+    symbol stock-concept codes.
+    """
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.entities.resolver import deprecation_map
+
+    s = get_database().get_session()
+    try:
+        _echo(deprecation_map(s))
+    finally:
+        s.close()
+
+
 @cli.command("rank-sources")
 @click.option("--concept-id", type=int, required=True)
 @click.option("--requested-date", default=None)
@@ -141,15 +214,30 @@ def generate_schedules_cmd():
 @click.option("--entity-type", required=True, help="Entity type of the scope.")
 @click.option("--entity-id", "entity_ids", type=int, multiple=True,
               help="Explicit entity id (repeatable). Omit for a filter/all scope.")
-@click.option("--start", required=True, help="Date range start (e.g. 2024-01-01).")
-@click.option("--end", required=True, help="Date range end (e.g. 2024-12-31).")
+@click.option("--start", default=None, help="Date range start (e.g. 2024-01-01). Optional if --since-last.")
+@click.option("--end", default=None, help="Date range end (e.g. 2024-12-31). Defaults to today.")
 @click.option("--frequency", default=None, help="Cadence hint for the executor.")
+@click.option("--since-last", is_flag=True, default=False,
+              help="Derive start from max(date) already in semantic_observations (incremental).")
+@click.option("--source", "sources", multiple=True,
+              help="Restrict to specific source (repeatable). E.g., --source cn-report.")
 @click.option("--out", "-o", default=None, help="Write the plan to this file (JSON).")
-def plan_crawl_cmd(concept_ids, entity_type, entity_ids, start, end, frequency, out):
+def plan_crawl_cmd(concept_ids, entity_type, entity_ids, start, end, frequency, since_last, sources, out):
     """Plan a concept crawl -> CrawlPlan (concepts in, methods out)."""
+    import datetime as dt
     from fd_open_data_mcp.crawl.plan import DateRange, EntityScope
     from fd_open_data_mcp.crawl.planner import plan_crawl as _plan
     from fd_open_data_mcp.db import get_database
+
+    # Validation: need --start or --since-last
+    if not start and not since_last:
+        raise click.UsageError("Either --start or --since-last is required")
+    # Default end to today
+    if not end:
+        end = dt.date.today().isoformat()
+    # If both --start and --since-last, --start wins (since_last ignored)
+    if start and since_last:
+        since_last = False
 
     s = get_database().get_session()
     try:
@@ -157,6 +245,8 @@ def plan_crawl_cmd(concept_ids, entity_type, entity_ids, start, end, frequency, 
             s, list(concept_ids),
             EntityScope(entity_type=entity_type, entity_ids=list(entity_ids) or None),
             DateRange(start=start, end=end, frequency=frequency),
+            since_last=since_last,
+            source_filter=list(sources) or None,
         )
     finally:
         s.close()

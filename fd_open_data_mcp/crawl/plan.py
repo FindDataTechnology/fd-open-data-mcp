@@ -47,17 +47,25 @@ class EntityScope(BaseModel):
 
 
 class DateRange(BaseModel):
-    start: str
+    # start is Optional so the CLI/MCP can pass None when --since-last is used;
+    # the planner computes the watermark and fills start before the plan is returned
+    # (a plan with start=None only survives in the no-prior-data early-return, which
+    # carries no wanted_concepts, so the executor never expands it).
+    start: Optional[str] = None
     end: str
     frequency: Optional[str] = None  # cadence hint for the executor
 
 
 class CrawlPlan(BaseModel):
     version: str = "1"
+    # Fetch strategy: "per_date" (one request per concept x entity x date) or
+    # "series" (one request per concept x entity against a bulk_history endpoint;
+    # the pipeline explodes the returned frame, design D6).
+    mode: str = "per_date"
     wanted_concepts: list[PlanConcept]
     entity_scope: EntityScope
     date_range: DateRange
-    unroutable: list[dict] = Field(default_factory=list)  # concepts refused (no binding / mismatch)
+    unroutable: list[dict] = Field(default_factory=list)  # concepts refused (no binding / mismatch / mode)
     unmapped: list[dict] = Field(default_factory=list)     # (entity, source) pairs with no identifier
     persistence: dict = Field(default_factory=lambda: {"table": "semantic_observations"})
 

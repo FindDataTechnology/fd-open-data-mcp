@@ -14,6 +14,7 @@ registered.
 from __future__ import annotations
 
 import logging
+import os
 from typing import Optional
 
 from sqlalchemy.orm import Session
@@ -43,6 +44,10 @@ class ProxySelector:
         self.session = session
 
     def select(self, source: str) -> Optional[tuple[Optional[int], object]]:
+        if os.environ.get("FD_PROXY_POOL") == "off":
+            # local dev: my Mac's egress is trusted — skip the cluster proxy pool
+            # (free proxies break akshare/eastmoney; see CLAUDE.md gotcha)
+            return (None, _DIRECT)
         rl = pool.get_rate_limit(self.session, source)
         max_qps = rl.max_qps if rl else _DEFAULT_QPS
         proxies = pool.active_proxies(self.session)

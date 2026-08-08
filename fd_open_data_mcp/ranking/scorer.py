@@ -114,8 +114,15 @@ def rank_sources_for_concept(
     session: Session, concept_id: int, requested_date: Optional[str] = None,
 ) -> list[dict]:
     """Return candidate sources ranked best-first with their composite score."""
-    ensure_rankings_for_concept(session, concept_id)
     concept = session.get(Concept, concept_id)
+    if concept is None:
+        raise ValueError(f"concept {concept_id} not found")
+    if concept.deprecated:
+        from fd_open_data_mcp.entities.resolver import (
+            ConceptDeprecated, find_canonical_replacement,
+        )
+        raise ConceptDeprecated(concept, find_canonical_replacement(session, concept))
+    ensure_rankings_for_concept(session, concept_id)
     freq = concept.frequency if concept else None
     ff = freshness_fit_for(freq, requested_date)
     rows = session.query(SourceRanking).filter_by(concept_id=concept_id).all()

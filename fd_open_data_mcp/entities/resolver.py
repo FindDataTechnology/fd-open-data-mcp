@@ -19,11 +19,49 @@ class EntityTypeMismatch(Exception):
     """Raised when a concept is requested for an incompatible entity type."""
 
 
+class ConceptDeprecated(Exception):
+    """Raised when a deprecated concept is requested for dispatch.
+
+    Carries the canonical replacement (if any) so callers can surface it to the
+    user (spec ``concept-canonicalization``).
+    """
+
+    def __init__(self, concept, replacement=None):
+        self.concept = concept
+        self.replacement = replacement
+        msg = f"concept {concept.code} (id={concept.id}) is deprecated"
+        if replacement is not None:
+            msg += f"; use canonical replacement {replacement.code} (id={replacement.id})"
+        super().__init__(msg)
+
+
+def find_canonical_replacement(session: Session, concept: Concept):
+    """Find the non-deprecated canonical concept for a deprecated one (by name_zh).
+
+    Prefers a non-``symbol`` entity_type so a deprecated ``PRICE_CLOSE`` (symbol)
+    resolves to ``price.close`` (stock) rather than another symbol-typed twin.
+    """
+    if not concept.name_zh:
+        return None
+    return (
+        session.query(Concept)
+        .filter(
+            Concept.name_zh == concept.name_zh,
+            Concept.deprecated.is_(False),
+            Concept.id != concept.id,
+        )
+        .order_by(Concept.entity_type == "symbol")  # non-symbol first
+        .first()
+    )
+
+
 def check_applicability(session: Session, concept_id: int, entity_type: str) -> Concept:
-    """Return the concept if it applies to entity_type; raise EntityTypeMismatch otherwise."""
+    """Return the concept if it applies to entity_type; raise on mismatch or deprecation."""
     c = session.get(Concept, concept_id)
     if c is None:
         raise ValueError(f"concept {concept_id} not found")
+    if c.deprecated:
+        raise ConceptDeprecated(c, find_canonical_replacement(session, c))
     if c.entity_type != entity_type:
         raise EntityTypeMismatch(
             f"concept {c.code} applies to entity_type={c.entity_type}, not {entity_type}"
@@ -75,14 +113,22 @@ def _iso2_to_iso3(code: Optional[str]) -> Optional[str]:
 
 
 def _yfinance_symbol(code: str, exchange: Optional[str], market: Optional[str]) -> str:
-    """Map an A/HK/US stock code to its yfinance symbol."""
+    """Map an A/HK/US stock code to its yfinance symbol.
+
+    A-share suffix is derived from the code prefix (spec ``stock-source-identity``):
+    ``60xxxx`` -> ``.SS`` (Shanghai), ``00xxxx``/``30xxxx`` -> ``.SZ`` (Shenzhen).
+    The exchange metadata is often the ambiguous ``"SSE/SZSE"`` with no ``market``
+    field, so the prefix is authoritative. HK is checked first because HK codes
+    (e.g. ``03988``) share leading digits with Shenzhen codes.
+    """
     ex = (exchange or "").upper()
-    if "SH" in ex or ex == "SSE" or (market == "CN" and code.startswith("6")):
-        return f"{code}.SS"
-    if "SZ" in ex or ex == "SZSE" or (market == "CN" and code.startswith(("0", "3"))):
-        return f"{code}.SZ"
-    if "HK" in ex or market == "HK":
+    mk = (market or "").upper()
+    if "HK" in ex or mk == "HK":
         return f"{code}.HK"
+    if code.startswith("6"):
+        return f"{code}.SS"
+    if code.startswith(("0", "3")):
+        return f"{code}.SZ"
     return code  # US / unknown: use as-is
 
 
@@ -128,20 +174,27 @@ def _bulk_upsert_identifiers(session: Session, rows: list[dict]) -> None:
 
 
 def seed_stock_identifiers(session: Session, db_path: Optional[str] = None) -> dict:
-    """Seed akshare (code as-is) + yfinance (code + exchange suffix) for all symbols."""
-    from fd_open_data_mcp.entities.taxonomy import list_entities
+    """Seed akshare (code as-is) + yfinance (code + exchange suffix) for all stock entities.
 
-    stocks = list_entities("stock", db_path)
+    Reads the ontology ``entities`` table (entity_type='stock') so that every
+    stock - not just the taxonomy sample - gets a correct per-source identifier
+    (spec ``stock-source-identity``). The ``db_path`` arg is retained for
+    signature compatibility but unused; the session is the ontology session.
+    """
+    from fd_open_data_mcp.models import Entity
+
+    stocks = session.query(Entity).filter(Entity.entity_type == "stock").all()
     rows: list[dict] = []
     for st in stocks:
-        code = st.get("code")
+        code = st.code
         if not code:
             continue
-        eid = st["id"]
+        eid = st.id
+        meta = st.metadata_json or {}
         rows.append({"entity_type": "stock", "entity_id": eid, "source": "akshare", "identifier": code})
-        yf_sym = _yfinance_symbol(code, st.get("exchange"), st.get("market"))
+        yf_sym = _yfinance_symbol(code, meta.get("exchange"), meta.get("market"))
         rows.append({"entity_type": "stock", "entity_id": eid, "source": "yfinance", "identifier": yf_sym})
-        if (st.get("market") or "").upper() == "US":
+        if (meta.get("market") or "").upper() == "US":
             rows.append({"entity_type": "stock", "entity_id": eid, "source": "edgar", "identifier": code})
     _bulk_upsert_identifiers(session, rows)
     return {
@@ -170,3 +223,86 @@ def seed_country_identifiers(session: Session, db_path: Optional[str] = None) ->
         "worldbank": sum(1 for r in rows if r["source"] == "worldbank"),
         "wbgapi": sum(1 for r in rows if r["source"] == "wbgapi"),
     }
+
+
+def repair_stock_identifiers(session: Session, apply: bool = False) -> dict:
+    """Report and optionally fix stock source-identifier drift.
+
+    A stock's canonical ``akshare`` identifier is its 6-digit ``code``;
+    ``yfinance`` is the code with the ``.SS``/``.SZ``/``.HK`` suffix
+    (spec ``stock-source-identity``). Dry-run (``apply=False``) lists every
+    drift row; ``apply=True`` re-seeds canonical ``akshare`` + ``yfinance``
+    for all stock entities via the idempotent bulk upsert.
+
+    ``cn-report`` (and any non-akshare/yfinance source) identifiers are never
+    touched - the re-seed only writes ``akshare`` and ``yfinance`` rows.
+    """
+    from fd_open_data_mcp.models import Entity
+
+    stocks = session.query(Entity).filter(Entity.entity_type == "stock").all()
+    canonical: dict[tuple[int, str], str] = {}
+    code_by_id: dict[int, str] = {}
+    for st in stocks:
+        code = st.code
+        if not code:
+            continue
+        eid = st.id
+        meta = st.metadata_json or {}
+        code_by_id[eid] = code
+        canonical[(eid, "akshare")] = code
+        canonical[(eid, "yfinance")] = _yfinance_symbol(code, meta.get("exchange"), meta.get("market"))
+
+    existing: dict[tuple[int, str], str] = {
+        (r.entity_id, r.source): r.identifier
+        for r in session.query(EntitySourceIdentifier).filter(
+            EntitySourceIdentifier.entity_type == "stock",
+            EntitySourceIdentifier.source.in_(["akshare", "yfinance"]),
+        )
+    }
+
+    drift: list[dict] = []
+    for (eid, source), canon in canonical.items():
+        stored = existing.get((eid, source))
+        if stored != canon:
+            drift.append({
+                "entity_id": eid,
+                "code": code_by_id.get(eid),
+                "source": source,
+                "stored": stored,
+                "canonical": canon,
+            })
+
+    if apply:
+        counts = seed_stock_identifiers(session)
+        return {"applied": True, "drift_found": len(drift), "reseed": counts}
+
+    return {
+        "applied": False,
+        "drift_found": len(drift),
+        "drift_total": len(drift),
+        "drift_sample": drift[:50],
+    }
+
+
+def deprecation_map(session: Session) -> dict:
+    """Return the deprecated -> canonical concept alias record.
+
+    Lists every deprecated concept and its canonical replacement (resolved by
+    name_zh via ``find_canonical_replacement``). Used by the
+    ``deprecation-map`` CLI as the authoritative alias record for callers
+    migrating off the deprecated ``symbol`` stock-concept codes.
+    """
+    deprecated = session.query(Concept).filter(Concept.deprecated.is_(True)).all()
+    rows = []
+    for c in deprecated:
+        repl = find_canonical_replacement(session, c)
+        rows.append({
+            "deprecated_id": c.id,
+            "deprecated_code": c.code,
+            "entity_type": c.entity_type,
+            "name_zh": c.name_zh,
+            "category": c.category,
+            "canonical_id": repl.id if repl else None,
+            "canonical_code": repl.code if repl else None,
+        })
+    return {"deprecated_count": len(rows), "with_replacement": sum(1 for r in rows if r["canonical_id"]), "map": rows}

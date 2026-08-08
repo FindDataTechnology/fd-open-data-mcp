@@ -131,8 +131,12 @@ class _AkshareBase:
     _RETRIES: int = DEFAULT_RETRIES
     _RETRY_DELAY: float = DEFAULT_RETRY_DELAY
 
-    def extract_value(self, result: Any, column_name: str, date: str) -> Any:
-        """Pull the ``(date, column_name)`` cell from an akshare result DataFrame."""
+    def extract_value(self, result: Any, column_name: str, date: str, identifier: Optional[str] = None) -> Any:
+        """Pull the ``(date, column_name)`` cell from an akshare result DataFrame.
+
+        ``identifier`` (the resolved per-source entity id) is unused by date-axis
+        adapters; rank-frame subclasses use it to pick their row.
+        """
         import pandas as pd
 
         if not isinstance(result, pd.DataFrame) or result.empty:
@@ -146,6 +150,44 @@ class _AkshareBase:
             return None
         val = row[col]
         return None if pd.isna(val) else val
+
+    def build_range_params(self, fn, identifier: str, start: str, end: str, binding=None) -> dict:
+        """Range form of ``build_params``: same mapping, but end-ish params get ``end``.
+
+        The single-date ``build_params`` maps the requested date to BOTH start and
+        end params (start_date=end_date=date); for a range read we rebuild with
+        ``start`` and then override any end-named kwarg with ``end``. Subclasses
+        with non-date params (e.g. symbol-only statement endpoints) work unchanged.
+        """
+        params = self.build_params(fn, identifier, start, binding)
+        for key in list(params):
+            if key.lower() in ("end", "end_date"):
+                params[key] = _compact(end)
+        return params
+
+    def extract_series(self, result: Any, column_name: str, start: str, end: str) -> dict:
+        """Pull every ``(date, column_name)`` cell with ``start <= date <= end``.
+
+        Returns ``{'YYYY-MM-DD': value}`` (normalized dates, NaN cells skipped) —
+        the batch form of ``extract_value`` used by ``read_range``.
+        """
+        import pandas as pd
+
+        if not isinstance(result, pd.DataFrame) or result.empty:
+            return {}
+        col = column_name if column_name in result.columns else self._ALIASES.get(column_name)
+        if col is None or col not in result.columns:
+            return {}
+        if self._DATE_COL is not None and self._DATE_COL in result.columns:
+            dates = [_normalize_date(v) for v in result[self._DATE_COL].tolist()]
+        else:
+            dates = [_normalize_date(v) for v in result.index.tolist()]
+        out: dict[str, Any] = {}
+        values = result[col].tolist()
+        for d, val in zip(dates, values):
+            if d and start <= d <= end and not pd.isna(val):
+                out[d] = val
+        return out
 
     def call(self, command: str, params: dict) -> Any:
         """Invoke ``akshare.<command>(**params)`` with a native timeout + simple retry.
@@ -336,6 +378,323 @@ class StockCashFlowSheetAdapter(_EmStatementAdapter):
     """
 
 
+# --- fund adapters (add-fund-crawl-control-center, task 3.3) ---------------------
+# Live shapes verified against akshare 1.18.79 (proxy env UNSET).
+
+def _sina_fund_prefix(code: str) -> str:
+    """Fund-code -> Sina market prefix (5->sh e.g. 510050, else sz e.g. 159707)."""
+    c = str(code).strip()
+    if c.startswith("5"):
+        return "sh"
+    return "sz"
+
+
+def _nav_period_for(date_str: str) -> str:
+    """Pick the smallest ``period`` bucket of ``fund_open_fund_info_em`` that
+    contains the requested date, so single-date fetches stay light.
+
+    Options are 近1月/近3月/近6月/近1年/近3年/成立来. Dates older than 3 years
+    (or unparseable) fall back to the full-history 成立来.
+    """
+    try:
+        target = datetime.strptime(_normalize_date(date_str), "%Y-%m-%d").date()
+        age_days = (datetime.now().date() - target).days
+    except ValueError:
+        return "成立来"
+    for label, days in (("近1月", 31), ("近3月", 92), ("近6月", 183), ("近1年", 366), ("近3年", 1097)):
+        if age_days <= days:
+            return label
+    return "成立来"
+
+
+class FundOpenFundInfoEmAdapter(_AkshareBase):
+    """``ak.fund_open_fund_info_em`` - 东财 open-fund NAV history (bulk).
+
+    Signature: ``(symbol, indicator, period)`` - NO date-range params and no
+    native ``timeout``; one call returns the full series for the chosen
+    ``indicator``:
+      * ``indicator='单位净值走势'`` -> cols [净值日期, 单位净值, 日增长率]
+      * ``indicator='累计净值走势'`` -> cols [净值日期, 累计净值]
+    The bound column drives the indicator switch (bindings reference the
+    physical columns inserted by ``scripts/update_fund_catalog.py``).
+    Single-date ``build_params`` shrinks ``period`` to the smallest bucket
+    covering the requested date; range/series reads always use 成立来.
+    """
+
+    _DATE_COL = "净值日期"
+    _ALIASES = {}
+    _TIMEOUT = None
+
+    @staticmethod
+    def _indicator_for(binding) -> str:
+        col = getattr(getattr(binding, "column", None), "name", None)
+        if col == "累计净值":
+            return "累计净值走势"
+        return "单位净值走势"  # 单位净值 / 日增长率 (and the no-binding default)
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {
+            "symbol": identifier,
+            "indicator": self._indicator_for(binding),
+            "period": _nav_period_for(date),
+        }
+
+    def build_range_params(self, fn, identifier: str, start: str, end: str, binding=None) -> dict:
+        # no date params upstream - always the full history; clamping happens
+        # in extract_series / the crawl pipeline.
+        return {
+            "symbol": identifier,
+            "indicator": self._indicator_for(binding),
+            "period": "成立来",
+        }
+
+
+class _FundHistEmAdapter(_AkshareBase):
+    """Common base for ``fund_etf_hist_em`` / ``fund_lof_hist_em`` (eastmoney).
+
+    Signature: ``(symbol, period, start_date, end_date, adjust)`` - bare fund
+    code, NO native ``timeout``. Returns Chinese cols incl. 日期, 开盘, 收盘,
+    最高, 最低, 成交量, 成交额, 振幅, 涨跌幅. Date column = 日期.
+    ``adjust=''`` (unadjusted) - fund OHLCV is the traded price.
+    """
+
+    _DATE_COL = "日期"
+    _ALIASES = {}
+    _TIMEOUT = None
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {
+            "symbol": identifier,
+            "period": "daily",
+            "start_date": _compact(date),
+            "end_date": _compact(date),
+            "adjust": "",
+        }
+
+
+class FundEtfHistEmAdapter(_FundHistEmAdapter):
+    """``ak.fund_etf_hist_em`` - 东财 ETF daily OHLCV."""
+
+
+class FundLofHistEmAdapter(_FundHistEmAdapter):
+    """``ak.fund_lof_hist_em`` - 东财 LOF daily OHLCV."""
+
+
+class FundEtfHistSinaAdapter(_AkshareBase):
+    """``ak.fund_etf_hist_sina`` - Sina ETF daily OHLCV (eastmoney failover).
+
+    Signature: ``(symbol)`` - Sina-prefixed code (``'sh510050'``; 5->sh, else
+    sz), NO date params (full series), NO native ``timeout``. Returns English
+    cols: date, open, high, low, close, volume, amount (+postVol/postAmt).
+    """
+
+    _DATE_COL = "date"
+    _ALIASES = {
+        "日期": "date", "开盘": "open", "收盘": "close", "最高": "high",
+        "最低": "low", "成交量": "volume", "成交额": "amount",
+    }
+    _TIMEOUT = None
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {"symbol": _sina_fund_prefix(identifier) + str(identifier)}
+
+    def build_range_params(self, fn, identifier: str, start: str, end: str, binding=None) -> dict:
+        return {"symbol": _sina_fund_prefix(identifier) + str(identifier)}
+
+
+class FundIndividualAchievementXqAdapter(_AkshareBase):
+    """``ak.fund_individual_achievement_xq`` - 雪球 trailing-return snapshot.
+
+    Signature: ``(symbol, timeout)``. One call returns a frame with cols
+    [业绩类型, 周期, 本产品区间收益, 本产品最大回撒, 周期收益同类排名]; the
+    阶段业绩 block covers 近1月/近3月/近6月/近1年/近3年/近5年 (NO 近1周, NO
+    成立来 - those come from the ``fund_open_fund_rank_em`` bulk frame via
+    the snapshot script instead). Bound columns are the virtual
+    ``区间收益_<周期>`` names (``scripts/update_fund_catalog.py``); the value
+    is the 本产品区间收益 cell of the matching 阶段业绩 row, an as-of-today
+    snapshot regardless of the requested ``date``.
+    """
+
+    _DATE_COL = None
+    _ALIASES = {}
+    _TIMEOUT = DEFAULT_TIMEOUT
+    _PERIODS = ("近1月", "近3月", "近6月", "近1年", "近3年")
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {"symbol": identifier, "timeout": self._TIMEOUT}
+
+    def extract_value(self, result: Any, column_name: str, date: str, identifier: Optional[str] = None) -> Any:
+        import pandas as pd
+
+        if not isinstance(result, pd.DataFrame) or result.empty:
+            return None
+        if not column_name.startswith("区间收益_"):
+            return None
+        period = column_name.removeprefix("区间收益_")
+        if period not in self._PERIODS:
+            return None
+        rows = result[(result["业绩类型"] == "阶段业绩") & (result["周期"] == period)]
+        if rows.empty:
+            return None
+        val = rows.iloc[0]["本产品区间收益"]
+        return None if pd.isna(val) else val
+
+
+class FundIndividualBasicInfoXqAdapter(_AkshareBase):
+    """``ak.fund_individual_basic_info_xq`` - 雪球 basic info (item/value frame).
+
+    Signature: ``(symbol, timeout)``. Returns an item/value pair frame; the
+    only bound column is the virtual ``最新规模`` (fund AUM), parsed from an
+    亿-string like ``'97.06亿'`` into a float of 亿元 (as-of-today snapshot).
+    """
+
+    _DATE_COL = None
+    _ALIASES = {}
+    _TIMEOUT = DEFAULT_TIMEOUT
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {"symbol": identifier, "timeout": self._TIMEOUT}
+
+    @staticmethod
+    def _parse_aum_yi(raw: Any) -> Optional[float]:
+        """Parse 最新规模 strings ('97.06亿' / '1.23万亿' / '8000万') into 亿元."""
+        if raw is None:
+            return None
+        s = str(raw).strip().replace(",", "")
+        if not s or s in ("---", "--", "暂无"):
+            return None
+        mult = 1.0
+        for suffix, m in (("万亿", 10000.0), ("亿", 1.0), ("万", 0.0001)):
+            if s.endswith(suffix):
+                s = s[: -len(suffix)]
+                mult = m
+                break
+        try:
+            return float(s) * mult
+        except ValueError:
+            return None
+
+    def extract_value(self, result: Any, column_name: str, date: str, identifier: Optional[str] = None) -> Any:
+        import pandas as pd
+
+        if not isinstance(result, pd.DataFrame) or result.empty:
+            return None
+        if column_name != "最新规模" or "item" not in result.columns or "value" not in result.columns:
+            return None
+        rows = result[result["item"] == "最新规模"]
+        if rows.empty:
+            return None
+        return self._parse_aum_yi(rows.iloc[0]["value"])
+
+
+class FundMoneyFundInfoEmAdapter(_AkshareBase):
+    """``ak.fund_money_fund_info_em`` - 东财 money-market fund yield history (bulk).
+
+    Signature: ``(symbol)`` - bare fund code, full series, NO date params and NO
+    native ``timeout``. Returns cols [净值日期, 每万份收益, 7日年化收益率, 申购状态,
+    赎回状态]. Date column = 净值日期. Bound columns: 每万份收益
+    (yield.per_10k) and 7日年化收益率 (yield.7day_annualized).
+    """
+
+    _DATE_COL = "净值日期"
+    _ALIASES = {}
+    _TIMEOUT = None
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {"symbol": identifier}
+
+
+class _FundRankFrameAdapter(_AkshareBase):
+    """Common base for akshare fund rank frames (no per-entity params -> one call
+    returns a full-market snapshot; the entity's row is picked by ``_KEY_COL``).
+
+    These frames have NO date axis: every value is an as-of-today snapshot, so
+    ``date`` is ignored at extraction and ``extract_series`` returns ``{}``
+    (snapshots have no history; the crawl pipeline records them at the run date).
+    Subclasses declare ``_KEY_COL`` (the column matched against the resolved
+    per-source identifier).
+    """
+
+    _DATE_COL = None
+    _ALIASES = {}
+    _TIMEOUT = None
+    _KEY_COL: str = ""
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {}
+
+    def extract_series(self, result: Any, column_name: str, start: str, end: str) -> dict:
+        return {}
+
+    def _pick_rows(self, result: Any, identifier: Optional[str]):
+        import pandas as pd
+
+        if (
+            not isinstance(result, pd.DataFrame) or result.empty
+            or self._KEY_COL not in result.columns or identifier is None
+        ):
+            return None
+        rows = result[result[self._KEY_COL].astype(str).str.strip() == str(identifier).strip()]
+        return None if rows.empty else rows
+
+    def extract_value(self, result: Any, column_name: str, date: str, identifier: Optional[str] = None) -> Any:
+        import pandas as pd
+
+        rows = self._pick_rows(result, identifier)
+        if rows is None:
+            return None
+        col = column_name if column_name in result.columns else self._ALIASES.get(column_name)
+        if col is None or col not in result.columns:
+            return None
+        val = rows.iloc[0][col]
+        return None if pd.isna(val) else val
+
+
+class FundOpenFundRankEmAdapter(_FundRankFrameAdapter):
+    """``ak.fund_open_fund_rank_em`` - 东财 open-fund rank frame (snapshot).
+
+    Signature: ``(symbol='全部')`` - fund-TYPE filter, not an entity selector, so
+    it stays at the default; one call returns ~17k rows covering every open fund.
+    Row-picked by ``基金代码`` == identifier. Bound columns: 单位净值 / 累计净值 /
+    日增长率 (alternate nav source) and the trailing returns 近1周 / 近1月 / 近3月 /
+    近6月 / 近1年 / 近3年 / 成立来 (covers the periods xueqiu lacks: 近1周, 成立来).
+    """
+
+    _KEY_COL = "基金代码"
+
+
+class FundRatingAllAdapter(_FundRankFrameAdapter):
+    """``ak.fund_rating_all`` - 东财 fund-rating rank frame (snapshot).
+
+    Signature: ``()`` - full-market frame (~18k rows). Row-picked by ``代码`` ==
+    identifier. Bound column: 晨星评级 (Morningstar 1-5 stars; may be NaN for
+    funds Morningstar does not cover -> extraction returns None).
+    """
+
+    _KEY_COL = "代码"
+
+
+class FundManagerEmAdapter(_FundRankFrameAdapter):
+    """``ak.fund_manager_em`` - 东财 fund-manager frame (snapshot, LONG format).
+
+    Signature: ``()`` - one row per (manager x current fund) pair (~35k rows);
+    ``序号`` identifies the MANAGER (a manager with 3 funds has 3 rows, all with
+    the same 序号). Person entities carry the 序号 as their identifier (mirrored
+    under both 'eastmoney' and 'akshare' sources by ``seed_fund_managers.py``).
+    Manager-level columns repeat across the manager's rows: 累计从业时间 (days,
+    numeric), 现任基金资产总规模 (亿元, numeric), 现任基金最佳回报 (%, numeric).
+    The virtual column ``现任基金数`` is the COUNT of the manager's rows.
+    """
+
+    _KEY_COL = "序号"
+
+    def extract_value(self, result: Any, column_name: str, date: str, identifier: Optional[str] = None) -> Any:
+        if column_name == "现任基金数":
+            rows = self._pick_rows(result, identifier)
+            return None if rows is None else int(len(rows))
+        return super().extract_value(result, column_name, date, identifier=identifier)
+
+
 # --- registration (import-time; register() is an idempotent overwrite) ----------
 def register_all() -> None:
     """Register all built-in akshare adapters (idempotent).
@@ -351,6 +710,18 @@ def register_all() -> None:
     register("akshare", "stock_profit_sheet_by_report_em", StockProfitSheetAdapter())
     register("akshare", "stock_balance_sheet_by_report_em", StockBalanceSheetAdapter())
     register("akshare", "stock_cash_flow_sheet_by_report_em", StockCashFlowSheetAdapter())
+    # fund adapters (add-fund-crawl-control-center, task 3.3)
+    register("akshare", "fund_open_fund_info_em", FundOpenFundInfoEmAdapter())
+    register("akshare", "fund_etf_hist_em", FundEtfHistEmAdapter())
+    register("akshare", "fund_lof_hist_em", FundLofHistEmAdapter())
+    register("akshare", "fund_etf_hist_sina", FundEtfHistSinaAdapter())
+    register("akshare", "fund_individual_achievement_xq", FundIndividualAchievementXqAdapter())
+    register("akshare", "fund_individual_basic_info_xq", FundIndividualBasicInfoXqAdapter())
+    # rank-frame / money-fund adapters (task 3.4 - snapshot + yield sources)
+    register("akshare", "fund_money_fund_info_em", FundMoneyFundInfoEmAdapter())
+    register("akshare", "fund_open_fund_rank_em", FundOpenFundRankEmAdapter())
+    register("akshare", "fund_rating_all", FundRatingAllAdapter())
+    register("akshare", "fund_manager_em", FundManagerEmAdapter())
 
 
 register_all()

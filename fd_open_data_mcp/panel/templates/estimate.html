@@ -1,0 +1,4 @@
+estimate: <strong>{{ estimate }}</strong> fetches
+<span class="muted">({{ n_concepts }} concepts, {{ mode }} mode, cap {{ policy_max }})</span>
+{% if unroutable %}<br><span style="color:#b45309">unroutable: {{ unroutable|map(attribute='code')|join(', ') }}</span>{% endif %}
+{% if unmapped %}<br><span style="color:#b45309">unmapped entities: {{ unmapped|length }}</span>{% endif %}

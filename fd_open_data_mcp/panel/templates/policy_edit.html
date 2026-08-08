@@ -1,0 +1,91 @@
+{% extends "base.html" %}
+{% block title %}{{ 'Edit' if policy else 'New' }} policy{% endblock %}
+{% block content %}
+<h2>{{ 'Edit policy' if policy else 'New policy' }}</h2>
+<form id="pf" method="post" action="/panel/policies/save">
+  {% if policy %}<input type="hidden" name="policy_id" value="{{ policy.id }}">{% endif %}
+
+  <fieldset>
+    <legend>Identity</legend>
+    <div class="row2">
+      <div><label>Name</label>
+        <input type="text" name="name" required value="{{ policy.name if policy else '' }}"></div>
+      <div><label>Entity type</label>
+        <select name="entity_type" id="entity_type" required>
+          {% for t in entity_types %}
+          <option value="{{ t }}" {{ 'selected' if policy and policy.entity_type == t }}>{{ t }}</option>
+          {% endfor %}
+          <option value="fund" {{ 'selected' if not policy or policy.entity_type == 'fund' }}>fund</option>
+          <option value="stock" {{ 'selected' if policy and policy.entity_type == 'stock' }}>stock</option>
+        </select></div>
+    </div>
+    <div>
+      <label>Entity IDs <span class="muted">(comma-separated; empty = all {{ 'of type' }})</span></label>
+      <input type="text" name="entity_ids" value="{{ policy.entity_ids|join(',') if policy and policy.entity_ids else '' }}" placeholder="5369, 5370">
+    </div>
+    <label><input type="checkbox" name="enabled" {{ 'checked' if not policy or policy.enabled }}> enabled</label>
+  </fieldset>
+
+  <fieldset>
+    <legend>Concepts</legend>
+    <div class="concepts">
+      {% for cat, cs in concept_groups %}
+      <fieldset>
+        <legend>{{ cat }}</legend>
+        {% for c in cs %}
+        <label><input type="checkbox" name="concept_ids" value="{{ c.id }}"
+          {{ 'checked' if c.id in selected }}> {{ c.code }} <span class="muted">({{ c.name_zh or c.name_en or '' }})</span></label>
+        {% endfor %}
+      </fieldset>
+      {% endfor %}
+    </div>
+  </fieldset>
+
+  <fieldset>
+    <legend>Crawl scope</legend>
+    <div class="row">
+      <div><label>Mode</label>
+        <select name="mode" id="mode">{% for m in modes %}<option value="{{ m }}" {{ 'selected' if policy and policy.mode == m }}>{{ m }}</option>{% endfor %}</select></div>
+      <div><label>Frequency</label>
+        <select name="frequency" id="frequency">{% for f in frequencies %}<option value="{{ f }}" {{ 'selected' if policy and policy.frequency == f }}>{{ f }}</option>{% endfor %}</select></div>
+      <div><label>Source filter <span class="muted">(comma; empty=all)</span></label>
+        <input type="text" name="source_filter" id="source_filter" value="{{ policy.source_filter|join(',') if policy and policy.source_filter else '' }}"></div>
+    </div>
+    <div class="row">
+      <div><label>Date policy</label>
+        <select name="date_policy_mode" id="date_policy_mode">
+          {% for m in date_policy_modes %}<option value="{{ m }}" {{ 'selected' if policy and policy.date_policy.mode == m }}>{{ m }}</option>{% endfor %}
+        </select></div>
+      <div id="dp_days" style="display:none"><label>Trailing days</label>
+        <input type="number" name="date_policy_days" value="{{ policy.date_policy.days if policy and policy.date_policy.mode == 'trailing' else 1 }}" min="1"></div>
+      <div id="dp_explicit" style="display:none">
+        <div class="grid"><div><label>Start</label><input type="date" name="date_policy_start" value="{{ policy.date_policy.start or '' if policy and policy.date_policy.mode == 'explicit' else '' }}"></div>
+        <div><label>End</label><input type="date" name="date_policy_end" value="{{ policy.date_policy.end or '' if policy and policy.date_policy.mode == 'explicit' else '' }}"></div></div>
+      </div>
+    </div>
+    <div class="row">
+      <div><label>Cron expr</label>
+        <input type="text" name="cron_expr" value="{{ policy.cron_expr if policy else default_cron }}"></div>
+      <div><label>Timezone</label>
+        <input type="text" name="timezone" value="{{ policy.timezone if policy else 'UTC' }}"></div>
+      <div><label><input type="checkbox" name="force" {{ 'checked' if policy and policy.force }}> force (override fetch cap)</label></div>
+    </div>
+  </fieldset>
+
+  <div class="pill-row">
+    <button type="submit" class="btn" style="background:var(--accent);color:#fff;padding:.5rem 1.2rem;border-radius:6px">Save</button>
+    <a href="/panel/policies">Cancel</a>
+    <div id="estimate" hx-post="/panel/estimate" hx-include="#pf" hx-trigger="change from:#pf"
+         hx-target="this" hx-swap="outerHTML">estimate: —</div>
+  </div>
+</form>
+
+<script>
+  const mode = document.getElementById('date_policy_mode');
+  const show = () => {
+    document.getElementById('dp_days').style.display = mode.value === 'trailing' ? 'block' : 'none';
+    document.getElementById('dp_explicit').style.display = mode.value === 'explicit' ? 'block' : 'none';
+  };
+  mode.addEventListener('change', show); show();
+</script>
+{% endblock %}

@@ -26,6 +26,15 @@ dependencies = [
     "redis>=5.0",
     "python-dotenv>=1.0",
     "minio>=7.2.0",
+    "alembic>=1.13",
+    "croniter>=2.0",
+    # control-plane panel (add-fund-crawl-control-center, design D7)
+    "fastapi>=0.110",
+    "jinja2>=3.1",
+    "python-multipart>=0.0.9",
+    "uvicorn>=0.29",
+    # PostgreSQL driver for the live deployment DB (reconciler/panel/crawler)
+    "psycopg2-binary>=2.9",
 ]
 
 [tool.uv.sources]

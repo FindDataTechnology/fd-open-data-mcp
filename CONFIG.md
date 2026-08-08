@@ -198,7 +198,35 @@ This means you can override any setting at runtime:
 FD_OPEN_DATA_MCP_DATABASE_URL=sqlite:///test.db fd-open-data-mcp migrate
 ```
 
-### 11. Playwright Configuration (Web Scraping)
+### 11. Crawl control center (panel + reconciler)
+
+```bash
+# Control-panel auth gate (if set, /panel/* requires it)
+PANEL_TOKEN=
+
+# Plan-size guardrail: a due policy whose fetch estimate exceeds this is
+# refused unless the policy has force=true (recorded as a failed PolicyRun)
+POLICY_MAX_FETCHES=50000
+
+# Launcher: "scrapyd" (local, default) or "k8s" (K8sJobLauncher)
+RECONCILER_LAUNCHER=scrapyd
+
+# scrapyd launcher
+SCRAPYD_URL=http://localhost:6800
+SCRAW_PLAN_DIR=plans
+
+# k8s launcher
+SCRAW_K8S_NAMESPACE=scraw
+SCRAW_K8S_IMAGE=harbor.local/lawcraw_business/scraw-fd-open-data-mcp
+SCRAW_K8S_DATABASE_URL=postgresql://...
+SCRAW_K8S_REDIS_URL=redis://...
+
+# Local dev only: bypass the cluster proxy pool (dead free proxies break
+# akshare/eastmoney; see phase7-validation.md)
+FD_PROXY_POOL=off
+```
+
+### 12. Playwright Configuration (Web Scraping)
 
 For websites that require JavaScript rendering, configure Playwright:
 

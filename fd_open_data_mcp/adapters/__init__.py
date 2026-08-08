@@ -14,8 +14,10 @@ An adapter is registered for a ``(source, command)`` key and implements two meth
       entity id; ``binding`` is the ``ConceptBinding`` (its ``.column.name`` is used
       for indicator-style params, e.g. wbgapi ``indicator=column.name``).
 
-  ``extract_value(result, column_name, date) -> value | None``
+  ``extract_value(result, column_name, date, identifier=None) -> value | None``
       Pull the value for ``(date, column_name)`` from the upstream result.
+      ``identifier`` is the resolved per-source entity id; rank-frame adapters
+      (no date axis, one row per entity) use it to pick their row.
 
 An optional ``call(command, params)`` method wraps the upstream callable (e.g. with a
 native timeout + retry); ``fetch/runner.py`` opts into it when present.
@@ -41,7 +43,7 @@ class Adapter(Protocol):
     ) -> dict: ...
 
     def extract_value(
-        self, result: Any, column_name: str, date: str,
+        self, result: Any, column_name: str, date: str, identifier: Optional[str] = None,
     ) -> Any: ...
 
 

@@ -44,21 +44,29 @@ class SourceUnavailable(Exception):
 def _record(session, source: str, proxy_id: Optional[int], classification: str,
             latency_ms: int, status: str, detail: Optional[str],
             concept_id: Optional[int] = None, entity_type: Optional[str] = None,
-            entity_id: Optional[int] = None) -> None:
-    """Write fetch_log (cold) + the outcomes stream (hot)."""
+            entity_id: Optional[int] = None, real_source: Optional[str] = None) -> None:
+    """Write fetch_log (cold) + the outcomes stream (hot).
+
+    Args:
+        source: Library-level source name (e.g., "akshare")
+        real_source: Real data source name (e.g., "eastmoney") if available
+    """
     try:
         session.add(FetchLog(
             source=source, concept_id=concept_id, entity_type=entity_type,
             entity_id=entity_id, latency_ms=latency_ms, status=status,
             detail=detail[:500] if detail else None,
             proxy_id=proxy_id, classification=classification,
+            real_source=real_source,
         ))
         session.commit()
     except Exception as e:  # noqa: BLE001 - never let logging break the fetch
         session.rollback()
         logger.debug("fetch_log write failed: %s", e)
-    circuit.write_outcome(source, {
-        "source": source, "proxy_id": proxy_id or 0,
+    # Use real_source for outcomes stream if available, otherwise fall back to source
+    outcome_source = real_source if real_source else source
+    circuit.write_outcome(outcome_source, {
+        "source": outcome_source, "proxy_id": proxy_id or 0,
         "classification": classification, "status": status,
         "latency_ms": latency_ms, "at": datetime.now(timezone.utc).isoformat(),
     })
@@ -74,6 +82,7 @@ def instrumented_fetch(
     entity_type: Optional[str] = None,
     entity_id: Optional[int] = None,
     max_proxies: int = 3,
+    real_source: Optional[str] = None,
 ) -> Any:
     """Run an upstream fetch through the proxy/circuit pipeline. Returns the
     upstream result. Raises ``FetchError`` on a transient failure that exhausts
@@ -81,17 +90,42 @@ def instrumented_fetch(
 
     If ``session`` is omitted, a short-lived session is created (for the scraw
     fetch_handler path); callers with their own session (dispatch) should pass
-    it so fetch_log + proxy queries share their transaction."""
+    it so fetch_log + proxy queries share their transaction.
+
+    Args:
+        source: Library-level source name (e.g., "akshare")
+        real_source: Real data source name (e.g., "eastmoney") if available.
+                     Used for circuit breaker tracking and ban classification.
+    """
     injection.install()
     own_session = session is None
     if own_session:
         session = get_database().get_session()
     tried: list[int] = []
     last_error: Optional[str] = None
+    # Use real_source for circuit operations if available, otherwise fall back to source
+    circuit_source = real_source if real_source else source
+
+    # cn-report adapter uses akshare internally (for financial values), which breaks
+    # under proxy injection (akshare calls eastmoney directly). Skip proxy for cn-report.
+    if source == "cn-report":
+        t0 = time.time()
+        try:
+            value = run_upstream(source, command, params)
+            elapsed_ms = int((time.time() - t0) * 1000)
+            _record(session, source, None, "ok", elapsed_ms, "ok", None,
+                    concept_id, entity_type, entity_id, real_source)
+            return value
+        except FetchError as e:
+            elapsed_ms = int((time.time() - t0) * 1000)
+            _record(session, source, None, "error", elapsed_ms, "error", str(e),
+                    concept_id, entity_type, entity_id, real_source)
+            raise
+
     try:
         selector = ProxySelector(session)
         for _ in range(max_proxies):
-            picked = selector.select(source)
+            picked = selector.select(circuit_source)
             if picked is None:
                 break  # no healthy proxy -> source-level failover
             proxy_id, proxy = picked
@@ -109,15 +143,15 @@ def instrumented_fetch(
                     detail = str(e)
                     last_error = detail
                     status = "error"
-                    st = circuit.get_state(source, proxy_id) if proxy_id is not None else {"fail_streak": 0}
+                    st = circuit.get_state(circuit_source, proxy_id) if proxy_id is not None else {"fail_streak": 0}
                     classification = ban_rules.classify(
-                        session, source, None, detail, None, st["fail_streak"]
+                        session, circuit_source, None, detail, None, st["fail_streak"]
                     )
                 elapsed_ms = int((time.time() - t0) * 1000)
                 if proxy_id is not None:
-                    circuit.record_outcome(source, proxy_id, classification)
+                    circuit.record_outcome(circuit_source, proxy_id, classification)
                 _record(session, source, proxy_id, classification, elapsed_ms,
-                        status, detail, concept_id, entity_type, entity_id)
+                        status, detail, concept_id, entity_type, entity_id, real_source)
                 if classification == "ok":
                     return value
                 if classification == "blocked":
@@ -127,7 +161,7 @@ def instrumented_fetch(
                     continue  # retry same proxy once
                 break  # ban -> try next proxy (circuit now OPEN, selector skips it)
         raise SourceUnavailable(
-            f"no healthy proxy for {source} (tried {tried}; last_error={last_error})"
+            f"no healthy proxy for {circuit_source} (tried {tried}; last_error={last_error})"
         )
     finally:
         if own_session:

@@ -11,7 +11,7 @@ class FetchError(Exception):
     
     def __str__(self):
         if self.source and self.command:
-            return f"{self.source}.{command}: {super().__str__()}"
+            return f"{self.source}.{self.command}: {super().__str__()}"
         return super().__str__()
 
 

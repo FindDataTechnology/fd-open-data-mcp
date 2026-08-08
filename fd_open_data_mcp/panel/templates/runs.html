@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block content %}
+<h2>Runs</h2>
+<form method="get" action="/panel/runs">
+  <div class="pill-row">
+    <select name="status" onchange="this.form.submit()">
+      <option value="" {{ 'selected' if not status }}>all statuses</option>
+      {% for s in ['running','success','failed'] %}
+      <option value="{{ s }}" {{ 'selected' if status == s }}>{{ s }}</option>
+      {% endfor %}
+    </select>
+    <select name="policy_id" onchange="this.form.submit()">
+      <option value="">all policies</option>
+      {% for pid, pname in policies.items() %}
+      <option value="{{ pid }}" {{ 'selected' if request.query_params.get('policy_id')|int == pid }}>{{ pname }}</option>
+      {% endfor %}
+    </select>
+    <noscript><button type="submit">Filter</button></noscript>
+  </div>
+</form>
+<table>
+  <tr><th>ID</th><th>Policy</th><th>Status</th><th>Est. fetches</th><th>Job</th><th>Started</th><th>Finished</th><th>Detail</th></tr>
+  {% for r in runs %}
+  <tr>
+    <td>{{ r.id }}</td>
+    <td><a href="/panel/policies/{{ r.policy_id }}">{{ r.policy }}</a></td>
+    <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+    <td>{{ r.estimate }}</td>
+    <td class="muted">{{ r.job_ref or '—' }}</td>
+    <td class="muted">{{ r.started_at or '—' }}</td>
+    <td class="muted">{{ r.finished_at or '—' }}</td>
+    <td class="muted" title="{{ r.detail or '' }}">{{ (r.detail or '')[:80] }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="muted">No runs.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

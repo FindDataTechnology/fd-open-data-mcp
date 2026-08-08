@@ -72,3 +72,79 @@ if __name__ == "__main__":
         print("Added columns:")
         for c in result["added_columns"]:
             print(f"  + {c}")
+
+
+# astock_daily column -> (concept code, unit) for System-B stock concepts.
+# The legacy astock_daily table holds 14.2M rows of A-share OHLCV (adjust='qfq',
+# period='daily') and is the bulk-ingest source for stocks missing from
+# semantic_observations (fix-stock-semantic-retrieval, task 7.1).
+ASTOCK_CONCEPT_MAP = {
+    "open": ("price.open", "currency"),
+    "close": ("price.close", "currency"),
+    "high": ("price.high", "currency"),
+    "low": ("price.low", "currency"),
+    "volume": ("price.volume", "shares"),
+    "amount": ("price.amount", "currency"),
+}
+
+
+def _stock_concept_ids(session) -> dict[str, int]:
+    """Resolve System-B stock concept IDs by code (canonical, non-deprecated).
+
+    Duplicate stock concepts exist (e.g. id 234 ``price.close`` with name_zh and
+    id 269 ``price.close`` with null name_zh); take the lowest-id non-deprecated
+    concept per code, which is the canonical 233-238 set.
+    """
+    from fd_open_data_mcp.models import Concept
+    rows = (
+        session.query(Concept)
+        .filter(
+            Concept.code.in_(list({c for c, _ in ASTOCK_CONCEPT_MAP.values()})),
+            Concept.entity_type == "stock",
+            Concept.deprecated.is_(False),
+        )
+        .all()
+    )
+    by_code: dict[str, int] = {}
+    for c in sorted(rows, key=lambda r: r.id):
+        by_code.setdefault(c.code, c.id)
+    return by_code
+
+
+def migrate_astock_daily(session, symbols: list[str] | None = None) -> dict:
+    """Bulk-migrate astock_daily OHLCV into semantic_observations (System-B concepts).
+
+    Idempotent via ``ON CONFLICT (concept_id, entity_type, entity_id, date) DO
+    NOTHING``. If ``symbols`` is given, migrate only those symbols (used for
+    testing / targeted backfill); otherwise migrate all astock_daily rows for
+    symbols that map to a ``stock`` entity.
+    """
+    code_to_id = _stock_concept_ids(session)
+    expected = {c for c, _ in ASTOCK_CONCEPT_MAP.values()}
+    missing = expected - set(code_to_id)
+    if missing:
+        raise ValueError(f"missing canonical stock concepts: {sorted(missing)}")
+
+    sym_filter = "AND a.symbol = ANY(:symbols)" if symbols else ""
+    params: dict = {"symbols": symbols} if symbols else {}
+    params["et"] = "stock"
+    params["src"] = "astock_daily"
+
+    results = {}
+    for col, (code, unit) in ASTOCK_CONCEPT_MAP.items():
+        cid = code_to_id[code]
+        sql = f"""
+            INSERT INTO semantic_observations
+                (concept_id, entity_type, entity_id, date, value, unit, source_used, fetched_at)
+            SELECT :cid, :et, e.id, a.trade_date::text, a.{col}::text, :unit, :src, now()
+            FROM astock_daily a
+            JOIN entities e ON e.entity_type = :et AND e.code = a.symbol
+            WHERE a.{col} IS NOT NULL
+            {sym_filter}
+            ON CONFLICT (concept_id, entity_type, entity_id, date) DO NOTHING
+        """
+        p = {**params, "cid": cid, "unit": unit}
+        res = session.execute(text(sql), p)
+        results[col] = res.rowcount
+        session.commit()
+    return {"concept_map": code_to_id, "inserted_by_column": results}

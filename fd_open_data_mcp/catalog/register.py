@@ -142,12 +142,18 @@ def register_datasource(manifest: Any, session: Session) -> dict:
 
     for fspec in manifest.functions:
         params = [p.model_dump() for p in fspec.parameters]
+        # Convert real_sources from Pydantic models to dicts for JSONB storage
+        real_sources_data = None
+        if fspec.real_sources:
+            real_sources_data = [rs.model_dump() for rs in fspec.real_sources]
+
         fn = session.query(Function).filter_by(source_id=src.id, command=fspec.command).first()
         if fn is None:
             fn = Function(
                 source_id=src.id, command=fspec.command, category=fspec.category,
                 description=fspec.description, parameters=params, verified=fspec.verified,
                 scanner_mode=manifest.scanner_mode, frequency=fspec.frequency,
+                real_sources=real_sources_data,
             )
             session.add(fn)
             session.flush()
@@ -159,6 +165,7 @@ def register_datasource(manifest: Any, session: Session) -> dict:
             fn.verified = fspec.verified
             fn.scanner_mode = manifest.scanner_mode
             fn.frequency = fspec.frequency
+            fn.real_sources = real_sources_data
 
         existing_cols = {c.name: c for c in fn.columns}
         seen: set[str] = set()

@@ -25,6 +25,16 @@ from fd_open_data_mcp.server import mcp
 MODEL_PATH = "/Users/chengsishi/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
 MODEL_NAME = "all-MiniLM-L6-v2"
 
+# Lazy singleton: load the model once per process, not per ai_search call.
+_MODEL: Optional[SentenceTransformer] = None
+
+
+def _get_model() -> SentenceTransformer:
+    global _MODEL
+    if _MODEL is None:
+        _MODEL = SentenceTransformer(MODEL_PATH)
+    return _MODEL
+
 
 @mcp.tool()
 def ai_search(
@@ -33,6 +43,7 @@ def ai_search(
     limit: int = 20,
     include_values: bool = False,
     value_date: str | None = None,
+    include_unbound: bool = False,
 ) -> dict:
     """Search for concepts, related entities, and optionally values using AI.
 
@@ -47,6 +58,9 @@ def ai_search(
         limit: Maximum number of concepts to return
         include_values: If True, fetch actual values from semantic_observations
         value_date: Date for values (e.g., "2024-01-01") - only if include_values=True
+        include_unbound: If True, also return concepts with zero bindings (ranked
+            after bound concepts). Default False - ai_search returns only
+            retrievable concepts (spec entity-semantic-search).
 
     Returns:
         Dictionary with:
@@ -56,7 +70,7 @@ def ai_search(
         - "values": (optional) actual values from semantic_observations
     """
     print(f"[ai_search] Query: '{query}'")
-    print(f"[ai_search] Filters: entity_type={entity_type}, include_values={include_values}")
+    print(f"[ai_search] Filters: entity_type={entity_type}, include_values={include_values}, include_unbound={include_unbound}")
 
     result = {
         "query": query,
@@ -68,7 +82,7 @@ def ai_search(
 
     # Layer 1: Semantic search for concepts
     print("[ai_search] Layer 1: Semantic search for concepts...")
-    concepts = _semantic_search(query, entity_type, limit)
+    concepts = _semantic_search(query, entity_type, limit, include_unbound=include_unbound)
     result["concepts"] = concepts
     print(f"[ai_search] Found {len(concepts)} concepts")
 
@@ -92,10 +106,17 @@ def ai_search(
     return result
 
 
-def _semantic_search(query: str, entity_type: str | None, limit: int) -> list[dict]:
-    """Perform semantic search over concepts."""
-    # Load the embedding model
-    model = SentenceTransformer(MODEL_PATH)
+def _semantic_search(query: str, entity_type: str | None, limit: int,
+                     include_unbound: bool = False) -> list[dict]:
+    """Perform semantic search over concepts.
+
+    Excludes deprecated concepts (spec entity-semantic-search). Excludes
+    zero-binding concepts unless ``include_unbound=True`` - ai_search returns
+    only retrievable concepts by default. Ranks bound concepts ahead of unbound
+    within a 0.05 similarity band.
+    """
+    # Load the embedding model (lazy singleton)
+    model = _get_model()
 
     # Encode the query
     query_embedding = model.encode([query])[0]
@@ -113,6 +134,9 @@ def _semantic_search(query: str, entity_type: str | None, limit: int) -> list[di
             filter_clauses.append("c.entity_type = :entity_type")
             params["entity_type"] = entity_type
 
+        # Exclude deprecated concepts
+        filter_clauses.append("COALESCE(c.deprecated, false) = false")
+
         where_clause = " AND ".join(filter_clauses) if filter_clauses else "1=1"
 
         sql = f"""
@@ -128,6 +152,11 @@ def _semantic_search(query: str, entity_type: str | None, limit: int) -> list[di
 
         result = session.execute(text(sql), params)
 
+        # Concepts with at least one binding
+        bound_ids = {
+            row[0] for row in session.execute(text("SELECT DISTINCT concept_id FROM concept_bindings"))
+        }
+
         candidates = []
         for row in result:
             # Parse embedding from JSON
@@ -142,6 +171,10 @@ def _semantic_search(query: str, entity_type: str | None, limit: int) -> list[di
             query_array = np.array(query_embedding, dtype=np.float32)
             similarity = float(np.dot(query_array, embedding_array))
 
+            has_binding = row.id in bound_ids
+            if not has_binding and not include_unbound:
+                continue  # ai_search default: only retrievable concepts
+
             candidates.append({
                 "id": row.id,
                 "code": row.code,
@@ -154,10 +187,16 @@ def _semantic_search(query: str, entity_type: str | None, limit: int) -> list[di
                 "entity_type": row.entity_type,
                 "source": row.source,
                 "similarity": similarity,
+                "has_binding": has_binding,
             })
 
-        # Sort by similarity and take top K
-        candidates.sort(key=lambda x: x["similarity"], reverse=True)
+        # Binding-aware ranking: bucket similarity into 0.05-wide bins; within a
+        # bin, bound concepts rank above unbound, then exact similarity.
+        def _rank_key(c):
+            sim = c["similarity"]
+            return (round(sim / 0.05), 1 if c["has_binding"] else 0, sim)
+
+        candidates.sort(key=_rank_key, reverse=True)
         return candidates[:limit]
 
     finally:

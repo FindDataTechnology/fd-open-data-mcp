@@ -35,12 +35,39 @@ def default_engine():
 # Canonical entity_type vocabulary. Mirrors the tables on the remote DB:
 # - countries (iso_code) → country
 # - cities (code) → city
-# - symbols (ticker + symbol_type) → stock/etf/bond/coin/index/fund/future/option
+# - symbols (ticker + symbol_type) → stock/fund/bond/coin/index/future
 # - companies (code) → company (with sector as industry classification)
+# - person → logical-only (no taxonomy table); used for fund managers
+#
+# Note: `fund` is the single canonical entity_type for ALL fund subtypes.
+# Fund classification (open/etf/lof/money/graded) lives in
+# `entities.metadata_json.subtype`, NOT in entity_type — `etf` is rejected
+# as an entity_type (see validate_entity_type).
 ENTITY_TYPES: tuple[str, ...] = (
     "country", "city", "stock", "fund", "bond", "index", "future", "crypto",
-    "organization", "industry", "company"
+    "organization", "industry", "company", "person"
 )
+
+# entity_type values that are explicitly rejected, with the redirect message.
+REJECTED_ENTITY_TYPES: dict[str, str] = {
+    "etf": "use entity_type='fund' with metadata_json.subtype='etf'",
+}
+
+
+def validate_entity_type(entity_type: str) -> str:
+    """Reject removed/invalid entity_type values; return the value if acceptable.
+
+    `etf` was folded into `fund` (subtype in metadata_json) — callers attempting
+    to create entities or concepts with entity_type='etf' get a directed error.
+    Types outside ENTITY_TYPES are still allowed (logical-only types such as
+    `organization`/`person` have no taxonomy table by design); only explicitly
+    rejected values raise.
+    """
+    if entity_type in REJECTED_ENTITY_TYPES:
+        raise ValueError(
+            f"entity_type={entity_type!r} is not accepted: {REJECTED_ENTITY_TYPES[entity_type]}"
+        )
+    return entity_type
 
 # Entity type mappings to (table, code_column, name_columns, optional columns)
 # stock = symbol where symbol_type='stock', fund = 'etf' or 'fund', etc.

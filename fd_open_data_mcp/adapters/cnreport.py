@@ -50,26 +50,26 @@ class CnReportAdapter:
         command = fn.command
         params: dict = {"ticker_or_name": identifier}
         
-        if command in ("get_financial_statements", "get_financials"):
-            # Statement type from column name or default to None (all statements)
-            column_name = getattr(binding, "column", None)
-            statement_map = {
-                "income_statement": "income_statement",
-                "balance_sheet": "balance_sheet", 
-                "cashflow": "cashflow",
-                "现金流量表": "cashflow",
-                "利润表": "income_statement",
-                "资产负债表": "balance_sheet",
-            }
-            if column_name:
-                stmt = column_name.lower()
-                params["statement"] = statement_map.get(stmt)
-            # Period from date or default
+        if command == "extract_indicators":
+            # Real signature: extract_indicators(ticker_or_name, year, indicators=[...])
             try:
-                year = int(str(date)[:4])
-                params["period"] = "annual" if year else "quarterly"
+                params["year"] = int(str(date)[:4])
             except (ValueError, TypeError):
-                params["period"] = "annual"
+                pass
+            # Extract the indicator name from the binding's column
+            column_name = getattr(binding, "column", None)
+            if column_name and hasattr(column_name, "name"):
+                params["indicators"] = [column_name.name]
+        elif command in ("get_financial_statements", "get_financials"):
+            # These route to extract_indicators in call(); set indicators from
+            # the binding's column (e.g. 营业收入) so the right value extracts.
+            try:
+                params["year"] = int(str(date)[:4])
+            except (ValueError, TypeError):
+                pass
+            column_name = getattr(binding, "column", None)
+            if column_name and hasattr(column_name, "name"):
+                params["indicators"] = [column_name.name]
                 
         elif command == "get_financial_statement":
             # Single statement variant
@@ -122,90 +122,94 @@ class CnReportAdapter:
         return params
 
     def extract_value(
-        self, result: Any, column_name: str, date: str
+        self, result: Any, column_name: str, date: str, identifier: Optional[str] = None
     ) -> Optional[str]:
-        """Extract value from cn-report result.
-        
-        Args:
-            result: Return value from cnreport_tools function
-            column_name: Target column name
-            date: Date string for reference
-            
-        Returns:
-            String representation of the value, or None if not found
+        """Extract a numeric value for ``column_name`` from a cn-report result.
+
+        cn-report returns either:
+          - extract_indicators -> {indicators: [{indicator, value, period}, ...]}
+          - get_financial_statements -> {statements: {...text...}} (no numbers)
+          - a DataFrame (some tools) / a list of row dicts
+        Numeric values only come from extract_indicators; statement-text results
+        return None (a text body isn't a concept value).
         """
-        if result is None or isinstance(result, dict) and result.get("error"):
+        if result is None:
             return None
-            
-        # Handle DataFrame results
+        if isinstance(result, dict) and result.get("error"):
+            return None
+
+        # extract_indicators: {indicators: {<name>: {value: <v>}, ...}} (dict) or
+        # {indicators: [{indicator: <name>, value: <v>}, ...]} (list)
+        if isinstance(result, dict):
+            inds = result.get("indicators")
+            if isinstance(inds, dict):
+                # Dict format: {"营业收入": {"value": 123.45, ...}, ...}
+                entry = inds.get(column_name)
+                if isinstance(entry, dict):
+                    v = entry.get("value")
+                    return None if v is None else str(v)
+                return None
+            if isinstance(inds, list):
+                # List format: [{"indicator": "营业收入", "value": 123.45}, ...]
+                for row in inds:
+                    if isinstance(row, dict) and row.get("indicator") == column_name:
+                        v = row.get("value")
+                        return None if v is None else str(v)
+                return None  # concept's indicator not in the extracted set
+
+        # DataFrame: column lookup (some cn-report tools return frames)
         try:
             import pandas as pd
             if isinstance(result, pd.DataFrame):
-                # Try to find the column
-                if column_name in result.columns:
-                    # Get first row's value for this column
-                    val = result[column_name].iloc[0]
-                    return str(val) if val is not None else None
-                # Try numeric index
-                if len(result) > 0 and len(result.columns) > 0:
-                    val = result.iloc[0, 0]
-                    return str(val) if val is not None else None
+                if column_name in result.columns and len(result) > 0:
+                    v = result[column_name].iloc[0]
+                    return None if v is None else str(v)
+                return None
         except Exception:
             pass
-            
-        # Handle dict results with 'data' key
-        if isinstance(result, dict):
-            data = result.get("data")
-            if isinstance(data, dict) and "data" in data:
-                rows = data.get("data", [])
-                if rows and isinstance(rows, list):
-                    for row in rows:
-                        if isinstance(row, dict) and column_name in row:
-                            val = row[column_name]
-                            if val is not None:
-                                return str(val)
-                    # Return first available value
-                    if rows:
-                        first_row = rows[0]
-                        if isinstance(first_row, dict):
-                            for k, v in first_row.items():
-                                if v is not None:
-                                    return str(v)
-            
-            # Check for common keys
-            for key in ["value", "result", "data", "text"]:
-                if key in result:
-                    val = result[key]
-                    if val is not None:
-                        return str(val) if not isinstance(val, (dict, list)) else str(val)
-                        
-        # Handle direct values
-        if result is not None:
-            return str(result)
-            
+
+        # No numeric value derivable (e.g. statement text) -> None, fail over.
         return None
 
     def call(self, command: str, params: dict) -> Any:
         """Call cn-report function with timeout and retry.
-        
+
+        Routes ``get_financial_statements`` / ``get_financials`` to
+        ``extract_indicators`` because the former return statement TEXT
+        (not numeric values) — the crawl needs numbers for concept values.
+
         Args:
             command: Function name (e.g., "get_financial_statements")
             params: Parameters dict
-            
+
         Returns:
             Function result or raises FetchError
         """
         max_retries = 2
         base_delay = 1.0
-        
-        fn = getattr(T, command, None)
+
+        # Route text-returning commands to the numeric extraction path.
+        # ponytail: the binding's column name (e.g. 营业收入) becomes the
+        # indicator to extract.
+        if command in ("get_financial_statements", "get_financials"):
+            indicators = params.pop("indicators", None) or ["营业收入"]
+            extract_params = {
+                "ticker_or_name": params.get("ticker_or_name"),
+                "year": params.get("year"),
+                "indicators": indicators,
+            }
+            fn = getattr(T, "extract_indicators", None)
+        else:
+            extract_params = params
+            fn = getattr(T, command, None)
+
         if fn is None or not callable(fn):
-            raise FetchError(f"cnreport_tools has no callable {command}", 
+            raise FetchError(f"cnreport_tools has no callable {command}",
                            source="cn-report", command=command)
-        
+
         for attempt in range(max_retries + 1):
             try:
-                return fn(**params)
+                return fn(**extract_params)
             except Exception as e:
                 if attempt == max_retries:
                     raise FetchError(

@@ -56,6 +56,14 @@ def _client():
 
 
 def _key(source: str, proxy_id: int) -> str:
+    """Generate Redis key for circuit state.
+
+    Args:
+        source: Source identifier. Can be:
+            - real_source name (e.g., "eastmoney", "tencent") - preferred
+            - library name (e.g., "akshare") - fallback when no real_sources declared
+        proxy_id: Proxy ID from the proxies table
+    """
     return f"circuit:{source}:{proxy_id}"
 
 
@@ -64,7 +72,12 @@ def _now_iso() -> str:
 
 
 def get_state(source: str, proxy_id: int) -> dict:
-    """Return the circuit state dict (defaults to CLOSED if absent / no redis)."""
+    """Return the circuit state dict (defaults to CLOSED if absent / no redis).
+
+    Args:
+        source: Source identifier (real_source or library name as fallback)
+        proxy_id: Proxy ID from the proxies table
+    """
     r = _client()
     if r is None:
         return {"state": "closed", "fail_streak": 0, "success_streak": 0,
@@ -94,7 +107,13 @@ def is_selectable(source: str, proxy_id: int) -> bool:
 
 
 def record_outcome(source: str, proxy_id: int, classification: str) -> dict:
-    """Apply the state machine to a classified outcome. Returns the new state."""
+    """Apply the state machine to a classified outcome. Returns the new state.
+
+    Args:
+        source: Source identifier (real_source or library name as fallback)
+        proxy_id: Proxy ID from the proxies table
+        classification: One of "ok", "transient", "ban", "blocked"
+    """
     r = _client()
     if r is None:
         return {"state": "closed", "fail_streak": 0, "success_streak": 0,
@@ -140,7 +159,13 @@ def record_outcome(source: str, proxy_id: int, classification: str) -> dict:
 def probe_transition(source: str, proxy_id: int, probe_ok: bool) -> dict:
     """Used by the probe job: transition a HALF_OPEN circuit based on a probe
     fetch outcome. On failure, double cooldown (capped) and increment open_cycles;
-    on PERMANENT_CYCLES reached, mark permanent."""
+    on PERMANENT_CYCLES reached, mark permanent.
+
+    Args:
+        source: Source identifier (real_source or library name as fallback)
+        proxy_id: Proxy ID from the proxies table
+        probe_ok: True if probe succeeded, False if it failed
+    """
     r = _client()
     if r is None:
         return {"state": "closed", "permanent": False}
@@ -179,7 +204,11 @@ def probe_transition(source: str, proxy_id: int, probe_ok: bool) -> dict:
 
 def open_for_probe(r_client=None) -> list[tuple[str, int]]:
     """Scan for circuits that are OPEN past their cooldown (ready for HALF_OPEN
-    probe). Used by the probe job. Returns [(source, proxy_id), ...]."""
+    probe). Used by the probe job. Returns [(source, proxy_id), ...].
+
+    Note: source here can be either real_source (preferred) or library name
+    (fallback when real_sources not declared).
+    """
     r = r_client or _client()
     if r is None:
         return []
@@ -213,7 +242,10 @@ def write_outcome(source: str, outcome: dict) -> None:
 
 def all_circuits() -> list[dict]:
     """Snapshot every circuit (for the proxy-health CLI / monitoring). Returns
-    [{source, proxy_id, state, fail_streak, open_cycles, permanent, cooldown_until}]."""
+    [{source, proxy_id, state, fail_streak, open_cycles, permanent, cooldown_until}].
+
+    Note: source can be either real_source (preferred) or library name (fallback).
+    """
     r = _client()
     if r is None:
         return []

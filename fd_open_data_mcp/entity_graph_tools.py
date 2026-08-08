@@ -140,6 +140,9 @@ def add_entity(
     session = db.get_session()
 
     try:
+        from fd_open_data_mcp.entities.taxonomy import validate_entity_type
+        validate_entity_type(entity_type)
+
         # Check if already exists
         existing = session.execute(
             text("SELECT id FROM entities WHERE entity_type = :entity_type AND code = :code"),
