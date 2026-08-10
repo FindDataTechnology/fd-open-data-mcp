@@ -23,6 +23,10 @@ from fd_open_data_mcp.models import Base
 # (dialect-aware: ADD COLUMN IF NOT EXISTS on postgres; check inspect on sqlite)
 _ALTER_COLUMNS = {
     "fetch_log": [("proxy_id", "INTEGER"), ("classification", "VARCHAR(16)")],
+    # add-multi-cluster-master-db: per-cluster identity for runs + direct egress.
+    # Nullable FKs (SET NULL on cluster delete) so legacy rows survive.
+    "policy_runs": [("cluster_id", "INTEGER")],
+    "proxies": [("cluster_id", "INTEGER")],
 }
 
 
@@ -114,10 +118,10 @@ def _stock_concept_ids(session) -> dict[str, int]:
 def migrate_astock_daily(session, symbols: list[str] | None = None) -> dict:
     """Bulk-migrate astock_daily OHLCV into semantic_observations (System-B concepts).
 
-    Idempotent via ``ON CONFLICT (concept_id, entity_type, entity_id, date) DO
-    NOTHING``. If ``symbols`` is given, migrate only those symbols (used for
-    testing / targeted backfill); otherwise migrate all astock_daily rows for
-    symbols that map to a ``stock`` entity.
+    Idempotent via ``ON CONFLICT (concept_id, entity_type, entity_id, date, granularity)
+    DO NOTHING`` (granularity = 'day' for daily OHLCV). If ``symbols`` is given,
+    migrate only those symbols (used for testing / targeted backfill); otherwise
+    migrate all astock_daily rows for symbols that map to a ``stock`` entity.
     """
     code_to_id = _stock_concept_ids(session)
     expected = {c for c, _ in ASTOCK_CONCEPT_MAP.values()}
@@ -133,15 +137,16 @@ def migrate_astock_daily(session, symbols: list[str] | None = None) -> dict:
     results = {}
     for col, (code, unit) in ASTOCK_CONCEPT_MAP.items():
         cid = code_to_id[code]
+        # astock_daily is daily OHLCV -> granularity 'day' (fix-observation-time-granularity)
         sql = f"""
             INSERT INTO semantic_observations
-                (concept_id, entity_type, entity_id, date, value, unit, source_used, fetched_at)
-            SELECT :cid, :et, e.id, a.trade_date::text, a.{col}::text, :unit, :src, now()
+                (concept_id, entity_type, entity_id, date, granularity, value, unit, source_used, fetched_at)
+            SELECT :cid, :et, e.id, a.trade_date::text, 'day', a.{col}::text, :unit, :src, now()
             FROM astock_daily a
             JOIN entities e ON e.entity_type = :et AND e.code = a.symbol
             WHERE a.{col} IS NOT NULL
             {sym_filter}
-            ON CONFLICT (concept_id, entity_type, entity_id, date) DO NOTHING
+            ON CONFLICT (concept_id, entity_type, entity_id, date, granularity) DO NOTHING
         """
         p = {**params, "cid": cid, "unit": unit}
         res = session.execute(text(sql), p)

@@ -2,7 +2,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Dict, List
 
@@ -36,7 +36,7 @@ def write_catalog_py(catalog: CatalogManifest, output_path: str | Path):
     entities_str = "[]"
 
     # Generate the full file
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S")
     source_code = f'''"""{catalog.label} datasource manifest conforming to fd-open-data-protocol.
 
 Auto-generated on {timestamp}. DO NOT EDIT MANUALLY - edit enrichments/concepts.py instead.

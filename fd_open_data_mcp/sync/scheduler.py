@@ -5,7 +5,7 @@ Supports both cron-based and interval-based scheduling.
 import os
 import time
 import logging
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
@@ -58,7 +58,7 @@ class EntitySyncScheduler:
             Next run datetime
         """
         if from_time is None:
-            from_time = datetime.utcnow()
+            from_time = datetime.now(timezone.utc)
 
         if schedule_type == 'cron':
             if croniter is None:
@@ -126,7 +126,7 @@ class EntitySyncScheduler:
         """
         session = self.Session()
         try:
-            now = datetime.utcnow()
+            now = datetime.now(timezone.utc)
             next_run = self.calculate_next_run(
                 schedule_type=schedule['schedule_type'],
                 cron_expr=schedule.get('cron_expr'),
@@ -265,7 +265,7 @@ def initialize_schedules(database_url: str):
         # Other types: daily
         other_types = [t for t in entity_types if t not in critical_types]
 
-        now = datetime.utcnow()
+        now = datetime.now(timezone.utc)
 
         for entity_type in entity_types:
             if entity_type in critical_types:

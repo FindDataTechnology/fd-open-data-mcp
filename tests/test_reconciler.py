@@ -59,7 +59,9 @@ class _FakeLauncher:
 
     def launch(self, plan, policy):
         self.launched.append((plan, policy))
-        return f"job-{len(self.launched)}"
+        # Launcher Protocol returns (job_ref, cluster_id); None = no cluster
+        # (scrapyd/legacy single-cluster path).
+        return (f"job-{len(self.launched)}", None)
 
     def poll(self, job_ref):
         return self.poll_state
@@ -139,6 +141,41 @@ def test_trailing_date_policy(session):
     dr, since_last = build_date_range(p, NOW.date())
     assert not since_last
     assert dr.start == "2025-06-08" and dr.end == "2025-06-15"
+
+
+def test_launch_uses_policy_local_today(session):
+    """At 17:00 UTC (= 01:00 next-day Beijing), a trailing policy's range end is
+    Beijing's calendar day, not UTC's (fix-observation-time-granularity,
+    spec crawl-control-center delta)."""
+    cid = _register(session)
+    now_cn = datetime(2025, 8, 9, 17, 0, tzinfo=timezone.utc)  # 2025-08-10 01:00 Beijing
+    p = _policy(session, cid,
+                date_policy={"mode": "trailing", "days": 1},
+                timezone="Asia/Shanghai",
+                last_run_at=now_cn - timedelta(hours=1),
+                cron_expr="0 1 * * *")  # fires 01:00 local
+    launcher = _FakeLauncher()
+    result = reconciler.launch_policy(session, p, launcher, now=now_cn)
+    assert result["status"] == "launched"
+    plan = launcher.launched[0][0]
+    assert plan.date_range.end == "2025-08-10"      # Beijing today, not UTC 08-09
+    assert plan.date_range.start == "2025-08-09"    # trailing 1: [Aug 9, Aug 10]
+
+
+def test_launch_utc_policy_uses_utc_today(session):
+    """A UTC policy is unchanged: the range end is UTC's calendar day."""
+    cid = _register(session)
+    now = datetime(2025, 8, 9, 17, 0, tzinfo=timezone.utc)
+    p = _policy(session, cid,
+                date_policy={"mode": "trailing", "days": 1},
+                timezone="UTC",
+                last_run_at=now - timedelta(hours=1),
+                cron_expr="0 * * * *")
+    launcher = _FakeLauncher()
+    result = reconciler.launch_policy(session, p, launcher, now=now)
+    assert result["status"] == "launched"
+    plan = launcher.launched[0][0]
+    assert plan.date_range.end == "2025-08-09"      # UTC today
 
 
 def test_explicit_date_policy(session):
@@ -226,7 +263,7 @@ def test_k8s_launcher_in_cluster_posts_configmap_then_job(monkeypatch):
     monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
                         lambda self, m, p, b=None: calls.append((m, p, b)) or {})
 
-    name = launcher.launch(_crawl_plan(), SimpleNamespace(id=7))
+    name, _cluster_id = launcher.launch(_crawl_plan(), SimpleNamespace(id=7))
     assert name.startswith("crawl-policy-7-")
     (m1, p1, cm), (m2, p2, job) = calls
     assert (m1, p1) == ("POST", "/api/v1/namespaces/scraw/configmaps")

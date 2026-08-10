@@ -31,7 +31,7 @@ flaky-upstream notes (task 2.3 - what scraw-akshare actually had):
 from __future__ import annotations
 
 import logging
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Any, Optional
 
 from fd_open_data_mcp.adapters import register
@@ -398,7 +398,7 @@ def _nav_period_for(date_str: str) -> str:
     """
     try:
         target = datetime.strptime(_normalize_date(date_str), "%Y-%m-%d").date()
-        age_days = (datetime.now().date() - target).days
+        age_days = (datetime.now(timezone.utc).date() - target).days
     except ValueError:
         return "成立来"
     for label, days in (("近1月", 31), ("近3月", 92), ("近6月", 183), ("近1年", 366), ("近3年", 1097)):

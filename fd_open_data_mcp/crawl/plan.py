@@ -35,6 +35,9 @@ class PlanConcept(BaseModel):
     entity_type: str
     unit: Optional[str] = None
     frequency: Optional[str] = None
+    # day|month|year — the observation granularity tag the executor writes; derived
+    # from the concept frequency (fix-observation-time-granularity).
+    granularity: Optional[str] = None
     ranked_sources: list[PlanSource]
 
 

@@ -63,12 +63,17 @@ def plan_crawl(
     # since_last derives date_range.start from the per-concept watermark — but ONLY when
     # no explicit start was given (explicit start wins, per spec). CLI/MCP also clear
     # since_last when --start is set; this guard makes the planner robust on direct call.
+    concepts = {cid: session.get(Concept, cid) for cid in concept_ids}
     unroutable: list[dict] = []
     if since_last and date_range.start is None:
-        watermarks = [
-            _watermark(session, cid, entity_scope.entity_type)
-            for cid in concept_ids
-        ]
+        # per-concept watermark at its own granularity: a monthly concept's since-last
+        # advances from its monthly observations, never from a daily row on the 1st
+        # (fix-observation-time-granularity).
+        watermarks = []
+        for cid in concept_ids:
+            c = concepts.get(cid)
+            gran = _granularity_for(c.frequency) if c else "day"
+            watermarks.append(_watermark(session, cid, entity_scope.entity_type, gran))
         non_none = [w for w in watermarks if w is not None]
         if non_none:
             min_wm = min(non_none)
@@ -90,7 +95,7 @@ def plan_crawl(
     wanted: list[PlanConcept] = []
 
     for cid in concept_ids:
-        concept = session.get(Concept, cid)
+        concept = concepts.get(cid)
         if concept is None:
             unroutable.append({"concept_id": cid, "reason": "concept not found"})
             continue
@@ -138,7 +143,9 @@ def plan_crawl(
             continue
         wanted.append(PlanConcept(
             concept_id=cid, code=concept.code, entity_type=concept.entity_type,
-            unit=concept.unit, frequency=concept.frequency, ranked_sources=sources,
+            unit=concept.unit, frequency=concept.frequency,
+            granularity=_granularity_for(concept.frequency),
+            ranked_sources=sources,
         ))
 
     unmapped = _identifier_coverage(session, wanted, entity_scope)
@@ -178,17 +185,33 @@ def _identifier_coverage(
     return out
 
 
-def _watermark(session: Session, concept_id: int, entity_type: str) -> str | None:
-    """Return max(date) for this concept (across all sources), or None if no observations.
+def _granularity_for(frequency: str | None) -> str:
+    """Concept frequency -> observation granularity tag (day|month|year).
+
+    Mirrors the crawler's _granularity; a concept's since-last watermark must advance
+    from observations of its OWN cadence (monthly from monthly, not from daily).
+    """
+    if frequency == "yearly":
+        return "year"
+    if frequency == "monthly":
+        return "month"
+    return "day"
+
+
+def _watermark(session: Session, concept_id: int, entity_type: str,
+               granularity: str = "day") -> str | None:
+    """Return max(date) for this concept at a given granularity, or None.
 
     The observation table's UniqueConstraint has no ``source_used``, so there's exactly
-    one row per ``(concept, entity, date)`` regardless of source. The watermark is the
-    newest observation for this concept.
+    one row per ``(concept, entity, date, granularity)`` regardless of source. Filtering
+    by granularity keeps a concept's since-last watermark on its own cadence — legacy
+    bare 'YYYY'/'YYYY-MM' rows (tagged 'day' by the migration heuristic) never corrupt
+    a monthly/yearly watermark.
     """
     row = session.execute(
         text("SELECT max(date) FROM semantic_observations "
-             "WHERE concept_id=:c AND entity_type=:et"),
-        {"c": concept_id, "et": entity_type},
+             "WHERE concept_id=:c AND entity_type=:et AND granularity=:g"),
+        {"c": concept_id, "et": entity_type, "g": granularity},
     ).first()
     return row[0] if row and row[0] else None
 
@@ -196,16 +219,11 @@ def _watermark(session: Session, concept_id: int, entity_type: str) -> str | Non
 def _next_period_start(watermark_date_str: str, frequency: str | None) -> str:
     """Advance the watermark date by one period (yearly/monthly/daily).
 
-    Handles watermark formats: 'YYYY' (year-only), 'YYYY-MM' (year-month), 'YYYY-MM-DD'.
-    Returns the ISO date string for the start of the next period.
+    Canonical-only: the watermark is always 'YYYY-MM-DD'. Returns the ISO start of the
+    next period (the executor expands it to the observation date: yearly -> 12-31,
+    monthly -> 01).
     """
-    # Parse the watermark date
-    if len(watermark_date_str) == 4:  # 'YYYY'
-        wm = dt.date(int(watermark_date_str), 1, 1)
-    elif len(watermark_date_str) == 7:  # 'YYYY-MM'
-        wm = dt.date.fromisoformat(watermark_date_str + "-01")
-    else:  # 'YYYY-MM-DD' or longer
-        wm = dt.date.fromisoformat(watermark_date_str[:10])
+    wm = dt.date.fromisoformat(watermark_date_str[:10])
 
     # Advance by frequency
     if frequency == "yearly":

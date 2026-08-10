@@ -30,6 +30,64 @@ def migrate_cmd():
     click.echo(f"Initialized {r['table_count']} tables at {r['database_url']}")
 
 
+@cli.group("cluster")
+def cluster_grp():
+    """Manage the multi-cluster worker fleet (add/list worker clusters)."""
+
+
+@cluster_grp.command("add")
+@click.option("--name", required=True, help="Unique cluster name, e.g. vultr-tokyo")
+@click.option("--api-server", required=True, help="https://<host>:6443")
+@click.option("--namespace", default="scraw", help="namespace crawl Jobs run in")
+@click.option("--image", default="harbor.local/lawcraw_business/scraw-fd-open-data-mcp:latest")
+@click.option("--tag", "tags", multiple=True,
+              help="real_source this cluster can fetch (e.g. eastmoney). Repeatable. Empty = wildcard.")
+@click.option("--capacity", type=int, default=4, help="max concurrent open runs")
+@click.option("--kubeconfig-secret", help="k8s Secret name holding this cluster's creds")
+def cluster_add_cmd(name, api_server, namespace, image, tags, capacity, kubeconfig_secret):
+    """Register (or update) a worker cluster. Onboarding step 3 of k8s/master/README.md."""
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.models import Cluster
+
+    s = get_database().get_session()
+    try:
+        existing = s.query(Cluster).filter_by(name=name).first()
+        if existing:
+            existing.api_server = api_server
+            existing.namespace = namespace
+            existing.image = image
+            existing.tags = list(tags) or None
+            existing.capacity = capacity
+            existing.kubeconfig_secret = kubeconfig_secret
+            existing.enabled = True
+        else:
+            s.add(Cluster(name=name, api_server=api_server, namespace=namespace,
+                          image=image, tags=list(tags) or None, capacity=capacity,
+                          kubeconfig_secret=kubeconfig_secret))
+        s.commit()
+        row = s.query(Cluster).filter_by(name=name).first()
+        _echo(row.toDict())
+    finally:
+        s.close()
+
+
+@cluster_grp.command("list")
+def cluster_list_cmd():
+    """List registered worker clusters."""
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.models import Cluster
+
+    s = get_database().get_session()
+    try:
+        rows = s.query(Cluster).order_by(Cluster.id).all()
+        click.echo(f"{len(rows)} cluster(s):")
+        for r in rows:
+            click.echo(f"  [{r.id}] {r.name}  enabled={r.enabled}  tags={r.tags}  "
+                       f"capacity={r.capacity}  api={r.api_server}")
+    finally:
+        s.close()
+
+
 @cli.command("migrate-astock-daily")
 @click.option("--symbol", "symbols", multiple=True,
               help="Restrict to one or more 6-digit symbols (default: all astock_daily).")

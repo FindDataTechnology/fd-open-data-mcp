@@ -89,7 +89,7 @@ def seed_all(session: Session) -> dict:
     rules = _seed_ban_rules(session)
     limits = _seed_rate_limits(session)
     probes = _seed_probes(session)
-    proxy = _seed_direct_proxy(session)
+    proxy = register_cluster_egress(session, None)  # legacy single shared direct
     session.commit()
     return {"ban_rules": rules, "rate_limits": limits, "probes": probes, "direct_proxy": proxy}
 
@@ -144,15 +144,29 @@ def _seed_probes(session: Session) -> int:
     return n
 
 
-def _seed_direct_proxy(session: Session) -> str:
-    """Register the cluster's own egress as scheme='direct', ranked first.
-    Real upstream proxies are added separately (ops input)."""
-    row = session.query(Proxy).filter_by(scheme="direct").first()
+def register_cluster_egress(session: Session, cluster_id: int | None = None) -> str:
+    """Register a cluster's own egress as a scheme='direct' proxy, ranked first.
+    Real upstream proxies are added separately (ops input).
+
+    Per-cluster (add-multi-cluster-master-db): each worker cluster gets its OWN
+    direct proxy row tagged with ``cluster_id``, so the circuit breaker key
+    ``circuit:{source}:{proxy_id}`` distinguishes egress IPs across the fleet -
+    a ban on cluster A's IP opens only A's circuit, leaving B/C/D free to fetch.
+    ``cluster_id=None`` keeps the legacy single-shared-direct behavior.
+    """
+    row = session.query(Proxy).filter_by(scheme="direct", cluster_id=cluster_id).first()
     if row is None:
-        session.add(Proxy(scheme="direct", ip="direct", status="active", label="cluster-direct"))
+        label = "cluster-direct" if cluster_id is None else f"cluster-{cluster_id}-direct"
+        session.add(Proxy(scheme="direct", ip="direct", status="active",
+                          label=label, cluster_id=cluster_id))
         return "created"
     row.status = "active"
     return "updated"
+
+
+def _seed_direct_proxy(session: Session) -> str:
+    """Backward-compatible alias for the legacy single shared direct proxy."""
+    return register_cluster_egress(session, None)
 
 
 if __name__ == "__main__":

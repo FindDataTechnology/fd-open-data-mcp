@@ -116,13 +116,24 @@ from fd_open_data_mcp.crawl.planner import _next_period_start, _watermark
 
 
 def test_next_period_start_yearly():
-    assert _next_period_start("2025", "yearly") == "2026-01-01"
+    # canonical YYYY-MM-DD only (fix-observation-time-granularity); legacy bare 'YYYY'
+    # is rejected — the granularity-filtered watermark never feeds it a legacy value
     assert _next_period_start("2025-12-31", "yearly") == "2026-01-01"
+    try:
+        _next_period_start("2025", "yearly")
+        raise AssertionError("bare 'YYYY' should be rejected")
+    except ValueError:
+        pass
 
 
 def test_next_period_start_monthly():
-    assert _next_period_start("2025-06", "monthly") == "2025-07-01"
     assert _next_period_start("2025-06-15", "monthly") == "2025-07-01"
+    assert _next_period_start("2025-06-01", "monthly") == "2025-07-01"
+    try:
+        _next_period_start("2025-06", "monthly")
+        raise AssertionError("bare 'YYYY-MM' should be rejected")
+    except ValueError:
+        pass
 
 
 def test_next_period_start_daily():

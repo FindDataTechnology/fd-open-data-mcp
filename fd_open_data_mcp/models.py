@@ -302,14 +302,22 @@ class SourceRanking(Base):
 class SemanticObservation(Base):
     __tablename__ = "semantic_observations"
     __table_args__ = (
-        UniqueConstraint("concept_id", "entity_type", "entity_id", "date", name="uq_sem_obs"),
+        # granularity (day|month|year) in the key: a monthly observation of a period
+        # and a daily observation of a day inside it are DISTINCT rows, so
+        # ON CONFLICT DO NOTHING never silently drops one cadence for another
+        # (previously granularity was encoded in the day value: 12-31 / 01 / every day).
+        UniqueConstraint("concept_id", "entity_type", "entity_id", "date", "granularity",
+                         name="uq_sem_obs"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     concept_id = Column(Integer, ForeignKey("concepts.id", ondelete="CASCADE"), nullable=False, index=True)
     entity_type = Column(String(32), nullable=False)
     entity_id = Column(Integer, nullable=False)
-    date = Column(String(64), nullable=False)
+    date = Column(String(64), nullable=False)  # canonical YYYY-MM-DD (year->12-31, month->01)
+    # server_default so raw-SQL writers (tests, migrate) get 'day' too — mirrors the
+    # migration's `NOT NULL DEFAULT 'day'`. day | month | year.
+    granularity = Column(String(8), nullable=False, default="day", server_default="day")
     value = Column(String(255), nullable=True)
     unit = Column(String(64), nullable=True)
     source_used = Column(String(64), nullable=False)
@@ -318,7 +326,8 @@ class SemanticObservation(Base):
     def toDict(self) -> dict:
         return {
             "concept_id": self.concept_id, "entity_type": self.entity_type,
-            "entity_id": self.entity_id, "date": self.date, "value": self.value,
+            "entity_id": self.entity_id, "date": self.date,
+            "granularity": self.granularity, "value": self.value,
             "unit": self.unit, "source_used": self.source_used,
             "fetched_at": self.fetched_at.isoformat() if self.fetched_at else None,
         }
@@ -440,12 +449,15 @@ class PolicyRun(Base):
     policy_id = Column(Integer, ForeignKey("crawl_policies.id", ondelete="CASCADE"), nullable=False, index=True)
     status = Column(String(32), nullable=False, default="running")  # running / success / failed / refused
     plan_json = Column(JSONB, nullable=True)               # the compiled CrawlPlan
-    job_ref = Column(String(255), nullable=True)           # scrapyd job id or k8s Job name
+    job_ref = Column(String(255), nullable=True)           # "{cluster_name}/{job}" or scrapyd jobid
+    cluster_id = Column(Integer, ForeignKey("clusters.id", ondelete="SET NULL"),
+                         nullable=True, index=True)         # worker cluster that ran this (None=legacy/scrapyd)
     started_at = Column(DateTime, nullable=False, default=_now)
     finished_at = Column(DateTime, nullable=True)
     detail = Column(String, nullable=True)
 
     policy = relationship("CrawlPolicy", back_populates="runs")
+    cluster = relationship("Cluster")
 
     def toDict(self) -> dict:
         return {
@@ -454,6 +466,43 @@ class PolicyRun(Base):
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "detail": self.detail,
+            "cluster_id": self.cluster_id,
+        }
+
+
+# --- multi-cluster registry (add-multi-cluster-master-db) --------------------
+# The master control plane dispatches crawl plans to a dynamic fleet of worker
+# clusters (cloud servers). Adding a server = insert a row + mount its kubeconfig
+# as a Secret on the reconciler pod; no code change. ClusterScheduler picks a
+# cluster per plan (tags cover the plan's real_sources, egress not circuit-open,
+# least open runs, under capacity).
+
+class Cluster(Base):
+    """A worker cluster in the multi-cluster fleet. The reconciler launches crawl
+    Jobs here via its k8s API (api_server + token/ca from the kubeconfig Secret
+    named by ``kubeconfig_secret``, mounted at /kubeconfigs/<name>/). Workers are
+    stateless: read a plan ConfigMap, fetch, upsert into the shared master PG."""
+    __tablename__ = "clusters"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(64), unique=True, nullable=False, index=True)
+    api_server = Column(String(255), nullable=False)        # https://<host>:6443
+    namespace = Column(String(64), nullable=False, default="scraw")
+    image = Column(String(255), nullable=False,
+                   default="harbor.local/lawcraw_business/scraw-fd-open-data-mcp:latest")
+    tags = Column(JSONB, nullable=True)                     # real_sources this cluster can fetch, e.g. ["eastmoney","sina"]
+    capacity = Column(Integer, nullable=False, default=4)   # max concurrent open runs
+    kubeconfig_secret = Column(String(128), nullable=True)  # k8s Secret name holding this cluster's kubeconfig
+    enabled = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, nullable=False, default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "name": self.name, "api_server": self.api_server,
+            "namespace": self.namespace, "image": self.image, "tags": self.tags,
+            "capacity": self.capacity, "kubeconfig_secret": self.kubeconfig_secret,
+            "enabled": self.enabled,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 
@@ -474,13 +523,15 @@ class Proxy(Base):
     auth = Column(String(255), nullable=True)    # "user:pass" or None
     status = Column(String(16), nullable=False, default="active")  # active / retired
     label = Column(String(64), nullable=True)
+    cluster_id = Column(Integer, ForeignKey("clusters.id", ondelete="SET NULL"),
+                         nullable=True, index=True)         # per-cluster direct egress (None = shared/legacy)
     created_at = Column(DateTime, nullable=False, default=_now)
     retired_at = Column(DateTime, nullable=True)
 
     def toDict(self) -> dict:
         return {
             "id": self.id, "scheme": self.scheme, "ip": self.ip, "port": self.port,
-            "status": self.status, "label": self.label,
+            "status": self.status, "label": self.label, "cluster_id": self.cluster_id,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "retired_at": self.retired_at.isoformat() if self.retired_at else None,
         }

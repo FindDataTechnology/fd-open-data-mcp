@@ -38,7 +38,7 @@ from zoneinfo import ZoneInfo
 
 from fd_open_data_mcp.crawl.plan import CrawlPlan, DateRange, EntityScope
 from fd_open_data_mcp.crawl.planner import plan_crawl
-from fd_open_data_mcp.models import CrawlPolicy, EntitySourceIdentifier, PolicyRun
+from fd_open_data_mcp.models import Cluster, CrawlPolicy, EntitySourceIdentifier, PolicyRun, Proxy
 
 logger = logging.getLogger(__name__)
 
@@ -49,10 +49,15 @@ _OPEN = "running"  # policy_runs.status value for an open run
 
 # ─── launcher abstraction (D5) ───────────────────────────────────────────────
 class Launcher(Protocol):
-    """Executor backend: launch a compiled plan, probe a launched job."""
+    """Executor backend: launch a compiled plan, probe a launched job.
 
-    def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> str:
-        """Start the executor; return a job reference (scrapyd jobid / k8s Job name)."""
+    ``launch`` returns ``(job_ref, cluster_id)`` where ``cluster_id`` is the
+    worker cluster that ran the job (None for scrapyd / single-cluster legacy).
+    For multi-cluster, ``job_ref`` encodes the cluster as ``"{name}/{job}"`` so
+    ``poll`` can route to the right cluster API without extra state."""
+
+    def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> tuple[str, int | None]:
+        """Start the executor; return (job_ref, cluster_id)."""
         ...
 
     def poll(self, job_ref: str) -> str:
@@ -80,7 +85,7 @@ class ScrapydLauncher:
         self.project = project
         self.spider = spider
 
-    def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> str:
+    def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> tuple[str, int | None]:
         os.makedirs(self.plan_dir, exist_ok=True)
         ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         path = os.path.join(self.plan_dir, f"policy-{policy.id}-{ts}.json")
@@ -94,7 +99,7 @@ class ScrapydLauncher:
         jobid = result.get("jobid")
         if not jobid:
             raise RuntimeError(f"scrapyd schedule failed: {result}")
-        return jobid
+        return (jobid, None)
 
     def poll(self, job_ref: str) -> str:
         try:
@@ -174,7 +179,7 @@ class K8sJobLauncher:
             raise RuntimeError(f"kubectl {' '.join(args)} failed: {out.stderr.strip()}")
         return out.stdout
 
-    def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> str:
+    def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> tuple[str, int | None]:
         ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S")
         name = f"crawl-policy-{policy.id}-{ts}"
         plan_json = json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2)
@@ -229,7 +234,7 @@ class K8sJobLauncher:
         else:
             self._kubectl("apply", "-f", "-",
                           input_text="\n---\n".join(json.dumps(d) for d in docs))
-        return name
+        return (name, None)
 
     def poll(self, job_ref: str) -> str:
         if self._in_cluster():
@@ -260,6 +265,211 @@ class K8sJobLauncher:
         if active and active != "0":
             return "running"
         return "unknown"
+
+
+# ─── multi-cluster dispatch (add-multi-cluster-master-db) ────────────────────
+# A fleet of worker clusters (cloud servers) share one master Postgres + Redis.
+# Each cluster has its own egress IP -> distinct `direct` proxy -> independent
+# circuit breaker. Adding a server = insert a `clusters` row + mount its
+# kubeconfig Secret; ClusterScheduler picks one per plan (tags cover the plan's
+# sources, egress not circuit-open, fewest open runs, < capacity).
+
+class ClusterK8sClient:
+    """K8s API client for ONE worker cluster: api_server (from the DB row) + a
+    bearer token + optional CA, read as flat files from the single mounted Secret
+    ``$KUBECONFIG_DIR/<name>.{token,ca}`` (operator drops each cluster's creds as
+    keys in one Secret - adding a server adds 2 Secret keys + a DB row, no manifest
+    edit). Reuses the in-cluster REST pattern of K8sJobLauncher but per-cluster."""
+
+    def __init__(self, cluster: Cluster):
+        self.cluster = cluster
+        self._creds: tuple[str, str, str | None] | None = None  # (api_server, token, ca_path)
+
+    def _load(self) -> tuple[str, str, str | None]:
+        if self._creds is None:
+            base = os.environ.get("KUBECONFIG_DIR", "/kubeconfigs")
+            name = self.cluster.name
+            with open(os.path.join(base, f"{name}.token"), encoding="utf-8") as f:
+                token = f.read().strip()
+            ca_path = os.path.join(base, f"{name}.ca")
+            ca_path = ca_path if os.path.exists(ca_path) else None  # CA optional
+            self._creds = (self.cluster.api_server, token, ca_path)
+        return self._creds
+
+    def _api(self, method: str, path: str, body: dict | None = None) -> dict:
+        import ssl
+        api_server, token, ca = self._load()
+        ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+        req = urllib.request.Request(
+            f"{api_server}{path}", method=method,
+            data=json.dumps(body).encode() if body is not None else None,
+            headers={"Authorization": f"Bearer {token}",
+                     "Content-Type": "application/json"})
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+            return json.load(r)
+
+    def create(self, manifest: dict) -> dict:
+        kind = manifest["kind"]
+        ns = manifest["metadata"]["namespace"]
+        if kind == "ConfigMap":
+            return self._api("POST", f"/api/v1/namespaces/{ns}/configmaps", manifest)
+        if kind == "Job":
+            return self._api("POST", f"/apis/batch/v1/namespaces/{ns}/jobs", manifest)
+        raise ValueError(f"ClusterK8sClient.create: unsupported kind {kind}")
+
+    def job_status(self, name: str) -> str:
+        ns = self.cluster.namespace
+        st = self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}").get("status", {})
+        if st.get("succeeded"):
+            return "success"
+        if st.get("failed"):
+            return "failed"
+        if st.get("active"):
+            return "running"
+        return "unknown"
+
+
+def pick_cluster(session: Session, plan: CrawlPlan) -> Cluster | None:
+    """ClusterScheduler: choose a worker cluster for a plan.
+
+    Filters: enabled; tags cover the plan's real_sources (empty tags = wildcard,
+    fetch anything); open runs < capacity; egress not circuit-open for any
+    required source. Ranks by fewest open runs (load balance). None if no
+    eligible cluster (the reconciler records the run as failed)."""
+    from fd_open_data_mcp.proxy.circuit import is_selectable
+
+    sources = {rs.source for pc in plan.wanted_concepts for rs in pc.ranked_sources}
+    candidates = session.query(Cluster).filter_by(enabled=True).all()
+    if not candidates:
+        return None
+    eligible: list[tuple[Cluster, int]] = []
+    for c in candidates:
+        tags = set(c.tags or [])
+        if tags and not sources.issubset(tags):
+            continue  # cluster can't fetch some required source
+        open_runs = (session.query(PolicyRun)
+                     .filter_by(cluster_id=c.id, status=_OPEN).count())
+        if open_runs >= c.capacity:
+            continue  # at capacity
+        direct = (session.query(Proxy)
+                  .filter_by(scheme="direct", cluster_id=c.id).first())
+        if direct is not None and direct.id is not None:
+            if not all(is_selectable(src, direct.id) for src in sources):
+                continue  # this cluster's egress is banned for a required source
+        eligible.append((c, open_runs))
+    if not eligible:
+        return None
+    eligible.sort(key=lambda x: x[1])
+    return eligible[0][0]
+
+
+class MultiClusterLauncher:
+    """Dispatch crawl Jobs across the worker-cluster fleet.
+
+    ``launch`` picks a cluster (ClusterScheduler), creates a ConfigMap + Job
+    there via ClusterK8sClient, and returns ``("{cluster_name}/{job_name}",
+    cluster.id)``. ``poll`` parses the cluster prefix and probes that cluster's
+    Job. Workers point at the shared master PG (PgBouncer) + master Redis, and
+    self-register their egress (concept_crawl_spider._register_egress); the
+    ProxySelector pins to that egress so the circuit tracks per-cluster."""
+
+    def __init__(self, database_url: str | None = None, redis_url: str | None = None):
+        self.database_url = database_url or os.environ.get(
+            "SCRAW_K8S_DATABASE_URL",
+            "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres")
+        self.redis_url = redis_url or os.environ.get(
+            "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:6379/0")
+
+    def _session(self) -> Session:
+        from fd_open_data_mcp.db import get_database
+        return get_database().get_session()
+
+    def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> tuple[str, int | None]:
+        session = self._session()
+        try:
+            cluster = pick_cluster(session, plan)
+            if cluster is None:
+                raise RuntimeError(
+                    "no eligible worker cluster for plan (check clusters table: "
+                    "enabled+tags, circuit state, capacity)")
+        finally:
+            session.close()
+        ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S")
+        name = f"crawl-policy-{policy.id}-{ts}"
+        plan_json = json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2)
+        docs = [
+            {
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": f"{name}-plan", "namespace": cluster.namespace,
+                             "labels": {"app": "concept-crawl", "policy-id": str(policy.id),
+                                        "cluster": cluster.name}},
+                "data": {"plan.json": plan_json},
+            },
+            {
+                "apiVersion": "batch/v1", "kind": "Job",
+                "metadata": {"name": name, "namespace": cluster.namespace,
+                             "labels": {"app": "concept-crawl", "policy-id": str(policy.id),
+                                        "cluster": cluster.name}},
+                "spec": {
+                    "backoffLimit": 2,
+                    "ttlSecondsAfterFinished": 86400,
+                    "template": {
+                        "metadata": {"labels": {"app": "concept-crawl",
+                                                "policy-id": str(policy.id),
+                                                "cluster": cluster.name}},
+                        "spec": {
+                            "restartPolicy": "OnFailure",
+                            "imagePullSecrets": [{"name": "fd-harbor-pull"}],
+                            "containers": [{
+                                "name": "crawler",
+                                "image": cluster.image,
+                                "imagePullPolicy": "Always",
+                                "command": ["scraw-fd-open-data-mcp", "crawl", "/plan/plan.json"],
+                                "volumeMounts": [{"name": "plan-volume", "mountPath": "/plan",
+                                                  "readOnly": True}],
+                                "env": [
+                                    {"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
+                                     "value": self.database_url},
+                                    {"name": "REDIS_URL", "value": self.redis_url},
+                                    # tells the worker which cluster it is so the
+                                    # ProxySelector pins to its own egress (per-cluster circuit)
+                                    {"name": "SCRAW_CLUSTER_ID", "value": str(cluster.id)},
+                                    {"name": "SCRAW_CLUSTER_NAME", "value": cluster.name},
+                                    {"name": "PYTHONUNBUFFERED", "value": "1"},
+                                ],
+                                "resources": {
+                                    "requests": {"memory": "256Mi", "cpu": "200m"},
+                                    "limits": {"memory": "1Gi", "cpu": "1000m"},
+                                },
+                            }],
+                            "volumes": [{"name": "plan-volume",
+                                         "configMap": {"name": f"{name}-plan"}}],
+                        },
+                    },
+                },
+            },
+        ]
+        client = ClusterK8sClient(cluster)
+        client.create(docs[0])
+        client.create(docs[1])
+        logger.info("launched policy %s on cluster %s as job=%s", policy.name, cluster.name, name)
+        return (f"{cluster.name}/{name}", cluster.id)
+
+    def poll(self, job_ref: str) -> str:
+        if "/" not in job_ref:
+            return "unknown"
+        cluster_name, job_name = job_ref.split("/", 1)
+        session = self._session()
+        try:
+            cluster = session.query(Cluster).filter_by(name=cluster_name).first()
+        finally:
+            session.close()
+        if cluster is None:
+            return "unknown"
+        try:
+            return ClusterK8sClient(cluster).job_status(job_name)
+        except Exception:  # noqa: BLE001 - api unreachable / job gone
+            return "unknown"
 
 
 # ─── date-range builder (5.2) ────────────────────────────────────────────────
@@ -327,10 +537,16 @@ def estimate_fetches(session: Session, plan: CrawlPlan) -> int:
 
 
 # ─── due-policy selection (5.1) ──────────────────────────────────────────────
+def _policy_tz(policy: CrawlPolicy):
+    """The policy's configured timezone (cron due-ness AND crawl 'today' both use it —
+    hoisted so the crawl date range matches the calendar day the cron fired on)."""
+    return ZoneInfo(policy.timezone or "UTC")
+
+
 def _cron_due(policy: CrawlPolicy, now: dt.datetime) -> bool:
     """True when the cron's next fire after the last run (or creation) is <= now,
     computed in the policy's timezone."""
-    tz = ZoneInfo(policy.timezone or "UTC")
+    tz = _policy_tz(policy)
     local_now = now.astimezone(tz)
     base = (policy.last_run_at or policy.created_at)
     if base is None:
@@ -370,7 +586,11 @@ def launch_policy(
         logger.info("policy %s due but has an open run; skipping (single-flight)", policy.name)
         return {"policy": policy.name, "status": "skipped", "reason": "open run (single-flight)"}
 
-    date_range, since_last = build_date_range(policy, now.date())
+    # the crawl window uses the policy's LOCAL calendar day, not UTC's — at 01:00
+    # Beijing (17:00 UTC prev day) a trailing/since_last policy must cover Beijing
+    # today, not UTC yesterday (fix-observation-time-granularity, spec crawl-control-center)
+    local_today = now.astimezone(_policy_tz(policy)).date()
+    date_range, since_last = build_date_range(policy, local_today)
     plan = plan_crawl(
         session, list(policy.concept_ids or []),
         EntityScope(entity_type=policy.entity_type,
@@ -394,7 +614,7 @@ def launch_policy(
                 "reason": detail}
 
     try:
-        job_ref = launcher.launch(plan, policy)
+        job_ref, cluster_id = launcher.launch(plan, policy)
     except Exception as e:  # noqa: BLE001 - a broken launcher must not kill the tick
         logger.exception("policy %s launch failed", policy.name)
         session.add(PolicyRun(policy_id=policy.id, status="failed",
@@ -407,7 +627,7 @@ def launch_policy(
 
     session.add(PolicyRun(policy_id=policy.id, status=_OPEN,
                           plan_json=plan.model_dump(mode="json"),
-                          job_ref=job_ref, started_at=now))
+                          job_ref=job_ref, cluster_id=cluster_id, started_at=now))
     policy.last_run_at = now
     session.commit()
     logger.info("policy %s launched job=%s estimate=%d", policy.name, job_ref, estimate)
@@ -454,6 +674,8 @@ def _default_launcher() -> Launcher:
     kind = os.environ.get("RECONCILER_LAUNCHER", "scrapyd")
     if kind == "k8s":
         return K8sJobLauncher()
+    if kind == "k8s-multi":
+        return MultiClusterLauncher()
     return ScrapydLauncher()
 
 
