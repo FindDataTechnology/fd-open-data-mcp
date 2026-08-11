@@ -83,3 +83,10 @@ try:
     from fd_open_data_mcp.adapters import cnreport as _cnreport_adapters  # noqa: E402,F401
 except ImportError:
     pass
+
+# Load datacommons adapters (optional - requires fd-datacommons). Same guard as
+# cn-report: environments without the package simply lack the datacommons source.
+try:
+    from fd_open_data_mcp.adapters import datacommons as _dc_adapters  # noqa: E402,F401
+except ImportError:
+    pass

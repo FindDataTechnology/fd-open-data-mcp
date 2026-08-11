@@ -193,6 +193,18 @@ def run_upstream(source: str, command: str, params: dict) -> Any:
     if source == "sac-securities":
         from fd_open_data_mcp.adapters.sac_securities import run_sac_securities
         return run_sac_securities(command, params)
+    if source == "polygon":
+        # run_polygon lives in the external fd-polygon datasource package (the
+        # manifest's fetch.module). Lazy-imported so fd-open-data-mcp does not
+        # depend on polygon-api-client unless a polygon fetch is actually made.
+        from fd_polygon.provider import run_polygon
+        return run_polygon(command, params)
+    if source == "datacommons":
+        # run_dc lives in the external fd-datacommons datasource package (the
+        # manifest's fetch.module). Lazy-imported so fd-open-data-mcp does not
+        # depend on requests unless a datacommons fetch is actually made.
+        from fd_datacommons.provider import run_dc
+        return run_dc(command, params)
     raise FetchError(f"no runner for source {source}")
 
 
