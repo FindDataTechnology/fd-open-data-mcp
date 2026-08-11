@@ -36,6 +36,16 @@ from fd_open_data_mcp.proxy.selector import ProxySelector
 logger = logging.getLogger(__name__)
 
 
+# Sources that bypass the proxy/circuit pipeline and run direct. These are
+# authenticated REST APIs (key/header auth) that manage their own HTTP transport
+# and gain nothing from free-proxy rotation — injecting dead proxies only breaks
+# them. ``cn-report`` uses akshare->eastmoney internally (IP-scraped, but the
+# inner akshare call rejects proxies); ``polygon`` is key-authenticated
+# (``POLYGON_API_KEY`` header). Both still get a timed ``run_upstream`` +
+# ``fetch_log`` entry; they just skip the ProxySelector/circuit/retry loop.
+_DIRECT_SOURCES = frozenset({"cn-report", "polygon", "datacommons"})
+
+
 class SourceUnavailable(Exception):
     """Every proxy for a source is OPEN/saturated - caller should fail over to
     the next source in the plan's ranked_sources chain."""
@@ -106,9 +116,12 @@ def instrumented_fetch(
     # Use real_source for circuit operations if available, otherwise fall back to source
     circuit_source = real_source if real_source else source
 
-    # cn-report adapter uses akshare internally (for financial values), which breaks
-    # under proxy injection (akshare calls eastmoney directly). Skip proxy for cn-report.
-    if source == "cn-report":
+    # Authenticated REST APIs that manage their own HTTP transport and gain nothing
+    # from proxy rotation (they are not IP-scraped). cn-report uses akshare->eastmoney
+    # internally, which breaks under proxy injection; polygon is key-authenticated
+    # (POLYGON_API_KEY header) — proxying a free-proxy pool only breaks it. Both run
+    # direct: no ProxySelector, no circuit, just a timed run_upstream + fetch_log.
+    if source in _DIRECT_SOURCES:
         t0 = time.time()
         try:
             value = run_upstream(source, command, params)

@@ -17,6 +17,7 @@ from fd_open_data_mcp.models import Concept, FetchLog, Function, SourceRanking
 HEURISTIC_SEEDS: dict[str, tuple[float, float]] = {
     "worldbank": (0.9, 0.8),   # authoritative, decent accessibility
     "wbgapi":    (0.9, 0.8),   # World Bank official, free no-auth API
+    "datacommons": (0.85, 0.7), # Google-curated aggregates (UN/Census/WB provenance); free key-auth API
     "edgar":     (0.85, 0.6),  # SEC official filings; rate-limited, needs identity
     "cn-gov":    (0.8, 0.75),  # official government sources
     "cn-report": (0.7, 0.7),

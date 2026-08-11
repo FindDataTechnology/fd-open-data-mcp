@@ -205,7 +205,11 @@ def seed_stock_identifiers(session: Session, db_path: Optional[str] = None) -> d
 
 
 def seed_country_identifiers(session: Session, db_path: Optional[str] = None) -> dict:
-    """Seed worldbank identifiers (= iso_code) and wbgapi identifiers (= iso3) for all countries."""
+    """Seed per-source identifiers for all countries.
+
+    worldbank = ISO2 ``iso_code``; wbgapi = ISO3; datacommons = ``country/<ISO3>``
+    DCID (e.g. ``country/USA``), per Data Commons entity conventions.
+    """
     from fd_open_data_mcp.entities.taxonomy import list_entities
 
     countries = list_entities("country", db_path)
@@ -218,10 +222,12 @@ def seed_country_identifiers(session: Session, db_path: Optional[str] = None) ->
         iso3 = _iso2_to_iso3(iso)
         if iso3:
             rows.append({"entity_type": "country", "entity_id": c["id"], "source": "wbgapi", "identifier": iso3})
+            rows.append({"entity_type": "country", "entity_id": c["id"], "source": "datacommons", "identifier": f"country/{iso3}"})
     _bulk_upsert_identifiers(session, rows)
     return {
         "worldbank": sum(1 for r in rows if r["source"] == "worldbank"),
         "wbgapi": sum(1 for r in rows if r["source"] == "wbgapi"),
+        "datacommons": sum(1 for r in rows if r["source"] == "datacommons"),
     }
 
 

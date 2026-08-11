@@ -110,11 +110,30 @@ def migrate_astock_daily_cmd(symbols):
 
 
 @cli.command("serve")
-def serve_cmd():
-    """Run the FastMCP server (stdio transport)."""
+@click.option(
+    "--transport",
+    type=click.Choice(["stdio", "http"]),
+    default="stdio",
+    show_default=True,
+    help="stdio = subprocess MCP client; http = long-running Streamable HTTP server.",
+)
+@click.option("--host", default="127.0.0.1", show_default=True, help="HTTP bind host.")
+@click.option(
+    "--port",
+    default=8300,
+    show_default=True,
+    help="HTTP bind port (default matches the fd-daas-mcp gateway_upstreams row).",
+)
+def serve_cmd(transport, host, port):
+    """Run the FastMCP server.
+
+    Stdio by default (for local MCP clients). Use ``--transport http`` to run
+    a long-running HTTP server; the MCP endpoint is then at
+    ``http://<host>:<port>/mcp``.
+    """
     from fd_open_data_mcp.server import main
 
-    main()
+    main(transport=transport, host=host, port=port)
 
 
 @cli.command("panel")
