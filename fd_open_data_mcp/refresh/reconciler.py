@@ -519,12 +519,15 @@ def estimate_fetches(session: Session, plan: CrawlPlan) -> int:
     else:
         # entities of the type carrying an identifier for at least one ranked source
         sources = {rs.source for pc in plan.wanted_concepts for rs in pc.ranked_sources}
-        n_entities = (
-            session.query(func.count(func.distinct(EntitySourceIdentifier.entity_id)))
-            .filter(EntitySourceIdentifier.entity_type == scope.entity_type,
-                    EntitySourceIdentifier.source.in_(sources or {"\x00"}))
-            .scalar()
-        ) or 0
+        if sources:
+            n_entities = (
+                session.query(func.count(func.distinct(EntitySourceIdentifier.entity_id)))
+                .filter(EntitySourceIdentifier.entity_type == scope.entity_type,
+                        EntitySourceIdentifier.source.in_(sources))
+                .scalar()
+            ) or 0
+        else:
+            n_entities = 0   # no ranked sources -> nothing fetchable
     total = 0
     for pc in plan.wanted_concepts:
         if plan.mode == "series" or plan.date_range.start is None:

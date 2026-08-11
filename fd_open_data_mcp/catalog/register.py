@@ -57,9 +57,11 @@ def upsert_entity(session: Session, entity_spec: Any, source_name: str = None) -
             entity.name_zh = entity_spec.name_zh
             updated = True
 
-        # Merge metadata
+        # Merge metadata. Copy into a fresh dict so SQLAlchemy flags the JSONB
+        # column as dirty - mutating the existing dict in place reassigns the same
+        # object and the change is not detected/persisted.
         if entity_spec.metadata:
-            current_metadata = entity.metadata_json or {}
+            current_metadata = dict(entity.metadata_json or {})
             current_metadata.update(entity_spec.metadata)
             if source_name:
                 current_metadata["source"] = source_name

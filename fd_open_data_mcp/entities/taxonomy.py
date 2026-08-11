@@ -45,7 +45,7 @@ def default_engine():
 # as an entity_type (see validate_entity_type).
 ENTITY_TYPES: tuple[str, ...] = (
     "country", "city", "stock", "fund", "bond", "index", "future", "crypto",
-    "organization", "industry", "company", "person"
+    "organization", "industry", "exchange", "company", "person"
 )
 
 # entity_type values that are explicitly rejected, with the redirect message.
