@@ -864,8 +864,18 @@ def register_discovered() -> dict:
         s.close()
 
 
-def main() -> None:
-    mcp.run()
+def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8300) -> None:
+    """Run the FastMCP server.
+
+    By default uses stdio transport (for local MCP clients launched as a
+    subprocess). Pass ``transport="http"`` to serve over Streamable HTTP
+    for long-running / remote use; the MCP endpoint is then reachable at
+    ``http://<host>:<port>/mcp``.
+    """
+    if transport == "stdio":
+        mcp.run()
+    else:
+        mcp.run(transport=transport, host=host, port=port)
 
 
 if __name__ == "__main__":
