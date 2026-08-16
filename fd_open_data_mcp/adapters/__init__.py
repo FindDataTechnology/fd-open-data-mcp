@@ -90,3 +90,71 @@ try:
     from fd_open_data_mcp.adapters import datacommons as _dc_adapters  # noqa: E402,F401
 except ImportError:
     pass
+
+# Load wbgapi adapters (optional - wbgapi is in the `data` extra, not a hard dep).
+# The adapter module imports nothing wbgapi-specific at module level (pandas is
+# lazily imported inside extract_value), so this import succeeds regardless; the
+# guard keeps the "optional source" convention consistent. Registers
+# ``get_indicator_data`` (indicator=column.name series code, economy=identifier).
+try:
+    from fd_open_data_mcp.adapters import wbgapi as _wbgapi_adapters  # noqa: E402,F401
+except ImportError:
+    pass
+
+# Load yfinance adapters (optional - yfinance is in the `data` extra, not a hard
+# dep). The adapter module only imports yfinance lazily inside ``call()``, so this
+# import succeeds regardless; the guard keeps the "optional source" convention
+# consistent with cnreport/datacommons. Registers ``ticker_history``.
+try:
+    from fd_open_data_mcp.adapters import yfinance as _yfinance_adapters  # noqa: E402,F401
+except ImportError:
+    pass
+
+# Load edgar adapters (optional - edgartools is in the `data` extra, not a hard
+# dep). The adapter module imports edgar lazily inside ``call()``, so this import
+# succeeds regardless. Registers ``company_get_filings``.
+try:
+    from fd_open_data_mcp.adapters import edgar as _edgar_adapters  # noqa: E402,F401
+except ImportError:
+    pass
+
+# Load edinet adapters (optional - edinet-tools is in the `data` extra, not a hard
+# dep). The adapter module imports edinet_tools lazily inside ``call()``, so this
+# import succeeds regardless. Registers ``entity_documents``.
+try:
+    from fd_open_data_mcp.adapters import edinet as _edinet_adapters  # noqa: E402,F401
+except ImportError:
+    pass
+
+# Load dartlab adapters (optional - dartlab is in the `data` extra + needs Python
+# 3.12). The adapter module imports dartlab lazily inside ``call()``, so this
+# import succeeds regardless of interpreter version; the guard keeps the
+# "optional source" convention consistent with edinet. Registers
+# ``company_panel`` / ``company_credit`` / ``company_analysis`` /
+# ``company_news`` / ``company_disclosure`` / ``company_search``.
+try:
+    from fd_open_data_mcp.adapters import dartlab as _dartlab_adapters  # noqa: E402,F401
+except ImportError:
+    pass
+
+# Load ckan adapters (optional - ckanapi is in the `data` extra, not a hard
+# dep). ckan is **keyless** (no env var). The adapter module imports ckanapi
+# lazily inside ``call()``, so this import succeeds regardless; the guard keeps
+# the "optional source" convention consistent. Registers ``package_search`` /
+# ``package_show`` / ``resource_show`` / ``organization_list`` / ``tag_list``.
+try:
+    from fd_open_data_mcp.adapters import ckan as _ckan_adapters  # noqa: E402,F401
+except ImportError:
+    pass
+
+# Load cnstats adapters (optional - cnstats is backed by akshare, already a hard
+# dep via the akshare adapter, so the guard is a formality keeping the "optional
+# source" convention consistent). cnstats is **keyless** (no env var). The
+# adapter module imports akshare lazily inside ``call()``, so this import
+# succeeds regardless. Registers ``cpi`` / ``pmi`` / ``industrial_output`` /
+# ``fixed_asset_investment`` / ``retail_sales`` / ``gdp_quarterly`` /
+# ``trade_balance`` / ``money_supply``.
+try:
+    from fd_open_data_mcp.adapters import cnstats as _cnstats_adapters  # noqa: E402,F401
+except ImportError:
+    pass

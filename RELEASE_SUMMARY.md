@@ -41,7 +41,7 @@ pip install fd-open-data-mcp[data]==0.3.0
    - Multi-provider LLM support
    - OpenAI, Anthropic, DeepSeek, Azure, local models
    - Configurable via environment variables
-   - Tested with linjie.love API (deepseek-v4-flash)
+   - Tested with a self-hosted OpenAI-compatible gateway (deepseek-v4-flash)
 
 3. **Playwright Web Scraping** ✅
    - Chromium browser installed
@@ -175,7 +175,7 @@ FD_OPEN_DATA_MCP_DATABASE_URL=sqlite:///metadata/daas.db
 EDGAR_IDENTITY=finddatatechnology@gmail.com
 
 # LLM Configuration (LiteLLM)
-LLM_BASE_URL=https://www.linjie.love/v1
+LLM_BASE_URL=http://124.223.42.3:30080/v1
 LLM_API_KEY=sk-your-api-key-here
 LLM_MODEL=openai/deepseek-v4-flash
 PDF_PROCESS_MODEL=openai/deepseek-v4-flash

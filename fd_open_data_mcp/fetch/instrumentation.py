@@ -37,13 +37,16 @@ logger = logging.getLogger(__name__)
 
 
 # Sources that bypass the proxy/circuit pipeline and run direct. These are
-# authenticated REST APIs (key/header auth) that manage their own HTTP transport
-# and gain nothing from free-proxy rotation — injecting dead proxies only breaks
-# them. ``cn-report`` uses akshare->eastmoney internally (IP-scraped, but the
-# inner akshare call rejects proxies); ``polygon`` is key-authenticated
-# (``POLYGON_API_KEY`` header). Both still get a timed ``run_upstream`` +
-# ``fetch_log`` entry; they just skip the ProxySelector/circuit/retry loop.
-_DIRECT_SOURCES = frozenset({"cn-report", "polygon", "datacommons"})
+# public/authenticated REST APIs that manage their own HTTP transport and gain
+# nothing from free-proxy rotation — injecting dead proxies only breaks them.
+# ``cn-report`` uses akshare->eastmoney internally (IP-scraped, but the inner
+# akshare call rejects proxies); ``polygon`` is key-authenticated
+# (``POLYGON_API_KEY`` header); ``datacommons`` is key-authenticated
+# (``DC_API_KEY`` header); ``wbgapi`` hits the public World Bank API
+# (api.worldbank.org) which does not IP-ban. All still get a timed
+# ``run_upstream`` + ``fetch_log`` entry; they just skip the
+# ProxySelector/circuit/retry loop.
+_DIRECT_SOURCES = frozenset({"cn-report", "polygon", "datacommons", "wbgapi"})
 
 
 class SourceUnavailable(Exception):

@@ -110,6 +110,99 @@ def introspect_edgar() -> list[dict]:
     return out
 
 
+def introspect_edinet() -> list[dict]:
+    """Flatten edinet_tools.Entity methods + top-level edinet_tools callables.
+
+    edinet-tools (PyPI dist) imports as ``edinet_tools``; its surface is the
+    Entity object (like edgar's Company). Requires the ``data`` extra; raises
+    ImportError if absent (caught by the importer's ``_import_upstream_extras``).
+    """
+    import edinet_tools  # lazy; requires the `data` extra (edinet-tools dist)
+
+    out: list[dict] = []
+    entity_cls = getattr(edinet_tools, "Entity", None)
+    if entity_cls is not None:
+        for method_name in dir(entity_cls):
+            if method_name.startswith("_"):
+                continue
+            attr = getattr(entity_cls, method_name)
+            if not (inspect.isfunction(attr) or inspect.ismethod(attr)):
+                continue
+            out.append({
+                "command": f"entity_{method_name}",
+                "category": "entity",
+                "description": _doc(attr),
+                "source_url": None,
+                "parameters": [],
+                "columns": [],
+            })
+    for name, obj in vars(edinet_tools).items():
+        if name.startswith("_") or not inspect.isfunction(obj):
+            continue
+        out.append({
+            "command": name,
+            "category": "top-level",
+            "description": _doc(obj),
+            "source_url": None,
+            "parameters": [],
+            "columns": [],
+        })
+    return out
+
+
+def introspect_dartlab() -> list[dict]:
+    """Flatten dartlab.Company attributes + top-level dartlab callables.
+
+    dartlab (PyPI dist ``dartlab``) imports as ``dartlab``; requires Python 3.12.
+    ``Company`` is a factory routing via a provider ``canHandle`` chain; at the
+    class level ``panel``/``credit``/``analysis``/``quant`` are ``property``
+    descriptors (callable proxies) and ``news``/``disclosure``/``search`` are
+    methods. Class-level ``None`` attrs (``show``/``collect``) are skipped.
+    Requires the ``data`` extra + Python 3.12; raises ImportError if absent
+    (caught by the importer's ``_import_upstream_extras``).
+    """
+    import dartlab  # lazy; requires the `data` extra + Python 3.12
+
+    out: list[dict] = []
+    company_cls = getattr(dartlab, "Company", None)
+    if company_cls is not None:
+        for method_name in dir(company_cls):
+            if method_name.startswith("_"):
+                continue
+            attr = getattr(company_cls, method_name, None)
+            if attr is None:
+                # Skip class-level NoneType attrs (e.g. show/collect).
+                continue
+            # panel/credit/analysis/quant are property descriptors; news/
+            # disclosure/search are functions/staticmethods.
+            if not (
+                isinstance(attr, property)
+                or inspect.isfunction(attr)
+                or inspect.ismethod(attr)
+            ):
+                continue
+            out.append({
+                "command": f"company_{method_name}",
+                "category": "company",
+                "description": _doc(attr),
+                "source_url": None,
+                "parameters": [],
+                "columns": [],
+            })
+    for name, obj in vars(dartlab).items():
+        if name.startswith("_") or not inspect.isfunction(obj):
+            continue
+        out.append({
+            "command": name,
+            "category": "top-level",
+            "description": _doc(obj),
+            "source_url": None,
+            "parameters": [],
+            "columns": [],
+        })
+    return out
+
+
 def introspect_wbgapi() -> list[dict]:
     """Flatten wbgapi submodule callables (wb.data, wb.economy, wb.series, ...).
 
@@ -140,6 +233,27 @@ def introspect_wbgapi() -> list[dict]:
     return out
 
 
+def introspect_ckan() -> list[dict]:
+    """CKAN's surface is the action API (``RemoteCKAN(portal).action.<verb>``),
+    not a flat module of callables, so a traditional introspector doesn't apply.
+    The curated seed (``catalog/seeds/ckan.py``) is authoritative; return ``[]``
+    so ``introspect_upstream("ckan")`` is a documented no-op rather than a
+    silent fall-through.
+    """
+    return []
+
+
+def introspect_cnstats() -> list[dict]:
+    """cnstats is a curated 8-command mapping to akshare macro functions, not a
+    flat module of callables, so a traditional introspector doesn't apply (the
+    akshare macro functions themselves are already surfaced by
+    ``introspect_akshare``). The curated seed (``catalog/seeds/cnstats.py``) is
+    authoritative; return ``[]`` so ``introspect_upstream("cnstats")`` is a
+    documented no-op rather than a silent fall-through.
+    """
+    return []
+
+
 def introspect_upstream(upstream: str) -> list[dict]:
     """Dispatch to the right upstream introspector by package name."""
     if upstream == "akshare":
@@ -148,6 +262,14 @@ def introspect_upstream(upstream: str) -> list[dict]:
         return introspect_yfinance()
     if upstream == "edgar":
         return introspect_edgar()
+    if upstream == "edinet":
+        return introspect_edinet()
+    if upstream == "dartlab":
+        return introspect_dartlab()
     if upstream == "wbgapi":
         return introspect_wbgapi()
+    if upstream == "ckan":
+        return introspect_ckan()
+    if upstream == "cnstats":
+        return introspect_cnstats()
     return []

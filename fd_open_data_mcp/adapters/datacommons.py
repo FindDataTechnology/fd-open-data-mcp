@@ -85,10 +85,19 @@ class DataCommonsAdapter:
         if not variable:
             raise FetchError("datacommons binding has no column name (variable DCID)",
                              source="datacommons", command=fn.command)
+        # DC's `date` query param wants a bare year ("2023") or "LATEST"; a full
+        # ISO date ("2023-12-31" — what the yearly crawl expands to) returns NO
+        # observations (the API silently filters it out). Normalize to the year;
+        # extract_value's _match_obs still matches the original date string
+        # against the returned observation's year date.
+        if not date or date == "LATEST":
+            dc_date = "LATEST"
+        else:
+            dc_date = str(date)[:4]
         return {
             "variable_dcids": [variable],
             "entity_dcids": [identifier],
-            "date": date or "LATEST",
+            "date": dc_date,
         }
 
     def build_range_params(

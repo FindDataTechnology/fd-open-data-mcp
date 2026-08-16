@@ -37,6 +37,18 @@ def run_akshare(command: str, params: dict) -> Any:
 
 
 def run_yfinance(command: str, params: dict) -> Any:
+    # If a per-function adapter with a ``call`` method is registered, delegate to
+    # it (the adapter passes date-range kwargs through to the Ticker method and
+    # adds a simple retry - task 2.1). Otherwise fall back to the legacy direct
+    # call (symbol popped, method invoked with NO kwargs), so un-adaptered
+    # commands keep working (no regression).
+    from fd_open_data_mcp.adapters import adapter_for
+
+    adapter = adapter_for("yfinance", command)
+    call = getattr(adapter, "call", None)
+    if call is not None:
+        return call(command, params)
+
     import yfinance as yf  # lazy; requires the `data` extra
 
     if command.startswith("ticker_"):
@@ -79,6 +91,20 @@ def _ensure_edgar_identity() -> None:
 
 
 def run_edgar(command: str, params: dict) -> Any:
+    # If a per-function adapter with a ``call`` method is registered, delegate to
+    # it (the adapter filters filings by filing_date, sets the SEC identity, and
+    # adds a simple retry - task 2.2). The adapter's ``call()`` triggers
+    # ``_ensure_edgar_identity()`` itself, so no identity check is needed on this
+    # path. Otherwise fall back to the legacy direct call (ticker popped,
+    # ``company.<method>()`` invoked with NO kwargs), so un-adaptered commands
+    # keep working (no regression).
+    from fd_open_data_mcp.adapters import adapter_for
+
+    adapter = adapter_for("edgar", command)
+    call = getattr(adapter, "call", None)
+    if call is not None:
+        return call(command, params)
+
     import edgar  # lazy; requires the `data` extra (edgartools dist)
     _ensure_edgar_identity()
     if command.startswith("company_"):
@@ -101,6 +127,146 @@ def run_edgar(command: str, params: dict) -> Any:
         return fn(**params)
     except Exception as e:  # noqa: BLE001
         raise FetchError(f"edgar {command} raised: {e}") from e
+
+
+_EDINET_CONFIGURED = False
+
+
+def _ensure_edinet_api_key() -> None:
+    """Configure ``edinet_tools`` with ``EDINET_API_KEY`` once. Raise FetchError if unset.
+
+    Only document fetching (``Entity.documents()`` / ``edinet_tools.documents()``)
+    needs the key - entity lookup/search read the bundled FSA registry CSVs and
+    are keyless, so callers invoke this only on document-fetch paths.
+    """
+    global _EDINET_CONFIGURED
+    if _EDINET_CONFIGURED:
+        return
+    import os
+
+    key = os.environ.get("EDINET_API_KEY")
+    if not key:
+        raise FetchError(
+            "EDINET_API_KEY env var is not set; EDINET document fetching requires an API key"
+        )
+    import edinet_tools
+    edinet_tools.configure(api_key=key)
+    _EDINET_CONFIGURED = True
+
+
+_DART_KEY_CHECKED = False
+
+
+def _ensure_dart_api_key() -> None:
+    """Verify ``DART_API_KEY`` (alt ``DART_API_KEYS``) is present once.
+
+    dartlab reads the DART OpenAPI key **directly** from the environment at
+    call time (it does not expose a ``configure()`` step like edinet-tools),
+    so the guard is a presence check only — no library call. Only document
+    fetching (``company.disclosure``) and panel/credit/analysis need the key;
+    ``company.news`` and ``Company.search`` are keyless public endpoints, so
+    the adapter only calls this on the credentialed paths.
+    """
+    global _DART_KEY_CHECKED
+    if _DART_KEY_CHECKED:
+        return
+    import os
+
+    if not (os.environ.get("DART_API_KEY") or os.environ.get("DART_API_KEYS")):
+        raise FetchError(
+            "DART_API_KEY env var is not set; DART document/panel fetching requires an API key"
+        )
+    _DART_KEY_CHECKED = True
+
+
+def run_edinet(command: str, params: dict) -> Any:
+    # If a per-function adapter with a ``call`` method is registered, delegate to
+    # it (the adapter computes the days-lookback window from the requested date,
+    # configures the API key, and adds a simple retry - task 2.3). The adapter's
+    # ``call()`` triggers ``_ensure_edinet_api_key()`` itself. Otherwise fall back
+    # to the legacy direct call (code popped, ``entity.<method>()`` invoked with
+    # NO kwargs), so un-adaptered commands keep working (no regression).
+    from fd_open_data_mcp.adapters import adapter_for
+
+    adapter = adapter_for("edinet", command)
+    call = getattr(adapter, "call", None)
+    if call is not None:
+        return call(command, params)
+
+    import edinet_tools  # lazy; requires the `data` extra (edinet-tools dist)
+
+    if command.startswith("entity_"):
+        method = command[len("entity_"):]
+        code = params.get("code")
+        if code is None:
+            raise FetchError(f"entity_* command {command} needs a code")
+        if method == "documents":
+            _ensure_edinet_api_key()
+        entity = edinet_tools.entity(code)
+        attr = getattr(entity, method, None)
+        if attr is None:
+            raise FetchError(f"edinet Entity has no method {method}")
+        try:
+            return attr() if callable(attr) else attr
+        except Exception as e:  # noqa: BLE001
+            raise FetchError(f"edinet Entity.{method} raised: {e}") from e
+    if command in ("documents", "fetch_and_parse"):
+        _ensure_edinet_api_key()
+    fn = getattr(edinet_tools, command, None)
+    if fn is None or not callable(fn):
+        raise FetchError(f"edinet_tools has no callable {command}")
+    try:
+        return fn(**params)
+    except Exception as e:  # noqa: BLE001
+        raise FetchError(f"edinet_tools {command} raised: {e}") from e
+
+
+def run_dartlab(command: str, params: dict) -> Any:
+    # If a per-function adapter with a ``call`` method is registered, delegate to
+    # it (the adapter coerces polars→pandas, matches wide-panel period headers
+    # / long-frame date axes, and adds a simple retry - task 2.4). The adapter's
+    # ``call()`` triggers ``_ensure_dart_api_key()`` itself on credentialed paths.
+    # Otherwise fall back to the legacy direct call (code popped, the company
+    # accessor invoked with NO kwargs), so un-adaptered commands keep working.
+    from fd_open_data_mcp.adapters import adapter_for
+
+    adapter = adapter_for("dartlab", command)
+    call = getattr(adapter, "call", None)
+    if call is not None:
+        return call(command, params)
+
+    import dartlab  # lazy; requires the `data` extra + Python 3.12
+
+    if command == "company_search":
+        keyword = params.get("keyword")
+        if keyword is None:
+            raise FetchError("company_search needs a keyword")
+        return dartlab.Company.search(keyword)
+
+    if command.startswith("company_"):
+        method = command[len("company_"):]
+        code = params.get("code")
+        if code is None:
+            raise FetchError(f"company_* command {command} needs a code")
+        # news is keyless (public RSS); panel/credit/analysis/disclosure need the key.
+        if method != "news":
+            _ensure_dart_api_key()
+        company = dartlab.Company(code)
+        attr = getattr(company, method, None)
+        if attr is None:
+            raise FetchError(f"dartlab Company has no method {method}")
+        try:
+            return attr() if callable(attr) else attr
+        except Exception as e:  # noqa: BLE001
+            raise FetchError(f"dartlab Company.{method} raised: {e}") from e
+
+    fn = getattr(dartlab, command, None)
+    if fn is None or not callable(fn):
+        raise FetchError(f"dartlab has no callable {command}")
+    try:
+        return fn(**params)
+    except Exception as e:  # noqa: BLE001
+        raise FetchError(f"dartlab {command} raised: {e}") from e
 
 
 def run_wbgapi(command: str, params: dict) -> Any:
@@ -145,6 +311,67 @@ def run_wbgapi(command: str, params: dict) -> Any:
         raise FetchError(f"wbgapi {command} raised: {e}") from e
 
 
+def run_ckan(command: str, params: dict) -> Any:
+    # If a per-function adapter with a ``call`` method is registered, delegate to
+    # it (the adapter dispatches the 5 CKAN action verbs, coerces dict/list
+    # results to pandas frames, and adds a simple retry - task 2.5). ckan is
+    # keyless (no env var), so there is NO ``_ensure_*_key()`` guard. Otherwise
+    # fall back to the legacy direct call (portal_url popped, the action verb
+    # invoked on ``RemoteCKAN(portal).action``), so un-adaptered commands keep
+    # working (no regression).
+    from fd_open_data_mcp.adapters import adapter_for
+
+    adapter = adapter_for("ckan", command)
+    call = getattr(adapter, "call", None)
+    if call is not None:
+        return call(command, params)
+
+    import ckanapi  # lazy; requires the `data` extra
+
+    portal = params.pop("portal_url", None) or "https://data.gov/api/3/"
+    client = ckanapi.RemoteCKAN(portal)
+    action = getattr(client.action, command, None)
+    if action is None:
+        raise FetchError(f"ckan action API has no verb {command}")
+    try:
+        return action(**params)
+    except Exception as e:  # noqa: BLE001
+        raise FetchError(f"ckan {command} raised: {e}") from e
+
+
+def run_cnstats(command: str, params: dict) -> Any:
+    # If a per-function adapter with a ``call`` method is registered, delegate to
+    # it (the adapter dispatches the 8 curated akshare macro functions, handles
+    # the 日期 date axis + Chinese-named columns, and adds a simple retry -
+    # task 2.6). cnstats is **keyless** (no env var — it is backed by akshare),
+    # so there is NO ``_ensure_*_key()`` guard. Otherwise fall back to the legacy
+    # direct call (mapped akshare macro function invoked with NO kwargs), so
+    # un-adaptered commands keep working (no regression). Unlike the fd-world
+    # reference (``try: return func() except: return func``), a persistent
+    # failure raises FetchError rather than returning the bare callable.
+    from fd_open_data_mcp.adapters import adapter_for
+
+    adapter = adapter_for("cnstats", command)
+    call = getattr(adapter, "call", None)
+    if call is not None:
+        return call(command, params)
+
+    from fd_open_data_mcp.adapters.cnstats import MAPPING
+
+    import akshare as ak  # lazy; requires the `data` extra
+
+    mapped = MAPPING.get(command)
+    if not mapped:
+        raise FetchError(f"cnstats has no mapping for command {command}")
+    fn = getattr(ak, mapped, None)
+    if fn is None or not callable(fn):
+        raise FetchError(f"akshare has no callable {mapped} (cnstats {command})")
+    try:
+        return fn()
+    except Exception as e:  # noqa: BLE001 - upstream errors surface as FetchError
+        raise FetchError(f"cnstats {command} raised: {e}") from e
+
+
 def run_upstream(source: str, command: str, params: dict) -> Any:
     if source == "cn-report":
         from fd_open_data_mcp.adapters.cnreport import run_cnreport
@@ -155,6 +382,14 @@ def run_upstream(source: str, command: str, params: dict) -> Any:
         return run_yfinance(command, params)
     if source == "edgar":
         return run_edgar(command, params)
+    if source == "edinet":
+        return run_edinet(command, params)
+    if source == "dartlab":
+        return run_dartlab(command, params)
+    if source == "ckan":
+        return run_ckan(command, params)
+    if source == "cnstats":
+        return run_cnstats(command, params)
     if source == "wbgapi":
         return run_wbgapi(command, params)
     if source == "nbs-gdp":

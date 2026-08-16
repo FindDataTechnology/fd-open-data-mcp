@@ -355,6 +355,25 @@ def add_entity_identifier(entity_type: str, entity_id: int, source: str, identif
         s.close()
 
 
+@mcp.tool
+def ingest_entities_from_dump(daas_db_path: str, dry_run: bool = False) -> dict:
+    """Bulk-ingest entities + source-identifier links from a daas.db dump.
+
+    One-time migration path (entity-master migration): transfers daas.db
+    ``entities`` + ``entity_datasource_links`` into the fd-open-data-mcp
+    ``entities`` + ``entity_source_identifiers`` store. Idempotent: re-running
+    upserts (no duplicates) and refreshes metadata. ``dry_run`` reports counts
+    without writing.
+    """
+    from fd_open_data_mcp.entities.intake import ingest_entities_from_dump as _ingest
+
+    s = _session()
+    try:
+        return _ingest(s, daas_db_path, dry_run=dry_run)
+    finally:
+        s.close()
+
+
 # ─── Entity graph ────────────────────────────────────────────────────────────
 @mcp.tool
 def list_entities(entity_type: str, limit: int = 100, offset: int = 0) -> list[dict]:

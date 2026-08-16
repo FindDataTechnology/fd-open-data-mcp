@@ -202,6 +202,27 @@ def seed_entities_cmd():
         s.close()
 
 
+@cli.command("ingest-entities")
+@click.argument("daas_db_path", type=click.Path(exists=True, dir_okay=False))
+@click.option("--dry-run", is_flag=True, default=False,
+              help="Report counts from the dump without writing.")
+def ingest_entities_cmd(daas_db_path, dry_run):
+    """Bulk-ingest entities + source identifiers from a daas.db dump.
+
+    One-time entity-master migration: transfers daas.db ``entities`` +
+    ``entity_datasource_links`` into the fd-open-data-mcp entity store.
+    Idempotent (safe to re-run).
+    """
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.entities.intake import ingest_entities_from_dump
+
+    s = get_database().get_session()
+    try:
+        _echo(ingest_entities_from_dump(s, daas_db_path, dry_run=dry_run))
+    finally:
+        s.close()
+
+
 @cli.command("repair-stock-identifiers")
 @click.option("--apply", is_flag=True, default=False,
               help="Write canonical identifiers (default: dry-run report only).")
