@@ -15,6 +15,39 @@ vector-search layer for relational and semantic queries.
 
 **English** | [中文](README.zh-CN.md)
 
+一个**开放数据本体 MCP**：在多数据源的金融/经济数据之上构建语义概念层。你用**概念 + 实体**来请求数据（例如"茅台的 price.close"、"中国的 GDP"）；系统将概念解析为各数据源中的物理列，按质量 + 可达性对候选数据源排序，从最佳数据源抓取（带故障转移），按概念缓存，并按每个概念的频率刷新。
+
+## One-click install
+
+A single self-contained block that bootstraps the entire finddata open-data
+stack (hub + every datasource package + ontology DB). Safe to re-run; stops on
+the first error.
+
+```bash
+# 1) Install the full stack from PyPI.
+#    fd-open-data-protocol is pulled in transitively; fd-polygon and
+#    fd-cn-report auto-register via entry-points. Drop "[data]" for a lighter
+#    install (MCP server + CLI only, without the akshare/yfinance/playwright SDKs).
+pip install "fd-open-data-mcp[data]" fd-polygon fd-cn-report
+
+# 2) Initialize the ontology DB and wire every layer: catalogs -> concepts ->
+#    column bindings -> per-source entity ids -> refresh schedules -> manifests.
+fd-open-data-mcp migrate \
+  && fd-open-data-mcp import-catalog \
+  && fd-open-data-mcp consume-concepts \
+  && fd-open-data-mcp propose-bindings \
+  && fd-open-data-mcp seed-entities \
+  && fd-open-data-mcp generate-schedules \
+  && fd-open-data-mcp register-discovered
+
+# 3) Start the MCP server (stdio transport, for any MCP client).
+fd-open-data-mcp serve
+```
+
+Live data fetches need source keys in the environment (never committed):
+`POLYGON_API_KEY`, `EDGAR_IDENTITY`, and the `LLM_*` / `ES_*` set for
+`fd-cn-report`. See each package's Configuration section.
+
 ## Architecture
 
 ```

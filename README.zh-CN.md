@@ -10,6 +10,35 @@
 它以**只读**方式消费 finddata 的 `fd-*` 数据源注册表和 `fd-entities-indicators`，
 并在其上添加统一层。
 
+## 一键安装
+
+一条自包含的命令块，引导整个 finddata 开放数据栈（枢纽 + 全部数据源包 + 本体数据库）。可重复运行；遇到首个错误即停止。
+
+```bash
+# 1) 从 PyPI 安装完整栈。
+#    fd-open-data-protocol 被传递引入；fd-polygon 与 fd-cn-report 经 entry-point
+#    自动注册。去掉 "[data]" 可轻量安装（仅 MCP 服务器 + CLI，不含
+#    akshare/yfinance/playwright SDK）。
+pip install "fd-open-data-mcp[data]" fd-polygon fd-cn-report
+
+# 2) 初始化本体数据库并接通每一层：目录 -> 概念 -> 列绑定 -> 每源实体 id
+#    -> 刷新计划 -> 清单。
+fd-open-data-mcp migrate \
+  && fd-open-data-mcp import-catalog \
+  && fd-open-data-mcp consume-concepts \
+  && fd-open-data-mcp propose-bindings \
+  && fd-open-data-mcp seed-entities \
+  && fd-open-data-mcp generate-schedules \
+  && fd-open-data-mcp register-discovered
+
+# 3) 启动 MCP 服务器（stdio 传输，供任意 MCP 客户端使用）。
+fd-open-data-mcp serve
+```
+
+实数据抓取需要环境中的数据源密钥（切勿提交）：
+`POLYGON_API_KEY`、`EDGAR_IDENTITY`，以及 `fd-cn-report` 所需的 `LLM_*` / `ES_*`。
+见各包的配置章节。
+
 ## 架构
 
 ```
@@ -18,23 +47,24 @@
  cn-report/cn-gov/polygon/            entity_source_identifiers (每源 id)
  datacommons                          source_rankings     (质量 × 可达 × 新鲜度)
  fd-entities-indicators               semantic_observations (读穿透缓存)
-   indicator_defs (926 概念)          fetch_log / schedules / executions
-   countries/cities/symbols/sw_industries
+   indicator_defs (926 概念)          fetch_log / schedules / executions / policies
+   countries/cities/symbols/sw_industries   entities / relationships (图)
         │
    转换器：import_catalog, consume_concepts, propose_bindings,
           seed_entity_identifiers, generate_refresh_schedules
         │
    运行时：read() -> 缓存命中? : 分发（排序 + 故障转移）-> 缓存 -> 记日志
+   搜索 ：semantic_search（概念）+ graph_search（实体关系）+ ai_search
 ```
 
-六大能力（见 `openspec/changes/add-fd-open-data-mcp/specs/`）：
+八大能力（见 `openspec/changes/add-fd-open-data-mcp/specs/`）：
 `open-data-catalog`、`semantic-layer`、`entity-identity`、`source-ranking`、
-`concept-fetch`、`scheduled-refresh`。
+`concept-fetch`、`scheduled-refresh`、`entity-graph`、`vector-search`。
 
 ## 安装
 
 ```bash
-cd /Users/chengsishi/finddata/fd-open-data-mcp
+cd fd-open-data-mcp
 uv sync                  # 基础安装
 
 # 完整数据源支持（akshare、yfinance、edgar、world bank 等）
