@@ -1,6 +1,6 @@
 # fd-open-data-mcp
 
-**English** | [中文](README.md)
+[English](README.md) | **中文**
 
 一个**开放数据本体 MCP**：在多数据源的金融/经济数据之上构建语义概念层。你用
 **概念 + 实体**来请求数据（例如"茅台的 price.close"、"中国的 GDP"）；系统将概念解析
