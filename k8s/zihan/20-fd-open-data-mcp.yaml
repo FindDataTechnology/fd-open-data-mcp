@@ -25,12 +25,11 @@ spec:
     spec:
       containers:
         - name: fd-open-data-mcp
-          # `latest` is mutable — after the first CI build lands, pin both
-          # deployments to the pushed <short-sha> tag:
-          #   kubectl -n fd-mcp set image deploy/fd-open-data-mcp \
-          #     fd-open-data-mcp=harbor.local/finddata/fd-open-data-mcp:<sha>
-          image: harbor.local/finddata/fd-open-data-mcp:latest
-          imagePullPolicy: Always
+          # Pinned to the <short-sha> tag pushed by .github/workflows/
+          # docker-publish.yml for commit 5455d38 (image digest
+          # sha256:37e2cd036457… in Harbor project `finddata`).
+          image: harbor.local/finddata/fd-open-data-mcp:sha-5455d38
+          imagePullPolicy: IfNotPresent
           ports:
             - name: mcp
               containerPort: 8300
