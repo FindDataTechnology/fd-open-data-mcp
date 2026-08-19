@@ -28,9 +28,10 @@ spec:
         # local-path volumes are created root-owned; the server runs as uid
         # 1000 and must write daas.db / reports / cache under /data. Same
         # image as the main container (keep both tags in sync when bumping).
-        # Pinned to CI commit 8f4cd47 (digest sha256:1c11f62b3af8…).
+        # Pinned to CI commit 9ce4530 (flat-install parents[2] guard; digest
+        # sha256:fb78c5da99f2…). 8f4cd47 crashed at import: IndexError parents[2].
         - name: fix-volume-permissions
-          image: harbor.local/finddata/fd-cn-report:sha-8f4cd47
+          image: harbor.local/finddata/fd-cn-report:sha-9ce4530
           imagePullPolicy: IfNotPresent
           command: ["chown", "-R", "1000:1000", "/data"]
           securityContext:
@@ -40,7 +41,7 @@ spec:
               mountPath: /data
       containers:
         - name: fd-cn-report
-          image: harbor.local/finddata/fd-cn-report:sha-8f4cd47
+          image: harbor.local/finddata/fd-cn-report:sha-9ce4530
           imagePullPolicy: IfNotPresent
           ports:
             - name: mcp
