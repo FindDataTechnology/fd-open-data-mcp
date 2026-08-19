@@ -363,6 +363,23 @@ def pick_cluster(session: Session, plan: CrawlPlan) -> Cluster | None:
     return eligible[0][0]
 
 
+def _node_ip(api_server: str) -> str | None:
+    """Extract the worker node's IP from a cluster's ``api_server`` URL.
+
+    The worker clusters are single-node clouds whose API server listens on the
+    node's public IP; the hostNetwork ``proxy-fw`` forwarder binds :8080 on that
+    same IP, so ``http://<node-ip>:8080`` is the forwarder's address. Returns
+    None for a malformed/empty URL — the launcher then omits
+    ``FD_PROXY_FORWARDER`` and the worker degrades to direct egress
+    (injection.py ``_DIRECT_ACQ`` sentinel, ships-dark)."""
+    if not api_server:
+        return None
+    try:
+        return urllib.parse.urlparse(api_server).hostname
+    except Exception:  # noqa: BLE001
+        return None
+
+
 class MultiClusterLauncher:
     """Dispatch crawl Jobs across the worker-cluster fleet.
 
@@ -435,6 +452,33 @@ class MultiClusterLauncher:
                                     # ProxySelector pins to its own egress (per-cluster circuit)
                                     {"name": "SCRAW_CLUSTER_ID", "value": str(cluster.id)},
                                     {"name": "SCRAW_CLUSTER_NAME", "value": cluster.name},
+                                    # Decoupled egress pool (LEGACY — no-op once proxy-fw is
+                                    # the sole path; kept during the overlap so a worker
+                                    # whose proxy-fw is not yet running still opts into the
+                                    # old gost scheme='http' pool). ``pool`` skips the
+                                    # SCRAW_CLUSTER_ID pinning branch in selector.py; on keeps
+                                    # the pool active. Both default to the decoupled values so
+                                    # a missing reconciler env still opts workers into the pool.
+                                    {"name": "FD_EGRESS_MODE",
+                                     "value": os.environ.get("FD_EGRESS_MODE", "pool")},
+                                    {"name": "FD_PROXY_POOL",
+                                     "value": os.environ.get("FD_PROXY_POOL", "on")},
+                                    # Standalone forwarder: the worker calls
+                                    # ``proxy_client.acquire(source)`` per fetch,
+                                    # the forwarder returns an upstream_url
+                                    # (gost-own at localhost:30080 on this cluster),
+                                    # and the worker injects it into its own HTTP
+                                    # client (terminating TLS itself to classify
+                                    # bans). On SA-restricted clusters the
+                                    # hostNetwork forwarder binds the node IP:8080
+                                    # (no Service possible), so the URL is per-cluster
+                                    # derived from ``cluster.api_server``. ``_node_ip``
+                                    # returns None for a malformed URL -> the env is
+                                    # omitted and the worker degrades to direct
+                                    # egress (injection.py ships-dark sentinel).
+                                    *([{"name": "FD_PROXY_FORWARDER",
+                                        "value": f"http://{ip}:8080"}]
+                                      if (ip := _node_ip(cluster.api_server)) else []),
                                     {"name": "PYTHONUNBUFFERED", "value": "1"},
                                 ],
                                 "resources": {

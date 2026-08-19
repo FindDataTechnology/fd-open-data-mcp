@@ -44,29 +44,34 @@ class ProxySelector:
         self.session = session
 
     def select(self, source: str) -> Optional[tuple[Optional[int], object]]:
-        # multi-cluster (add-multi-cluster-master-db): pin to THIS worker's own
-        # egress so the circuit breaker tracks per-cluster (circuit:{source}:{direct_id}),
-        # enabling the reconciler to route around a banned cluster. Falls through to
-        # the legacy paths when SCRAW_CLUSTER_ID is unset (single-cluster / local dev).
-        raw_cid = os.environ.get("SCRAW_CLUSTER_ID")
-        if raw_cid:
-            try:
-                cid = int(raw_cid)
-            except ValueError:
-                cid = None
-            if cid is not None:
-                direct = (self.session.query(Proxy)
-                          .filter_by(scheme="direct", cluster_id=cid).first())
-                if direct is not None:
-                    if not circuit.is_selectable(source, direct.id):
-                        return None  # this cluster's egress is banned -> source-level failover
-                    rl = pool.get_rate_limit(self.session, source)
-                    max_qps = rl.max_qps if rl else _DEFAULT_QPS
-                    if rate_limit.acquire(source, direct.id, max_qps):
-                        return (direct.id, direct)
-                    return None  # rate-saturated -> failover (retry next tick)
-                # egress not yet registered (spider registers on start) -> synthetic
-                # direct for this fetch; circuit won't track until registered.
+        # Decoupled egress pool (per-server gost forward proxies): in pool mode a
+        # worker rotates across ALL gost egresses via the circuit breaker + rate
+        # limiter, instead of being pinned to its own cluster's direct egress.
+        # ``pinned`` (default) preserves the per-cluster direct-egress behavior.
+        if os.environ.get("FD_EGRESS_MODE", "pinned") != "pool":
+            # multi-cluster (add-multi-cluster-master-db): pin to THIS worker's own
+            # egress so the circuit breaker tracks per-cluster (circuit:{source}:{direct_id}),
+            # enabling the reconciler to route around a banned cluster. Falls through to
+            # the legacy paths when SCRAW_CLUSTER_ID is unset (single-cluster / local dev).
+            raw_cid = os.environ.get("SCRAW_CLUSTER_ID")
+            if raw_cid:
+                try:
+                    cid = int(raw_cid)
+                except ValueError:
+                    cid = None
+                if cid is not None:
+                    direct = (self.session.query(Proxy)
+                              .filter_by(scheme="direct", cluster_id=cid).first())
+                    if direct is not None:
+                        if not circuit.is_selectable(source, direct.id):
+                            return None  # this cluster's egress is banned -> source-level failover
+                        rl = pool.get_rate_limit(self.session, source)
+                        max_qps = rl.max_qps if rl else _DEFAULT_QPS
+                        if rate_limit.acquire(source, direct.id, max_qps):
+                            return (direct.id, direct)
+                        return None  # rate-saturated -> failover (retry next tick)
+                    # egress not yet registered (spider registers on start) -> synthetic
+                    # direct for this fetch; circuit won't track until registered.
         if os.environ.get("FD_PROXY_POOL") == "off":
             # local dev: my Mac's egress is trusted — skip the cluster proxy pool
             # (free proxies break akshare/eastmoney; see CLAUDE.md gotcha)

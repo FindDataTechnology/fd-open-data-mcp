@@ -9,6 +9,8 @@ concurrency). New sources declare their own ban signals here at onboarding.
 """
 from __future__ import annotations
 
+import os
+
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import BanRule, Proxy, SourceProbe, SourceRateLimit
@@ -84,14 +86,17 @@ PROBES: dict[str, tuple[str, dict]] = {
 
 
 def seed_all(session: Session) -> dict:
-    """Idempotently seed ban_rules, source_rate_limits, source_probes, and the
-    direct proxy. Returns a summary of what was created/updated."""
+    """Idempotently seed ban_rules, source_rate_limits, source_probes, the
+    direct proxy, and the gost egress pool. Returns a summary of what was
+    created/updated."""
     rules = _seed_ban_rules(session)
     limits = _seed_rate_limits(session)
     probes = _seed_probes(session)
     proxy = register_cluster_egress(session, None)  # legacy single shared direct
+    egress = seed_egress_pods(session)
     session.commit()
-    return {"ban_rules": rules, "rate_limits": limits, "probes": probes, "direct_proxy": proxy}
+    return {"ban_rules": rules, "rate_limits": limits, "probes": probes,
+            "direct_proxy": proxy, "egress_pods": egress}
 
 
 def _seed_ban_rules(session: Session) -> int:
@@ -167,6 +172,61 @@ def register_cluster_egress(session: Session, cluster_id: int | None = None) -> 
 def _seed_direct_proxy(session: Session) -> str:
     """Backward-compatible alias for the legacy single shared direct proxy."""
     return register_cluster_egress(session, None)
+
+
+# ─── decoupled egress pool (per-server gost forward proxies) ─────────────────
+# Default basic-auth credential shared with the gost pod manifest. Production
+# MUST override via the ``FD_EGRESS_AUTH`` env (set it in a k8s Secret referenced
+# by both the gost Deployment and the seed run) — the NodePort is public, so a
+# known default password must not ship to prod as-is.
+_DEFAULT_EGRESS_AUTH = "fdproxy:GostEgress2026x9k"
+
+# Per-server gost forward-proxy endpoints. Each gost pod runs ``hostNetwork``
+# so its egress IS the server's own IP; the NodePort 30080 lets any worker in
+# ANY cluster reach ANY gost cross-cluster → egress IP is decoupled from where
+# the worker pod lands. baidu (cluster_id=4) is disabled + IP TBD; append once
+# enabled.
+EGRESS_PODS: list[dict] = [
+    {"name": "tencent", "host": "124.220.7.175", "port": 30080, "cluster_id": 1},
+    {"name": "aliyun",  "host": "47.99.94.85",   "port": 30080, "cluster_id": 3},
+]
+
+
+def register_egress_pod(session: Session, name: str, host: str, port: int,
+                        auth: str, cluster_id: int | None = None) -> str:
+    """Register a self-hosted gost forward-proxy as a ``scheme='http'`` Proxy.
+
+    Unlike ``scheme='direct'`` (the process's own egress, no injection), a gost
+    row carries a real ``ip:port`` + basic auth so ``injection.proxy_url()``
+    builds ``http://<auth>@<ip>:<port>`` and injects it into requests/httpx.
+    The worker's HTTP egress then becomes the gost pod's hostNetwork IP — the
+    server's own IP — decoupled from the worker's node. Idempotent: re-running
+    updates host/port/auth in place (so an IP rotation is just a re-seed).
+    """
+    label = f"gost-{name}"
+    row = session.query(Proxy).filter_by(label=label).first()
+    if row is None:
+        session.add(Proxy(scheme="http", ip=host, port=port, auth=auth,
+                          status="active", label=label, cluster_id=cluster_id))
+        return "created"
+    row.status, row.ip, row.port, row.auth = "active", host, port, auth
+    if cluster_id is not None:
+        row.cluster_id = cluster_id
+    return "updated"
+
+
+def seed_egress_pods(session: Session) -> dict[str, str]:
+    """Seed the gost forward-proxy egress pool from ``EGRESS_PODS``.
+
+    Reads the shared basic-auth from ``FD_EGRESS_AUTH`` (default fallback
+    above) so the seeded ``Proxy.auth`` matches the gost pod's ``-L`` listener
+    credential. Call after deploying the gost pods so the endpoints answer;
+    re-run after an IP/auth rotation to refresh the rows in place.
+    """
+    auth = os.environ.get("FD_EGRESS_AUTH", _DEFAULT_EGRESS_AUTH)
+    return {pod["name"]: register_egress_pod(
+        session, pod["name"], pod["host"], pod["port"], auth,
+        cluster_id=pod.get("cluster_id")) for pod in EGRESS_PODS}
 
 
 if __name__ == "__main__":

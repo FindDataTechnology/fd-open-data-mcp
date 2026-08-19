@@ -1,24 +1,38 @@
 """Shared fetch instrumentation - the single chokepoint both ``concept-fetch``
 dispatch and the scraw ``fetch_handler`` route through.
 
+In the standalone-proxy-service design (openspec change ``add-proxy-service``),
+per-fetch proxy selection lives in the forwarder (``proxy-fw`` pod), NOT here.
 Per fetch:
-  1. ``ProxySelector`` picks a healthy ``(source, proxy_id)`` (CLOSED + under
-     rate limit), direct first. ``None`` => every proxy banned/saturated =>
-     ``SourceUnavailable`` (caller fails over to the next source).
-  2. ``use_proxy`` sets the contextvar so the requests/httpx patch injects it.
+  1. ``proxy_client.acquire(source)`` asks the forwarder for an upstream URL ->
+     an ``Acquisition``. A direct sentinel (``upstream_url=None, addr_id=None``)
+     is returned when the forwarder is unset (ships-dark / local dev), OR when
+     it has no healthy upstream (all circuits OPEN).
+  2. ``use_proxy(acq.upstream_url)`` injects the URL into requests/httpx (None =
+     direct egress, identical to today's ``scheme='direct'``). The crawler
+     terminates TLS itself, so only *it* sees the decrypted response needed to
+     classify a ban — this is why the contract is acquire/release, not a blind
+     ``HTTP_PROXY`` env-set (see ``injection.py`` module docstring).
   3. ``run_upstream`` is called (timed).
-  4. ``BanClassifier`` classifies the outcome (error-message based in v1 - the
-     parsed DataFrame loses the raw HTTP body; body/status rules need an
-     adapter-level hook, tracked as a follow-up).
-  5. ``CircuitUpdater`` records the outcome (Redis circuit + ``fetch_log`` with
-     ``proxy_id`` + ``classification``) and appends to the ``outcomes:{source}``
-     stream.
+  4. ``ban_rules.classify`` maps the outcome to ok/transient/ban/blocked.
+     ``fail_streak`` is read from the local ``circuit`` view (``REDIS_URL``) for
+     streak-gated rules; when REDIS_URL points at proxy-redis this is the live
+     streak the forwarder owns, ships-dark (no redis) -> 0 (streak rules inert,
+     same as today).
+  5. ``proxy_client.release(...)`` hands the classification back to the
+     forwarder, which owns the circuit state machine (writes to proxy-redis).
+     ``_record`` writes ``fetch_log`` (cold) + the outcomes stream (hot).
 
-TRANSIENT => retry once on the same proxy. BAN => circuit trips, re-select
-another proxy for the same source. All proxies exhausted => SourceUnavailable.
+TRANSIENT => retry once on the same upstream. BAN => release + re-acquire
+(the forwarder picks a different upstream — the banned one's circuit is now
+OPEN so ``acquire_any`` skips it). Upstream loop exhausted, OR a direct-sentinel
+fetch banned => ``SourceUnavailable`` (caller fails over to the next
+real_source). ``blocked`` => raise ``FetchError`` (no point burning another
+upstream). Behavior above the transport layer is unchanged.
 
-Degrades to today's behavior when REDIS_URL is unset (no proxies registered =>
-direct, no circuit, no rate limit).
+Degrades to today's behavior when ``FD_PROXY_FORWARDER`` is unset: ``acquire``
+returns the direct sentinel, ``release`` is a no-op, fetches egress direct from
+the worker's own node IP — no rotation, but still functional.
 """
 from __future__ import annotations
 
@@ -31,18 +45,17 @@ from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.fetch.runner import FetchError, run_upstream
 from fd_open_data_mcp.models import FetchLog
 from fd_open_data_mcp.proxy import ban_rules, circuit, injection
-from fd_open_data_mcp.proxy.selector import ProxySelector
 
 logger = logging.getLogger(__name__)
 
 
 # Sources that bypass the proxy/circuit pipeline and run direct. These are
 # authenticated REST APIs (key/header auth) that manage their own HTTP transport
-# and gain nothing from free-proxy rotation — injecting dead proxies only breaks
+# and gain nothing from upstream rotation — injecting dead proxies only breaks
 # them. ``cn-report`` uses akshare->eastmoney internally (IP-scraped, but the
 # inner akshare call rejects proxies); ``polygon`` is key-authenticated
 # (``POLYGON_API_KEY`` header). Both still get a timed ``run_upstream`` +
-# ``fetch_log`` entry; they just skip the ProxySelector/circuit/retry loop.
+# ``fetch_log`` entry; they just skip the acquire/release/retry loop.
 _DIRECT_SOURCES = frozenset({"cn-report", "polygon", "datacommons"})
 
 
@@ -136,13 +149,14 @@ def instrumented_fetch(
             raise
 
     try:
-        selector = ProxySelector(session)
         for _ in range(max_proxies):
-            picked = selector.select(circuit_source)
-            if picked is None:
-                break  # no healthy proxy -> source-level failover
-            proxy_id, proxy = picked
-            tried.append(proxy_id if proxy_id is not None else 0)
+            # Ask the forwarder for an upstream. Returns a direct sentinel
+            # (upstream_url=None, addr_id=None) when the forwarder is unset
+            # (ships-dark / local dev) OR when it has no healthy upstream (all
+            # circuits OPEN). use_proxy(None) => direct egress, so the sentinel
+            # path degrades to a plain direct fetch with no rotation.
+            acq = injection.proxy_client.acquire(circuit_source)
+            tried.append(acq.addr_id or 0)
             for attempt in range(2):  # 1 retry on transient
                 t0 = time.time()
                 classification = "ok"
@@ -150,29 +164,33 @@ def instrumented_fetch(
                 detail: Optional[str] = None
                 value: Any = None
                 try:
-                    with injection.use_proxy(proxy):
+                    with injection.use_proxy(acq.upstream_url):
                         value = run_upstream(source, command, params)
                 except FetchError as e:
                     detail = str(e)
                     last_error = detail
                     status = "error"
-                    st = circuit.get_state(circuit_source, proxy_id) if proxy_id is not None else {"fail_streak": 0}
+                    st = circuit.get_state(circuit_source, acq.addr_id) if acq.addr_id is not None else {"fail_streak": 0}
                     classification = ban_rules.classify(
                         session, circuit_source, None, detail, None, st["fail_streak"]
                     )
                 elapsed_ms = int((time.time() - t0) * 1000)
-                if proxy_id is not None:
-                    circuit.record_outcome(circuit_source, proxy_id, classification)
-                _record(session, source, proxy_id, classification, elapsed_ms,
+                # Hand the classification to the forwarder, which owns the
+                # circuit state machine (writes to proxy-redis via /release).
+                # No-op in ships-dark (no forwarder) or when addr_id is None
+                # (direct sentinel — no circuit to update).
+                injection.proxy_client.release(
+                    circuit_source, acq.addr_id, acq.provider, classification)
+                _record(session, source, acq.addr_id, classification, elapsed_ms,
                         status, detail, concept_id, entity_type, entity_id, real_source)
                 if classification == "ok":
                     return value
                 if classification == "blocked":
-                    # needs human/strategy change - don't burn another proxy
+                    # needs human/strategy change - don't burn another upstream
                     raise FetchError(f"{source}/{command} blocked: {detail}")
                 if classification == "transient" and attempt == 0:
-                    continue  # retry same proxy once
-                break  # ban -> try next proxy (circuit now OPEN, selector skips it)
+                    continue  # retry same upstream once
+                break  # ban -> re-acquire (forwarder skips the now-OPEN circuit)
         raise SourceUnavailable(
             f"no healthy proxy for {circuit_source} (tried {tried}; last_error={last_error})"
         )

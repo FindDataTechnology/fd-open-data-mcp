@@ -13,7 +13,7 @@ def main():
     """Generate embeddings for all entities."""
     database_url = os.environ.get(
         "FD_OPEN_DATA_MCP_DATABASE_URL",
-        "postgresql://admin:admin123@192.168.1.4:5433/postgres"
+        "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
     )
 
     print("Initializing embedding generator...")

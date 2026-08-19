@@ -2,7 +2,7 @@
 """Load entity definitions from PostgreSQL database for manifest generation.
 
 This module provides functions to load entity definitions from the remote
-PostgreSQL database (192.168.1.4:5433) for use in datasource manifests.
+PostgreSQL database (guangzhou-xinru:30432) for use in datasource manifests.
 """
 
 import os
@@ -11,11 +11,11 @@ from typing import Optional
 from sqlalchemy import create_engine, text
 
 # Database connection configuration
-PG_HOST = os.environ.get("PG_HOST", "192.168.1.4")
-PG_PORT = int(os.environ.get("PG_PORT", 5433))
-PG_USER = os.environ.get("PG_USER", "admin")
-PG_PASSWORD = os.environ.get("PG_PASSWORD", "admin123")
-PG_DATABASE = os.environ.get("PG_DATABASE", "postgres")
+PG_HOST = os.environ.get("PG_HOST", "guangzhou-xinru")
+PG_PORT = int(os.environ.get("PG_PORT", 30432))
+PG_USER = os.environ.get("PG_USER", "fd")
+PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
+PG_DATABASE = os.environ.get("PG_DATABASE", "fd_open_data")
 
 DATABASE_URL = f"postgresql://{PG_USER}:{PG_PASSWORD}@{PG_HOST}:{PG_PORT}/{PG_DATABASE}"
 

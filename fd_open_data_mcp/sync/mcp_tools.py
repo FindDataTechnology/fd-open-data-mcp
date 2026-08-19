@@ -13,7 +13,9 @@ def get_database_url() -> str:
     """Get database URL from environment."""
     return os.environ.get(
         "FD_OPEN_DATA_MCP_DATABASE_URL",
-        "postgresql://admin:admin123@192.168.1.4:5433/postgres"
+        "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
+        # NB: FD_PG_PASSWORD is a placeholder — export FD_OPEN_DATA_MCP_DATABASE_URL
+        # with the real credentials (guangzhou-xinru:/etc/fd-open-data/db-credentials.env).
     )
 
 

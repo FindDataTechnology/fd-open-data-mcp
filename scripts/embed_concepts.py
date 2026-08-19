@@ -13,8 +13,9 @@ from sqlalchemy import text
 from sentence_transformers import SentenceTransformer
 from fd_open_data_mcp import db as dbmod
 
-# Force remote Postgres connection
-DATABASE_URL = "postgresql://admin:admin123@192.168.1.4:5433/postgres"
+# Force remote Postgres connection (canonical: guangzhou-xinru:30432; from the
+# Mac via tunnel: ssh -N -L 30432:127.0.0.1:30432 ubuntu@134.175.46.69)
+DATABASE_URL = "postgresql://fd:FD_PG_PASSWORD@127.0.0.1:30432/fd_open_data"
 os.environ["FD_OPEN_DATA_MCP_DATABASE_URL"] = DATABASE_URL
 
 # Load model from local cache (avoids network issues)

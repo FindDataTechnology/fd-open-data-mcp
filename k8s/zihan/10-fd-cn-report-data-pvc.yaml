@@ -1,0 +1,19 @@
+# Scratch storage for fd-cn-report: report PDFs (CNREPORT_SAVE_DIR), the
+# extraction cache (CNREPORT_CACHE_DIR), and the rules DB
+# (DAAS_DATABASE_URL=sqlite:////data/daas.db). Rebuildable data only — the
+# canonical store is the PG on guangzhou-xinru, not this volume.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: fd-cn-report-data
+  namespace: fd-mcp
+  labels:
+    app.kubernetes.io/name: fd-cn-report
+    app.kubernetes.io/part-of: finddata
+spec:
+  accessModes:
+    - ReadWriteOnce
+  storageClassName: local-path
+  resources:
+    requests:
+      storage: 5Gi

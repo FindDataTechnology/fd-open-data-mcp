@@ -1,0 +1,110 @@
+# fd-cn-report MCP server — Streamable HTTP :8301, bearer auth via
+# MCP_BEARER_TOKEN from the fd-mcp-env Secret. LLM_* / MINIO_* also come from
+# the Secret (envFrom); the /data paths are plain env because they are
+# topology, not secrets. ES_URL stays unset so ES tools fail closed.
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fd-cn-report
+  namespace: fd-mcp
+  labels:
+    app.kubernetes.io/name: fd-cn-report
+    app.kubernetes.io/part-of: finddata
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: fd-cn-report
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: fd-cn-report
+        app.kubernetes.io/part-of: finddata
+    spec:
+      securityContext:
+        # cnreport user in the image is uid 1000
+        fsGroup: 1000
+      initContainers:
+        # local-path volumes are created root-owned; the server runs as uid
+        # 1000 and must write daas.db / reports / cache under /data. Same
+        # image as the main container, so no extra pull. Keep its tag in sync
+        # when pinning the main container to a <short-sha>.
+        - name: fix-volume-permissions
+          image: harbor.local/finddata/fd-cn-report:latest
+          imagePullPolicy: Always
+          command: ["chown", "-R", "1000:1000", "/data"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /data
+      containers:
+        - name: fd-cn-report
+          image: harbor.local/finddata/fd-cn-report:latest
+          imagePullPolicy: Always
+          ports:
+            - name: mcp
+              containerPort: 8301
+          envFrom:
+            - secretRef:
+                name: fd-mcp-env
+          env:
+            # Module-adjacent defaults resolve to unwritable paths in the
+            # container (server.py sits at /app): DAAS_DATABASE_URL would
+            # point at /daas.db and the cache at /app/.cache — point every
+            # writable path at the PVC instead.
+            - name: DAAS_DATABASE_URL
+              value: "sqlite:////data/daas.db"
+            - name: CNREPORT_SAVE_DIR
+              value: "/data/reports"
+            - name: CNREPORT_CACHE_DIR
+              value: "/data/cache"
+          volumeMounts:
+            - name: data
+              mountPath: /data
+          resources:
+            requests:
+              memory: "512Mi"
+              cpu: "100m"
+            limits:
+              memory: "1.5Gi"
+              cpu: "2000m"
+          # akshare + pandas + pymupdf + litellm make cold import slow — up to
+          # ~5 minutes of startup grace before liveness kicks in.
+          startupProbe:
+            tcpSocket:
+              port: mcp
+            periodSeconds: 10
+            failureThreshold: 30
+          readinessProbe:
+            tcpSocket:
+              port: mcp
+            periodSeconds: 10
+          livenessProbe:
+            tcpSocket:
+              port: mcp
+            periodSeconds: 30
+            failureThreshold: 3
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: fd-cn-report-data
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fd-cn-report
+  namespace: fd-mcp
+  labels:
+    app.kubernetes.io/name: fd-cn-report
+    app.kubernetes.io/part-of: finddata
+spec:
+  # Endpoint over the mesh: http://100.64.0.4:30802/mcp
+  type: NodePort
+  selector:
+    app.kubernetes.io/name: fd-cn-report
+  ports:
+    - name: mcp
+      port: 8301
+      targetPort: mcp
+      nodePort: 30802

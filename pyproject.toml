@@ -21,7 +21,7 @@ dependencies = [
     "pydantic>=2.0",
     "fastmcp>=2.0",
     "pandas>=2.0",
-    "fd-open-data-protocol",
+    "fd-open-data-protocol>=0.2",
     "pyyaml>=6.0",
     "redis>=5.0",
     "python-dotenv>=1.0",

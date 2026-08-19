@@ -1,0 +1,17 @@
+# Never bake secrets, local state, or build artifacts into the image.
+.git
+.github
+.venv
+.env
+.env.local
+.env.example
+.pytest_cache
+__pycache__
+*.pyc
+*.egg-info
+build/
+dist/
+daas.db
+.DS_Store
+# stray dash-named dir inside the repo (not part of the wheel; keeps context lean)
+fd-open-data-mcp/

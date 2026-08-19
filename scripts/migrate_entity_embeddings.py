@@ -16,7 +16,7 @@ def migrate_entity_embeddings_table():
     # Get database URL from environment or use default
     database_url = os.environ.get(
         "FD_OPEN_DATA_MCP_DATABASE_URL",
-        "postgresql://admin:admin123@192.168.1.4:5433/postgres"
+        "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
     )
 
     print(f"Connecting to database: {database_url.split('@')[1] if '@' in database_url else 'local'}")

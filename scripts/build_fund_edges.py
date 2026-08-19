@@ -35,7 +35,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from fd_open_data_mcp.models import Entity, EntityRelationship
 
-DEFAULT_URL = "postgresql://admin:admin123@192.168.1.4:5433/postgres"
+DEFAULT_URL = "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
 
 # Major CN indices referenced by fund benchmarks: alias -> (code, name_zh).
 # Aliases are matched as substrings of the benchmark string, longest first.

@@ -34,7 +34,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from fd_open_data_mcp.models import Concept
 
-DEFAULT_URL = "postgresql://admin:admin123@192.168.1.4:5433/postgres"
+DEFAULT_URL = "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
 
 # (code, entity_type, frequency, unit, category, name_zh, name_en)
 FUND_CONCEPTS: list[tuple[str, str, str, str, str, str, str]] = [

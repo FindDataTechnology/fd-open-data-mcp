@@ -8,6 +8,9 @@ Entry: ``python -m fd_open_data_mcp.server``  (FastMCP, stdio transport)
 """
 from __future__ import annotations
 
+import hmac
+import os
+
 from fastmcp import FastMCP
 
 from fd_open_data_mcp.db import get_database
@@ -864,6 +867,45 @@ def register_discovered() -> dict:
         s.close()
 
 
+class BearerAuthMiddleware:
+    """ASGI middleware gating http requests behind a bearer token.
+
+    Active only when ``MCP_BEARER_TOKEN`` is set (read per-request): every
+    request must carry ``Authorization: Bearer <token>`` (constant-time
+    compare) or it is rejected with 401 before any MCP handling. stdio
+    never passes through here, and an unset/empty token disables the gate.
+    """
+
+    def __init__(self, asgi_app):
+        self.asgi_app = asgi_app
+
+    def __call__(self, scope, receive, send):
+        token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
+        if scope["type"] != "http" or not token:
+            return self.asgi_app(scope, receive, send)
+
+        headers = dict(scope.get("headers") or [])
+        provided = headers.get(b"authorization", b"")
+        expected = ("Bearer " + token).encode("utf-8", "surrogateescape")
+        if hmac.compare_digest(provided, expected):
+            return self.asgi_app(scope, receive, send)
+
+        async def _reject(receive, send):
+            await send(
+                {
+                    "type": "http.response.start",
+                    "status": 401,
+                    "headers": [
+                        (b"content-type", b"application/json"),
+                        (b"www-authenticate", b"Bearer"),
+                    ],
+                }
+            )
+            await send({"type": "http.response.body", "body": b'{"error": "unauthorized"}'})
+
+        return _reject(receive, send)
+
+
 def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8300) -> None:
     """Run the FastMCP server.
 
@@ -871,11 +913,24 @@ def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8300) ->
     subprocess). Pass ``transport="http"`` to serve over Streamable HTTP
     for long-running / remote use; the MCP endpoint is then reachable at
     ``http://<host>:<port>/mcp``.
+
+    When ``MCP_BEARER_TOKEN`` is set, http requests must carry the matching
+    bearer token (401 otherwise); without it serving is unchanged.
     """
     if transport == "stdio":
         mcp.run()
-    else:
+        return
+
+    token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
+    if not token:
         mcp.run(transport=transport, host=host, port=port)
+        return
+
+    import uvicorn
+    from starlette.middleware import Middleware
+
+    asgi = mcp.http_app(middleware=[Middleware(BearerAuthMiddleware)])
+    uvicorn.run(asgi, host=host, port=port)
 
 
 if __name__ == "__main__":

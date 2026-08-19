@@ -50,7 +50,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from fd_open_data_mcp.models import Entity, EntitySourceIdentifier
 
-DEFAULT_URL = "postgresql://admin:admin123@192.168.1.4:5433/postgres"
+DEFAULT_URL = "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
 CHECKPOINT = Path.home() / ".cache" / "fd_open_data_mcp" / "fund_seed_checkpoint.jsonl"
 
 # design D1 subtype vocabulary

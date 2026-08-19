@@ -1,14 +1,15 @@
 """Mirror the fund/person ontology + crawl policies from the live DB to the
 in-cluster fd-open-pg (which the reconciler + crawl Jobs actually use).
 
-The cluster cannot reach 192.168.1.4 (LAN), so the reconciler's DB is the
+The cluster cannot reach the canonical DB (guangzhou-xinru:30432) directly,
+so the reconciler's DB is the
 in-cluster fd-open-pg. This copies the fund/person concepts, entities,
 identifiers, relationships, bindings and crawl_policies/policy_runs (creating
 the migration-002 tables if absent). Idempotent — safe to re-run.
 
 Usage:
     python scripts/mirror_fund_to_cluster.py \
-      --source 'postgresql://admin:admin123@192.168.1.4:5433/postgres' \
+      --source 'postgresql://fd:<password>@127.0.0.1:30432/fd_open_data' \
       --target 'postgresql+psycopg2://postgres:admin123@127.0.0.1:55432/postgres'
 """
 from __future__ import annotations
@@ -129,7 +130,7 @@ def copy_table(engine_s, engine_t, table, where, conflict, target_needs_002: boo
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--source", default="postgresql://admin:admin123@192.168.1.4:5433/postgres")
+    ap.add_argument("--source", default="postgresql://fd:FD_PG_PASSWORD@127.0.0.1:30432/fd_open_data")
     ap.add_argument("--target",
                     default="postgresql+psycopg2://postgres:admin123@127.0.0.1:55432/postgres")
     args = ap.parse_args()

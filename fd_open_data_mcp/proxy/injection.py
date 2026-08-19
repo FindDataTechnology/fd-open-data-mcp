@@ -1,24 +1,40 @@
-"""Source-agnostic per-fetch proxy injection.
+"""Source-agnostic per-fetch proxy injection (slim shim).
 
-A contextvar holds the proxy for the current fetch. Monkey-patched
-``requests.Session.request`` and ``httpx.Client.request`` read it and inject
-``proxies=`` so that akshare / yfinance / worldbank / wbgapi / ckan / nbs (all
-``requests``-based) and edgar (``httpx``-based) route through the selected
-upstream proxy WITHOUT any change to those libraries or to the adapters.
+In the standalone-proxy-service design (openspec change ``add-proxy-service``),
+this module is a thin shim. Per-source selection no longer lives here — it lives
+in the standalone forwarder (``fd-proxy-service``, the ``proxy-fw`` pod). The
+crawler calls ``proxy_client.acquire(source)`` per fetch -> the forwarder
+returns an ``upstream_url`` -> ``use_proxy(upstream_url)`` injects it into
+requests/httpx -> the crawler fetches through it (terminating TLS itself) ->
+classifies via ``ban_rules`` -> ``proxy_client.release(...)``.
 
-``scheme='direct'`` (the cluster's own egress) injects nothing - it is the
-no-proxy default, ranked first so real proxies are only used once direct is
-banned.
+Why acquire/release and not blanket ``HTTP_PROXY``/``HTTPS_PROXY`` env: the
+crawler's HTTP client terminates TLS, so only *it* can see the decrypted
+response needed to classify a ban (status 403, body "too many requests"). A dumb
+TCP-relay forward proxy on ``CONNECT`` cannot inspect HTTPS responses. The
+acquire/release contract puts *selection* at the forwarder and *classification*
+at the crawler — both see what they need. See
+``fd_proxy_service/forwarder/server.py`` module docstring for the decision.
 
-The patch is idempotent and installed once on first use. Per-fetch isolation is
-guaranteed by ``contextvars``: concurrent in-process fetches each have their own
-contextvar scope.
+Ships-dark: if ``FD_PROXY_FORWARDER`` is unset (local dev / tests),
+``proxy_client.acquire`` returns a direct sentinel (``upstream_url=None``) and
+``release`` is a no-op — identical to today's ``scheme='direct'`` (no forwarder
+running, egress direct from the worker's own node IP).
+
+The contextvar + requests/httpx monkey-patches are unchanged: they are the
+"inject upstream_url into the crawler's own HTTP client" mechanism. The
+forwarder hands back a URL; this shim makes requests/httpx route through it.
 """
 from __future__ import annotations
 
 import contextvars
+import json
 import logging
+import os
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
+from dataclasses import dataclass
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -32,7 +48,11 @@ _INSTALLED = False
 
 
 def proxy_url(proxy) -> Optional[str]:
-    """Build a proxy URL string for a Proxy model, or None for scheme=direct."""
+    """Build a proxy URL string for a Proxy model, or None for scheme=direct.
+
+    Kept for callers that pass a ``Proxy`` model (probe/job.py, tests). The
+    forwarder path passes a URL string straight into ``use_proxy``.
+    """
     if proxy is None or proxy.scheme == "direct":
         return None
     auth = f"{proxy.auth}@" if getattr(proxy, "auth", None) else ""
@@ -43,16 +63,26 @@ def proxy_url(proxy) -> Optional[str]:
 
 
 def proxy_dict(proxy) -> Optional[dict]:
-    """The ``proxies=`` dict for requests, or None for direct (no injection)."""
-    url = proxy_url(proxy)
-    if url is None:
+    """The ``proxies=`` dict for requests, or None for direct (no injection).
+
+    Accepts a URL string (forwarder path), a Proxy-like model, or None.
+    """
+    if proxy is None:
         return None
-    return {"http": url, "https": url}
+    if isinstance(proxy, str):
+        # forwarder path: a URL string (empty = direct)
+        return None if not proxy else {"http": proxy, "https": proxy}
+    url = proxy_url(proxy)
+    return None if url is None else {"http": url, "https": url}
 
 
 @contextmanager
 def use_proxy(proxy):
-    """Set the proxy for the duration of the block."""
+    """Set the proxy for the duration of the block.
+
+    Accepts a URL string (forwarder path), a Proxy model (probe/job.py path), or
+    None for direct egress.
+    """
     token = _proxy_var.set(proxy_dict(proxy))
     try:
         yield
@@ -125,3 +155,101 @@ def _install_httpx_patch() -> None:
     patched._fd_patched = True  # type: ignore[attr-defined]
     httpx.Client.request = patched
     logger.debug("httpx proxy patch installed")
+
+
+# ---------------------------------------------------------------------------
+# Forwarder client — acquire/release contract over HTTP
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class Acquisition:
+    """A forwarder acquire result.
+
+    Mirrors ``fd_proxy_service.providers.base.Acquisition``. ``upstream_url`` is
+    ``None`` for direct egress (ships-dark OR no healthy upstream); ``addr_id``
+    is ``None`` when there is no circuit to update (direct sentinel).
+    """
+    upstream_url: Optional[str]
+    addr_id: Optional[int]
+    provider: Optional[str]
+
+
+# Sentinel returned on ships-dark (no forwarder configured) or forwarder failure.
+# Reused to avoid per-fetch allocation in the common direct-egress path.
+_DIRECT_ACQ = Acquisition(upstream_url=None, addr_id=None, provider=None)
+
+
+class _ProxyClient:
+    """HTTP client for the standalone forwarder's acquire/release contract.
+
+    Talks to ``$FD_PROXY_FORWARDER`` (e.g. ``http://proxy-fw.scraw:8080``) over
+    stdlib ``urllib`` — NOT requests/httpx — so the call is never itself proxied
+    (avoids recursing through the monkey-patches above). Ships-dark on any
+    failure: ``acquire`` returns a direct sentinel, ``release`` is a no-op —
+    fetches still succeed, just without rotation (matches ``circuit.py``'s
+    graceful-degradation property).
+    """
+
+    def __init__(self, base_url: Optional[str] = None) -> None:
+        self._override = base_url
+
+    @property
+    def _base(self) -> str:
+        # Read lazily so a test that sets FD_PROXY_FORWARDER after import works,
+        # and so a process picks up the env at call time, not import time.
+        return (self._override or os.environ.get("FD_PROXY_FORWARDER") or "").rstrip("/")
+
+    @property
+    def enabled(self) -> bool:
+        """True when a forwarder URL is configured (i.e. not ships-dark)."""
+        return bool(self._base)
+
+    def _post(self, path: str, payload: dict, timeout: float = 2.0) -> Optional[dict]:
+        base = self._base
+        if not base:
+            return None
+        try:
+            data = json.dumps(payload).encode()
+            req = urllib.request.Request(
+                f"{base}{path}", data=data,
+                headers={"Content-Type": "application/json"},
+                method="POST",
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                return json.loads(resp.read())
+        except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
+            logger.warning("proxy_client %s failed: %s — egressing direct", path, e)
+            return None
+
+    def acquire(self, source: str) -> Acquisition:
+        """``POST /acquire {source}`` -> Acquisition.
+
+        Returns a direct sentinel (``upstream_url=None``) on ships-dark
+        (forwarder unset) OR when the forwarder has no healthy upstream OR on
+        any forwarder failure. In all three cases the caller egresses direct.
+        """
+        body = self._post("/acquire", {"source": source})
+        if body is None:
+            return _DIRECT_ACQ
+        return Acquisition(
+            upstream_url=body.get("upstream_url"),
+            addr_id=body.get("addr_id"),
+            provider=body.get("provider"),
+        )
+
+    def release(self, source: str, addr_id: Optional[int],
+                provider: Optional[str], outcome: str) -> None:
+        """``POST /release``. Best-effort (never raises).
+
+        No-op when the forwarder is unset (ships-dark) or ``addr_id`` is None
+        (direct sentinel — no circuit to update; matches the forwarder's own
+        ``registry.release`` which returns early on ``addr_id is None``).
+        """
+        if not self._base or addr_id is None:
+            return
+        self._post("/release", {"source": source, "addr_id": addr_id,
+                                "provider": provider, "outcome": outcome})
+
+
+proxy_client = _ProxyClient()

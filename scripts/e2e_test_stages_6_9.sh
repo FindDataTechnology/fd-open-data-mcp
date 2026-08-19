@@ -19,7 +19,9 @@ log_fail() { echo -e "${RED}[FAIL]${NC} $*"; }
 log_skip() { echo -e "${YELLOW}[SKIP]${NC} $*"; }
 
 # Test configuration
-export FD_OPEN_DATA_MCP_DATABASE_URL="${FD_OPEN_DATA_MCP_DATABASE_URL:-postgresql://postgres:postgres@192.168.1.4:5433/postgres}"
+# Canonical DB: guangzhou-xinru:30432/fd_open_data. From the Mac via SSH tunnel:
+#   ssh -N -L 30432:127.0.0.1:30432 -L 30380:127.0.0.1:30380 ubuntu@134.175.46.69
+export FD_OPEN_DATA_MCP_DATABASE_URL="${FD_OPEN_DATA_MCP_DATABASE_URL:-postgresql://fd:FD_PG_PASSWORD@127.0.0.1:30432/fd_open_data}"
 SCRAYPD_URL="${SCRAYPD_URL:-http://localhost:6800}"
 
 TEST_CONCEPTS=("price.close" "gdp.current")

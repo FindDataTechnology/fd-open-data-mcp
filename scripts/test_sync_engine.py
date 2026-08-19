@@ -11,7 +11,7 @@ def test_sync():
     # Use the same database URL as the migration script
     database_url = os.environ.get(
         "FD_OPEN_DATA_MCP_DATABASE_URL",
-        "postgresql://admin:admin123@192.168.1.4:5433/postgres"
+        "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
     )
 
     engine = EntitySyncEngine(database_url=database_url)
