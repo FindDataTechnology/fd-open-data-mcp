@@ -363,23 +363,6 @@ def pick_cluster(session: Session, plan: CrawlPlan) -> Cluster | None:
     return eligible[0][0]
 
 
-def _node_ip(api_server: str) -> str | None:
-    """Extract the worker node's IP from a cluster's ``api_server`` URL.
-
-    The worker clusters are single-node clouds whose API server listens on the
-    node's public IP; the hostNetwork ``proxy-fw`` forwarder binds :8080 on that
-    same IP, so ``http://<node-ip>:8080`` is the forwarder's address. Returns
-    None for a malformed/empty URL — the launcher then omits
-    ``FD_PROXY_FORWARDER`` and the worker degrades to direct egress
-    (injection.py ``_DIRECT_ACQ`` sentinel, ships-dark)."""
-    if not api_server:
-        return None
-    try:
-        return urllib.parse.urlparse(api_server).hostname
-    except Exception:  # noqa: BLE001
-        return None
-
-
 class MultiClusterLauncher:
     """Dispatch crawl Jobs across the worker-cluster fleet.
 
@@ -466,19 +449,23 @@ class MultiClusterLauncher:
                                     # Standalone forwarder: the worker calls
                                     # ``proxy_client.acquire(source)`` per fetch,
                                     # the forwarder returns an upstream_url
-                                    # (gost-own at localhost:30080 on this cluster),
-                                    # and the worker injects it into its own HTTP
-                                    # client (terminating TLS itself to classify
-                                    # bans). On SA-restricted clusters the
-                                    # hostNetwork forwarder binds the node IP:8080
-                                    # (no Service possible), so the URL is per-cluster
-                                    # derived from ``cluster.api_server``. ``_node_ip``
-                                    # returns None for a malformed URL -> the env is
-                                    # omitted and the worker degrades to direct
-                                    # egress (injection.py ships-dark sentinel).
-                                    *([{"name": "FD_PROXY_FORWARDER",
-                                        "value": f"http://{ip}:8080"}]
-                                      if (ip := _node_ip(cluster.api_server)) else []),
+                                    # (gost-own on this cluster's node), and the
+                                    # worker injects it into its own HTTP client
+                                    # (terminating TLS itself to classify bans).
+                                    # The hostNetwork forwarder binds the node
+                                    # IP:8080 (no Service possible under the
+                                    # crawl-worker SA) and worker clusters are
+                                    # single-node, so the pod's OWN node IP —
+                                    # downward API ``status.hostIP`` — is the
+                                    # forwarder's address. K8S_NODE_IP must be
+                                    # declared BEFORE FD_PROXY_FORWARDER: k8s
+                                    # only expands ``$(VAR)`` refs to earlier
+                                    # env entries.
+                                    {"name": "K8S_NODE_IP",
+                                     "valueFrom": {"fieldRef": {
+                                         "fieldPath": "status.hostIP"}}},
+                                    {"name": "FD_PROXY_FORWARDER",
+                                     "value": "http://$(K8S_NODE_IP):8080"},
                                     {"name": "PYTHONUNBUFFERED", "value": "1"},
                                 ],
                                 "resources": {
