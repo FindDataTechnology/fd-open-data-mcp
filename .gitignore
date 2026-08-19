@@ -44,24 +44,18 @@ htmlcov/
 .nox/
 
 # Environment variables (keep secrets private!)
-.env                    # Default configuration (use .env.example as template)
-.env.local              # Local overrides with sensitive data (API keys, etc.)
-.env.localOverrides     # Additional local overrides
-*.local.env            # Any other local env files
-.coverage
-htmlcov/
-.tox/
-.nox/
-
-# Environment variables (keep secrets private!)
-.env                    # Default configuration (use .env.example as template)
-.env.local              # Local overrides with sensitive data (API keys, etc.)
-.env.localOverrides     # Additional local overrides
-*.local.env            # Any other local env files
+# NOTE: gitignore treats a trailing "# ..." as part of the pattern, so the
+# .env* patterns below must stay bare or they silently match nothing.
+.env
+.env.local
+.env.localOverrides
+*.local.env
 
 # Database files
 *.db
 *.db-journal
+*.db-shm
+*.db-wal
 metadata/*.db
 
 # Logs
@@ -70,4 +64,6 @@ metadata/*.db
 # OS files
 .DS_Store
 Thumbs.db
-.env
+
+# Stray templating dirs
+{{pkgetc}}/
