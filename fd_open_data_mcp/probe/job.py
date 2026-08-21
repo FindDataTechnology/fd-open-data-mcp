@@ -62,7 +62,13 @@ def _probe_one(session, source: str, proxy: Proxy) -> bool:
         detail = str(e)
         status = "error"
         st = circuit.get_state(source, proxy.id)
-        classification = ban_rules.classify(session, source, None, detail, None, st["fail_streak"])
+        # Thread HTTP status/body from the FetchError so status/body ban rules
+        # match here too (risk R7 - the probe path had the same None/None bug).
+        # Combined streak = max(fail, transient) so streak-gated rules fire on a
+        # transient streak too (read-only; never touches fail_streak in hash).
+        combined_streak = max(st["fail_streak"], st.get("transient_streak", 0))
+        classification = ban_rules.classify(
+            session, source, e.status_code, detail, e.response_text, combined_streak)
     elapsed_ms = int((time.time() - t0) * 1000)
     # record the probe in fetch_log + outcomes stream
     try:

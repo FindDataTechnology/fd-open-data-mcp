@@ -40,7 +40,7 @@ logger = logging.getLogger(__name__)
 
 # --- tunables for the optional ``call`` retry/timeout (task 2.3) -----------------
 DEFAULT_TIMEOUT: float = 30.0   # seconds; passed as akshare's native ``timeout`` kwarg
-DEFAULT_RETRIES: int = 2        # extra attempts after the first failure
+DEFAULT_RETRIES: int = 0        # single attempt; the instrumented-fetch loop is the sole retry
 DEFAULT_RETRY_DELAY: float = 1.0  # seconds between retries
 
 
@@ -201,7 +201,7 @@ class _AkshareBase:
 
         import akshare as ak
 
-        from fd_open_data_mcp.fetch.runner import FetchError
+        from fd_open_data_mcp.fetch.runner import FetchError, _extract_http_attrs
 
         fn = getattr(ak, command, None)
         if fn is None or not callable(fn):
@@ -218,8 +218,14 @@ class _AkshareBase:
                         command, attempt + 2, self._RETRIES + 1, exc, self._RETRY_DELAY,
                     )
                     time.sleep(self._RETRY_DELAY)
+        # Best-effort thread HTTP status/body from the LAST upstream exception so
+        # ban_rules.classify can match status-based + body-based rules (HTTP
+        # 403/429/captcha). Connection-level errors (RemoteDisconnected, timeout)
+        # carry no .response → (None, None) → classify defaults to transient.
+        status, text = _extract_http_attrs(last_exc) if last_exc is not None else (None, None)
         raise FetchError(
-            f"akshare {command} failed after {self._RETRIES + 1} attempts: {last_exc}"
+            f"akshare {command} failed after {self._RETRIES + 1} attempts: {last_exc}",
+            status, text,
         ) from last_exc
 
 

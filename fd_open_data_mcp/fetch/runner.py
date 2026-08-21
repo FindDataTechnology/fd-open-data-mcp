@@ -6,11 +6,41 @@ methods + top-level). Requires the `data` extra. ``returned_columns`` extracts
 """
 from __future__ import annotations
 
-from typing import Any
+from typing import Any, Optional
+
+
+def _extract_http_attrs(exc: BaseException) -> tuple[Optional[int], Optional[str]]:
+    """Best-effort extract ``(status_code, response_text)`` from an upstream
+    exception.
+
+    Handles ``requests.HTTPError`` and ``httpx.HTTPStatusError`` (both expose a
+    ``.response`` with ``.status_code``/``.text``). Connection-level errors
+    (socket, ``RemoteDisconnected``, timeout, DNS) carry no HTTP response to
+    inspect, so they return ``(None, None)`` — ``ban_rules.classify`` then falls
+    back to the default (transient) and the error-message substring rules.
+    """
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None, None
+    status = getattr(resp, "status_code", None)
+    text = getattr(resp, "text", None)
+    status_code = int(status) if status is not None else None
+    return status_code, text
 
 
 class FetchError(Exception):
-    """Raised when an upstream call cannot be made or fails."""
+    """Raised when an upstream call cannot be made or fails.
+
+    Carries optional ``status_code``/``response_text`` so ``ban_rules.classify``
+    can match status-based and body-based rules (HTTP 403/429/captcha). Both are
+    ``None`` for connection-level errors (no HTTP response to inspect).
+    """
+
+    def __init__(self, message: str, status_code: Optional[int] = None,
+                 response_text: Optional[str] = None) -> None:
+        super().__init__(message)
+        self.status_code = status_code
+        self.response_text = response_text
 
 
 def run_akshare(command: str, params: dict) -> Any:
@@ -33,7 +63,8 @@ def run_akshare(command: str, params: dict) -> Any:
     try:
         return fn(**params)
     except Exception as e:  # noqa: BLE001 - upstream errors surface as FetchError
-        raise FetchError(f"akshare {command} raised: {e}") from e
+        status, text = _extract_http_attrs(e)
+        raise FetchError(f"akshare {command} raised: {e}", status, text) from e
 
 
 def run_yfinance(command: str, params: dict) -> Any:
@@ -55,7 +86,8 @@ def run_yfinance(command: str, params: dict) -> Any:
     try:
         return fn(**params)
     except Exception as e:  # noqa: BLE001
-        raise FetchError(f"yfinance {command} raised: {e}") from e
+        status, text = _extract_http_attrs(e)
+        raise FetchError(f"yfinance {command} raised: {e}", status, text) from e
 
 
 _EDGAR_IDENTITY_SET = False
@@ -93,14 +125,16 @@ def run_edgar(command: str, params: dict) -> Any:
         try:
             return attr() if callable(attr) else attr
         except Exception as e:  # noqa: BLE001
-            raise FetchError(f"edgar Company.{method} raised: {e}") from e
+            status, text = _extract_http_attrs(e)
+            raise FetchError(f"edgar Company.{method} raised: {e}", status, text) from e
     fn = getattr(edgar, command, None)
     if fn is None or not callable(fn):
         raise FetchError(f"edgar has no callable {command}")
     try:
         return fn(**params)
     except Exception as e:  # noqa: BLE001
-        raise FetchError(f"edgar {command} raised: {e}") from e
+        status, text = _extract_http_attrs(e)
+        raise FetchError(f"edgar {command} raised: {e}", status, text) from e
 
 
 def run_wbgapi(command: str, params: dict) -> Any:
@@ -118,7 +152,8 @@ def run_wbgapi(command: str, params: dict) -> Any:
             time_range = range(year, year + 1) if year else None
             df = wb.data.DataFrame(indicator, economy, time=time_range, labels=False)
         except Exception as e:  # noqa: BLE001
-            raise FetchError(f"wbgapi get_indicator_data raised: {e}") from e
+            status, text = _extract_http_attrs(e)
+            raise FetchError(f"wbgapi get_indicator_data raised: {e}", status, text) from e
         if df is None or getattr(df, "empty", True):
             raise FetchError("wbgapi returned no data")
         val = df.iloc[0, 0]
@@ -135,14 +170,16 @@ def run_wbgapi(command: str, params: dict) -> Any:
         if command == "get_series_metadata":
             return pd.DataFrame(list(wb.series.info(params.get("indicator"))))
     except Exception as e:  # noqa: BLE001
-        raise FetchError(f"wbgapi {command} raised: {e}") from e
+        status, text = _extract_http_attrs(e)
+        raise FetchError(f"wbgapi {command} raised: {e}", status, text) from e
     fn = getattr(wb, command, None)
     if fn is None or not callable(fn):
         raise FetchError(f"wbgapi has no callable {command}")
     try:
         return fn(**params)
     except Exception as e:  # noqa: BLE001
-        raise FetchError(f"wbgapi {command} raised: {e}") from e
+        status, text = _extract_http_attrs(e)
+        raise FetchError(f"wbgapi {command} raised: {e}", status, text) from e
 
 
 def run_upstream(source: str, command: str, params: dict) -> Any:

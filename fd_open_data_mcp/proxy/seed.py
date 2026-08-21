@@ -179,7 +179,7 @@ def _seed_direct_proxy(session: Session) -> str:
 # MUST override via the ``FD_EGRESS_AUTH`` env (set it in a k8s Secret referenced
 # by both the gost Deployment and the seed run) — the NodePort is public, so a
 # known default password must not ship to prod as-is.
-_DEFAULT_EGRESS_AUTH = "fdproxy:GostEgress2026x9k"
+_DEFAULT_EGRESS_AUTH = "fdproxy:CHANGE_ME"
 
 # Per-server gost forward-proxy endpoints. Each gost pod runs ``hostNetwork``
 # so its egress IS the server's own IP; the NodePort 30080 lets any worker in

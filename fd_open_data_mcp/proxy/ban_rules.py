@@ -33,20 +33,31 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, tuple[float, list[dict]]] = {}
 _TTL = 60.0
 
+# real_source -> library name. ``classify`` is called with real_source names
+# (e.g. ``eastmoney``) but ban rules are seeded for library names (e.g.
+# ``akshare`` — akshare calls eastmoney/tencent/sina under the hood). When the
+# primary lookup by ``source`` returns empty, fall back to the library's rules
+# so a 403 from eastmoney matches the akshare 403 rule. Explicit rules seeded
+# for the real_source name ALWAYS take precedence (fallback fires only when the
+# primary lookup is empty). The circuit key stays per-real_source
+# (``circuit:eastmoney:X``) — this affects rule LOOKUP only.
+REAL_SOURCE_FALLBACK: dict[str, str] = {
+    "eastmoney": "akshare",
+    "tencent": "akshare",
+    "sina": "akshare",
+    "yahoo_finance": "yfinance",
+}
 
-def _load_rules(session: Session, source: str) -> list[dict]:
-    now = time.time()
-    cached = _CACHE.get(source)
-    if cached and now - cached[0] < _TTL:
-        return cached[1]
+
+def _query_rules(session: Session, source: str) -> list[dict]:
+    """Query the ``ban_rules`` table for ``source`` (no cache)."""
     ban_rules = (
         session.query(BanRule)
         .filter(BanRule.source == source, BanRule.enabled.is_(True))
         .order_by(BanRule.priority.desc())
         .all()
     )
-    # Convert ORM objects to plain dicts to avoid detached instance errors
-    rules_dicts = [
+    return [
         {
             "streak_min": br.streak_min,
             "rule_type": br.rule_type,
@@ -55,6 +66,22 @@ def _load_rules(session: Session, source: str) -> list[dict]:
         }
         for br in ban_rules
     ]
+
+
+def _load_rules(session: Session, source: str) -> list[dict]:
+    now = time.time()
+    cached = _CACHE.get(source)
+    if cached and now - cached[0] < _TTL:
+        return cached[1]
+    rules_dicts = _query_rules(session, source)
+    # Namespace fallback: if no rules exist for this real_source name, try the
+    # library mapping (e.g. eastmoney -> akshare). Explicit rules win — the
+    # fallback only fires when the primary lookup is empty. The resolved rules
+    # are cached under the ORIGINAL source name so later calls hit the cache.
+    if not rules_dicts:
+        library = REAL_SOURCE_FALLBACK.get(source)
+        if library is not None and library != source:
+            rules_dicts = _query_rules(session, library)
     _CACHE[source] = (now, rules_dicts)
     return rules_dicts
 

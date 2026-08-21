@@ -3,15 +3,19 @@
 Hot state lives in Redis (hash at ``circuit:{source}:{proxy_id}``) so all crawl
 pods share it with sub-ms reads. The state machine:
 
-  CLOSED  --streak of BAN-->  OPEN (cooldown_until = now + T)
+  CLOSED  --streak of BAN-->  OPEN (cooldown_until = now + COOLDOWN_SEC)
+  CLOSED  --streak of TRANSIENT-->  OPEN (cooldown = TRANSIENT_COOLDOWN_SEC)
   OPEN    --cooldown elapses-->  HALF_OPEN  (touched only by the probe job)
   HALF_OPEN --probe OK-->  CLOSED        (open_cycles reset)
   HALF_OPEN --probe BAN-->  OPEN          (cooldown x2, open_cycles += 1)
   open_cycles >= K  -->  permanent        (proxy surfaced for retirement)
 
-TRANSIENT outcomes do not touch the circuit. OK resets the fail streak and
-closes a HALF_OPEN circuit (defensive - the probe is the normal closer, but a
-real fetch succeeding also closes).
+TRANSIENT outcomes increment a separate ``transient_streak`` (independent of
+``fail_streak``); at ``TRANSIENT_THRESHOLD`` consecutive transients the circuit
+trips OPEN with a shorter ``TRANSIENT_COOLDOWN_SEC`` — a persistently-flaky
+endpoint is not just a blip. A ban (stronger signal) resets transient_streak; ok
+resets both streaks. ok also closes a HALF_OPEN circuit (defensive - the probe
+is the normal closer, but a real fetch succeeding also closes).
 
 Degrades gracefully: if REDIS_URL is unset, ``_client()`` returns None and the
 circuit is a no-op (everything reads CLOSED) - the "ships dark" property: with
@@ -33,6 +37,8 @@ BAN_THRESHOLD = 3          # consecutive BAN outcomes to trip CLOSED -> OPEN
 COOLDOWN_SEC = 600         # initial OPEN cooldown (10 min)
 COOLDOWN_MAX_SEC = 3600    # cap on doubled cooldown
 PERMANENT_CYCLES = 3       # OPEN<->HALF_OPEN cycles before permanent retirement
+TRANSIENT_THRESHOLD = 3    # consecutive TRANSIENT outcomes to trip CLOSED -> OPEN
+TRANSIENT_COOLDOWN_SEC = 120  # OPEN cooldown from a transient trip (2 min; soft failure)
 
 _REDIS = None  # type: ignore[var-annotated]
 
@@ -80,15 +86,18 @@ def get_state(source: str, proxy_id: int) -> dict:
     """
     r = _client()
     if r is None:
-        return {"state": "closed", "fail_streak": 0, "success_streak": 0,
-                "cooldown_until": None, "open_cycles": 0, "permanent": False}
+        return {"state": "closed", "fail_streak": 0, "transient_streak": 0,
+                "success_streak": 0, "cooldown_until": None, "open_cycles": 0,
+                "permanent": False}
     raw = r.hgetall(_key(source, proxy_id))
     if not raw:
-        return {"state": "closed", "fail_streak": 0, "success_streak": 0,
-                "cooldown_until": None, "open_cycles": 0, "permanent": False}
+        return {"state": "closed", "fail_streak": 0, "transient_streak": 0,
+                "success_streak": 0, "cooldown_until": None, "open_cycles": 0,
+                "permanent": False}
     return {
         "state": raw.get("state", "closed"),
         "fail_streak": int(raw.get("fail_streak", 0)),
+        "transient_streak": int(raw.get("transient_streak", 0)),
         "success_streak": int(raw.get("success_streak", 0)),
         "cooldown_until": float(raw["cooldown_until"]) if raw.get("cooldown_until") else None,
         "open_cycles": int(raw.get("open_cycles", 0)),
@@ -124,6 +133,7 @@ def record_outcome(source: str, proxy_id: int, classification: str) -> dict:
 
     if classification == "ban":
         st["fail_streak"] += 1
+        st["transient_streak"] = 0  # ban is a stronger signal; transients moot
         if st["fail_streak"] >= BAN_THRESHOLD and st["state"] != "open":
             st["state"] = "open"
             st["cooldown_until"] = now + COOLDOWN_SEC
@@ -132,17 +142,31 @@ def record_outcome(source: str, proxy_id: int, classification: str) -> dict:
                            source, proxy_id, st["fail_streak"])
     elif classification == "ok":
         st["fail_streak"] = 0
+        st["transient_streak"] = 0
         st["success_streak"] += 1
         if st["state"] == "half_open":
             st["state"] = "closed"
             st["open_cycles"] = 0
             st["cooldown_until"] = None
             logger.info("circuit CLOSED %s proxy=%d (probe/recovery)", source, proxy_id)
-    # transient: no circuit change.
+    elif classification == "transient":
+        # A persistently-flaky endpoint is not just a blip: track it on a
+        # separate streak so repeated timeouts / connection resets open the
+        # circuit without conflating with hard bans. Does NOT touch
+        # fail_streak (ban is a different, stronger signal).
+        st["transient_streak"] = st.get("transient_streak", 0) + 1
+        if (st["transient_streak"] >= TRANSIENT_THRESHOLD
+                and st["state"] != "open"):
+            st["state"] = "open"
+            st["cooldown_until"] = now + TRANSIENT_COOLDOWN_SEC
+            st["banned_at"] = _now_iso()
+            logger.warning("circuit OPEN %s proxy=%d (transient_streak=%d)",
+                           source, proxy_id, st["transient_streak"])
 
     mapping = {
         "state": st["state"],
         "fail_streak": st["fail_streak"],
+        "transient_streak": st.get("transient_streak", 0),
         "success_streak": st["success_streak"],
         "open_cycles": st.get("open_cycles", 0),
         "permanent": "1" if st.get("permanent") else "0",
@@ -174,11 +198,13 @@ def probe_transition(source: str, proxy_id: int, probe_ok: bool) -> dict:
     if probe_ok:
         st["state"] = "closed"
         st["fail_streak"] = 0
+        st["transient_streak"] = 0
         st["open_cycles"] = 0
         st["cooldown_until"] = None
         logger.info("probe CLOSED %s proxy=%d", source, proxy_id)
     else:
         st["state"] = "open"
+        st["transient_streak"] = 0  # reset so a post-cooldown transient doesn't re-trip instantly
         prev_cd = st.get("cooldown_until") or (now + COOLDOWN_SEC)
         new_cd = min(prev_cd * 2 if prev_cd > now else (now + COOLDOWN_SEC * 2),
                      now + COOLDOWN_MAX_SEC)
@@ -192,6 +218,7 @@ def probe_transition(source: str, proxy_id: int, probe_ok: bool) -> dict:
                            source, proxy_id, st["open_cycles"])
     mapping = {
         "state": st["state"], "fail_streak": st.get("fail_streak", 0),
+        "transient_streak": st.get("transient_streak", 0),
         "open_cycles": st.get("open_cycles", 0),
         "permanent": "1" if st.get("permanent") else "0",
         "updated_at": _now_iso(),

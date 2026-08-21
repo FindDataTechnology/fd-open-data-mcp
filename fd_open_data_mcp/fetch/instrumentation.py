@@ -64,6 +64,27 @@ class SourceUnavailable(Exception):
     the next source in the plan's ranked_sources chain."""
 
 
+def _is_readonly_tx(exc: BaseException) -> bool:
+    """True when ``exc`` is a write against a read-only Postgres transaction.
+
+    Postgres raises ``cannot execute INSERT in a read-only transaction``
+    (SQLSTATE 25006, ``ReadOnlySqlTransaction``) when a DB is in read-only mode
+    — e.g. the retired America / LAN replicas kept around for rollback. A bare
+    ``except`` previously swallowed these at ``debug``, silently dropping every
+    ``fetch_log`` row; detected here so the caller logs at WARNING with a clear
+    message instead (Bug 6). Best-effort: checks the unwrapped DBAPI exception
+    class name, SQLSTATE/pgcode, and message text, so it works across
+    psycopg2/psycopg3 without a hard import dependency.
+    """
+    orig = getattr(exc, "orig", exc)  # unwrap SQLAlchemy OperationalError
+    if type(orig).__name__ == "ReadOnlySqlTransaction":
+        return True
+    if getattr(orig, "pgcode", None) == "25006":  # sql_read_only_transaction
+        return True
+    msg = str(orig).lower()
+    return "read-only transaction" in msg
+
+
 def _record(session, source: str, proxy_id: Optional[int], classification: str,
             latency_ms: int, status: str, detail: Optional[str],
             concept_id: Optional[int] = None, entity_type: Optional[str] = None,
@@ -85,7 +106,17 @@ def _record(session, source: str, proxy_id: Optional[int], classification: str,
         session.commit()
     except Exception as e:  # noqa: BLE001 - never let logging break the fetch
         session.rollback()
-        logger.debug("fetch_log write failed: %s", e)
+        if _is_readonly_tx(e):
+            # Writing to a read-only Postgres (a retired rollback-only
+            # replica, e.g. the old America / LAN DBs). fetch_log can't
+            # persist there — surface it loudly so ops don't silently lose
+            # every log row (Bug 6). Still non-breaking: never raises.
+            logger.warning(
+                "fetch_log write failed: database is read-only (source=%s "
+                "proxy=%s) — likely a retired rollback-only replica; %s",
+                source, proxy_id, e)
+        else:
+            logger.warning("fetch_log write failed (source=%s): %s", source, e)
     # Use real_source for outcomes stream if available, otherwise fall back to source
     outcome_source = real_source if real_source else source
     circuit.write_outcome(outcome_source, {
@@ -155,7 +186,11 @@ def instrumented_fetch(
             # (ships-dark / local dev) OR when it has no healthy upstream (all
             # circuits OPEN). use_proxy(None) => direct egress, so the sentinel
             # path degrades to a plain direct fetch with no rotation.
-            acq = injection.proxy_client.acquire(circuit_source)
+            # Pass tried addr_ids so the forwarder skips a proxy that already
+            # failed within THIS fetch's retry loop (Bug 5). Without it a dead
+            # proxy is re-acquired on the next max_proxies iteration; with it the
+            # forwarder rotates to a different upstream. Empty on the first pass.
+            acq = injection.proxy_client.acquire(circuit_source, exclude=tried)
             tried.append(acq.addr_id or 0)
             for attempt in range(2):  # 1 retry on transient
                 t0 = time.time()
@@ -171,8 +206,17 @@ def instrumented_fetch(
                     last_error = detail
                     status = "error"
                     st = circuit.get_state(circuit_source, acq.addr_id) if acq.addr_id is not None else {"fail_streak": 0}
+                    # Thread the HTTP status/body carried by FetchError so
+                    # status-based + body-based ban rules (403/429/captcha) can
+                    # match. Connection errors (RemoteDisconnected, timeout)
+                    # carry None for both -> classify defaults to transient.
+                    # Combined streak = max(fail, transient) so a streak_min gate
+                    # on a transient-class rule can fire (read-only: this value
+                    # never touches fail_streak in the hash).
+                    combined_streak = max(st["fail_streak"], st.get("transient_streak", 0))
                     classification = ban_rules.classify(
-                        session, circuit_source, None, detail, None, st["fail_streak"]
+                        session, circuit_source, e.status_code, detail,
+                        e.response_text, combined_streak
                     )
                 elapsed_ms = int((time.time() - t0) * 1000)
                 # Hand the classification to the forwarder, which owns the

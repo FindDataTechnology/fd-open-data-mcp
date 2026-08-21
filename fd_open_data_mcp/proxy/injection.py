@@ -222,14 +222,22 @@ class _ProxyClient:
             logger.warning("proxy_client %s failed: %s — egressing direct", path, e)
             return None
 
-    def acquire(self, source: str) -> Acquisition:
-        """``POST /acquire {source}`` -> Acquisition.
+    def acquire(self, source: str,
+                exclude: Optional[list[int]] = None) -> Acquisition:
+        """``POST /acquire {source, exclude}`` -> Acquisition.
 
         Returns a direct sentinel (``upstream_url=None``) on ships-dark
         (forwarder unset) OR when the forwarder has no healthy upstream OR on
         any forwarder failure. In all three cases the caller egresses direct.
+
+        ``exclude`` is a list of addr_ids already tried in this
+        ``instrumented_fetch`` call — the forwarder skips them so a dead proxy
+        is not re-acquired within one fetch's retry loop (Bug 5). Empty/absent
+        = no exclusion (degrades to today's behavior on an old forwarder that
+        ignores the field — see design.md risk R5/R6).
         """
-        body = self._post("/acquire", {"source": source})
+        body = self._post("/acquire", {"source": source,
+                                       "exclude": exclude or []})
         if body is None:
             return _DIRECT_ACQ
         return Acquisition(
