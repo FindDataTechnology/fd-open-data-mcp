@@ -1,9 +1,8 @@
 # fd-open-data-mcp MCP server — Streamable HTTP :8300, env-gated bearer auth
 # (MCP_BEARER_TOKEN from the fd-mcp-env Secret). Serves ontology reads from the
 # canonical PG on guangzhou-xinru: FD_OPEN_DATA_MCP_DATABASE_URL and REDIS_URL
-# come from the Secret via envFrom. FD_PROXY_POOL=off is restated as a plain
-# env value (it is not a secret) because the free-proxy pool must never be
-# consulted from this pod.
+# come from the Secret via envFrom. This pod serves reads only; it does not
+# crawl, so the fd-proxy-service forwarder / proxy pool does not apply here.
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -26,9 +25,11 @@ spec:
       containers:
         - name: fd-open-data-mcp
           # Pinned to the <short-sha> tag pushed by .github/workflows/
-          # docker-publish.yml for commit 5455d38 (image digest
-          # sha256:37e2cd036457… in Harbor project `finddata`).
-          image: harbor.local/finddata/fd-open-data-mcp:sha-5455d38
+          # docker-publish.yml for commit 57cbe29 — wires the cache read
+          # path to the semantic_observations_read dedup view (FDW-backed
+          # shard rows become visible) + historical-aware is_stale (past
+          # periods are immutable facts → no re-fetch).
+          image: harbor.local/finddata/fd-open-data-mcp:sha-57cbe29
           imagePullPolicy: IfNotPresent
           ports:
             - name: mcp
@@ -36,9 +37,6 @@ spec:
           envFrom:
             - secretRef:
                 name: fd-mcp-env
-          env:
-            - name: FD_PROXY_POOL
-              value: "off"
           resources:
             requests:
               memory: "256Mi"
