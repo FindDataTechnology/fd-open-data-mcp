@@ -6,4 +6,4 @@ and adds: a unified catalog, concept<->column bindings, cross-source entity
 identity, ranked dispatch, a read-through concept-keyed cache, and
 frequency-driven auto-refresh.
 """
-__version__ = "0.4.5"
+__version__ = "0.4.7"
