@@ -75,6 +75,14 @@ def registered() -> list[tuple[str, str]]:
 # `register` is defined before akshare.py imports it (no cycle).
 from fd_open_data_mcp.adapters import akshare as _akshare_adapters  # noqa: E402,F401
 
+# Load wbgapi adapters (WDI indicator/economy fetch). Unconditional: the module
+# has no top-level third-party imports (pandas is lazy, wbgapi itself is only
+# imported lazily by fetch/runner.run_wbgapi at call time), so it is safe in
+# every environment that imports the adapters package. Without this the
+# fetch_handler legacy fallback builds {symbol, date} which run_wbgapi rejects
+# ("get_indicator_data needs indicator + economy").
+from fd_open_data_mcp.adapters import wbgapi as _wbgapi_adapters  # noqa: E402,F401
+
 # Load cnreport adapters (optional - requires fd-cn-report/cnreport_tools).
 # Guarded so environments without fd-cn-report (e.g. the scraw crawler image)
 # don't fail to import the whole adapters package; the cn-report source is
