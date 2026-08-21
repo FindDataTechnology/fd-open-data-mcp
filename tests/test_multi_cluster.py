@@ -4,7 +4,7 @@ Covers:
   - per-cluster direct-egress registration (distinct proxy rows + labels)
   - ClusterScheduler.pick_cluster: tag filtering, least-loaded ranking,
     wildcard tags, banned-egress skip, capacity skip, none-eligible
-  - ProxySelector pinning to a cluster's own egress when SCRAW_CLUSTER_ID is set
+  - ProxySelector ships-dark (no proxies registered -> direct sentinel)
 """
 import pytest
 
@@ -127,26 +127,12 @@ def test_pick_cluster_none_eligible(session):
     assert pick_cluster(session, _plan(("eastmoney",))) is None
 
 
-def test_selector_pins_to_cluster_egress(session, monkeypatch):
-    """With SCRAW_CLUSTER_ID set, the selector returns THIS cluster's direct proxy
-    (real DB id) so the circuit breaker tracks per-cluster - not the None sentinel."""
-    c = _cluster(session, "tokyo", tags=["eastmoney"])
-    register_cluster_egress(session, c.id)
-    session.commit()
-    direct = session.query(Proxy).filter_by(scheme="direct", cluster_id=c.id).first()
-
-    monkeypatch.setenv("SCRAW_CLUSTER_ID", str(c.id))
-    monkeypatch.delenv("FD_PROXY_POOL", raising=False)
-    pid, proxy = ProxySelector(session).select("eastmoney")
-    assert pid == direct.id
-    assert proxy is not _DIRECT  # a real Proxy row, not the synthetic sentinel
-
-
-def test_selector_legacy_without_cluster_id(session, monkeypatch):
-    """Without SCRAW_CLUSTER_ID, the selector returns the synthetic _DIRECT sentinel
-    (cluster_id=None) - legacy single-cluster behavior preserved."""
+def test_selector_ships_dark_no_proxies(session, monkeypatch):
+    """No proxies registered -> the synthetic _DIRECT sentinel (direct egress,
+    no circuit). The legacy ships-dark path preserved after the
+    FD_PROXY_POOL/FD_EGRESS_MODE/SCRAW_CLUSTER_ID branches were removed from
+    the selector (the forwarder owns selection now)."""
     monkeypatch.delenv("SCRAW_CLUSTER_ID", raising=False)
-    monkeypatch.setenv("FD_PROXY_POOL", "off")
     pid, proxy = ProxySelector(session).select("eastmoney")
     assert pid is None
     assert proxy is _DIRECT

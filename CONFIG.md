@@ -221,9 +221,11 @@ SCRAW_K8S_IMAGE=harbor.local/lawcraw_business/scraw-fd-open-data-mcp
 SCRAW_K8S_DATABASE_URL=postgresql://...
 SCRAW_K8S_REDIS_URL=redis://...
 
-# Local dev only: bypass the cluster proxy pool (dead free proxies break
-# akshare/eastmoney; see phase7-validation.md)
-FD_PROXY_POOL=off
+# Local dev: leave FD_PROXY_FORWARDER unset — the injection shim returns a
+# direct sentinel (direct egress, no pool). The standalone fd-proxy-service
+# forwarder owns proxy selection in cluster crawls. The legacy
+# FD_PROXY_POOL / FD_EGRESS_MODE vars are no longer read.
+#FD_PROXY_FORWARDER=
 ```
 
 ### 12. Playwright Configuration (Web Scraping)

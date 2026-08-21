@@ -369,9 +369,11 @@ class MultiClusterLauncher:
     ``launch`` picks a cluster (ClusterScheduler), creates a ConfigMap + Job
     there via ClusterK8sClient, and returns ``("{cluster_name}/{job_name}",
     cluster.id)``. ``poll`` parses the cluster prefix and probes that cluster's
-    Job. Workers point at the shared master PG (PgBouncer) + master Redis, and
-    self-register their egress (concept_crawl_spider._register_egress); the
-    ProxySelector pins to that egress so the circuit tracks per-cluster."""
+    Job. Workers point at the shared canonical PG + Redis (xinru), self-register
+    their egress (concept_crawl_spider._register_egress), and call the per-worker
+    ``proxy-fw`` forwarder (``FD_PROXY_FORWARDER``) for per-fetch proxy
+    acquisition/release; ``pick_cluster`` still consults the per-cluster circuit
+    at scheduling time."""
 
     def __init__(self, database_url: str | None = None, redis_url: str | None = None):
         self.database_url = database_url or os.environ.get(
@@ -431,21 +433,11 @@ class MultiClusterLauncher:
                                     {"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
                                      "value": self.database_url},
                                     {"name": "REDIS_URL", "value": self.redis_url},
-                                    # tells the worker which cluster it is so the
-                                    # ProxySelector pins to its own egress (per-cluster circuit)
+                                    # tells the worker which cluster it is (used by
+                                    # pick_cluster's per-cluster circuit check + by
+                                    # the worker's own egress self-registration)
                                     {"name": "SCRAW_CLUSTER_ID", "value": str(cluster.id)},
                                     {"name": "SCRAW_CLUSTER_NAME", "value": cluster.name},
-                                    # Decoupled egress pool (LEGACY — no-op once proxy-fw is
-                                    # the sole path; kept during the overlap so a worker
-                                    # whose proxy-fw is not yet running still opts into the
-                                    # old gost scheme='http' pool). ``pool`` skips the
-                                    # SCRAW_CLUSTER_ID pinning branch in selector.py; on keeps
-                                    # the pool active. Both default to the decoupled values so
-                                    # a missing reconciler env still opts workers into the pool.
-                                    {"name": "FD_EGRESS_MODE",
-                                     "value": os.environ.get("FD_EGRESS_MODE", "pool")},
-                                    {"name": "FD_PROXY_POOL",
-                                     "value": os.environ.get("FD_PROXY_POOL", "on")},
                                     # Standalone forwarder: the worker calls
                                     # ``proxy_client.acquire(source)`` per fetch,
                                     # the forwarder returns an upstream_url

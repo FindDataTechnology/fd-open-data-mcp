@@ -209,8 +209,10 @@ python -m fd_open_data_mcp.refresh.reconciler
 - `SCRAPYD_URL` / `SCRAW_PLAN_DIR` (scrapyd launcher), `SCRAW_K8S_NAMESPACE` /
   `SCRAW_K8S_IMAGE` / `SCRAW_K8S_DATABASE_URL` / `SCRAW_K8S_REDIS_URL`
   (k8s launcher).
-- `FD_PROXY_POOL=off` — local dev: bypass the cluster proxy pool (its free
-  proxies break akshare/eastmoney).
+- `FD_PROXY_FORWARDER` — unset for local dev (the injection shim returns a
+  direct sentinel → direct egress; the standalone `fd-proxy-service` forwarder
+  owns proxy selection in cluster crawls). The legacy `FD_PROXY_POOL`/
+  `FD_EGRESS_MODE` vars are no longer read.
 
 **Policy example** (via panel, or MCP `policy_create`):
 

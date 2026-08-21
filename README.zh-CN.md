@@ -202,8 +202,9 @@ python -m fd_open_data_mcp.refresh.reconciler
 - `SCRAPYD_URL` / `SCRAW_PLAN_DIR`（scrapyd 启动器），`SCRAW_K8S_NAMESPACE` /
   `SCRAW_K8S_IMAGE` / `SCRAW_K8S_DATABASE_URL` / `SCRAW_K8S_REDIS_URL`
   （k8s 启动器）。
-- `FD_PROXY_POOL=off` —— 本地开发：绕过集群代理池（其免费代理会破坏
-  akshare/eastmoney）。
+- `FD_PROXY_FORWARDER` —— 本地开发留空（注入层返回直连哨兵 → 直连出口；
+  集群抓取由独立 `fd-proxy-service` forwarder 负责代理选择）。旧变量
+  `FD_PROXY_POOL`/`FD_EGRESS_MODE` 已不再读取。
 
 ## 测试
 

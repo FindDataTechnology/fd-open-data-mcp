@@ -1,4 +1,4 @@
-"""Per-fetch proxy selection.
+"""Per-fetch proxy selection (legacy in-process selector).
 
 For a source: enumerate active proxies (direct first), skip any whose circuit
 is OPEN/HALF_OPEN/permanent, skip any at its QPS cap, and acquire a rate token
@@ -10,16 +10,17 @@ Ships-dark: when NO proxies are registered at all, returns a synthetic direct
 proxy (``proxy_id=None``) so behavior matches the pre-proxy baseline - the
 change activates only once a proxy (including ``scheme='direct'``) is
 registered.
+
+NOTE (add-proxy-service): legacy — the crawl hot path uses ``fd-proxy-service``
+(``proxy_client.acquire``); this is kept for probe/job + tests only.
 """
 from __future__ import annotations
 
 import logging
-import os
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from fd_open_data_mcp.models import Proxy
 from fd_open_data_mcp.proxy import circuit, pool, rate_limit
 
 logger = logging.getLogger(__name__)
@@ -44,38 +45,6 @@ class ProxySelector:
         self.session = session
 
     def select(self, source: str) -> Optional[tuple[Optional[int], object]]:
-        # Decoupled egress pool (per-server gost forward proxies): in pool mode a
-        # worker rotates across ALL gost egresses via the circuit breaker + rate
-        # limiter, instead of being pinned to its own cluster's direct egress.
-        # ``pinned`` (default) preserves the per-cluster direct-egress behavior.
-        if os.environ.get("FD_EGRESS_MODE", "pinned") != "pool":
-            # multi-cluster (add-multi-cluster-master-db): pin to THIS worker's own
-            # egress so the circuit breaker tracks per-cluster (circuit:{source}:{direct_id}),
-            # enabling the reconciler to route around a banned cluster. Falls through to
-            # the legacy paths when SCRAW_CLUSTER_ID is unset (single-cluster / local dev).
-            raw_cid = os.environ.get("SCRAW_CLUSTER_ID")
-            if raw_cid:
-                try:
-                    cid = int(raw_cid)
-                except ValueError:
-                    cid = None
-                if cid is not None:
-                    direct = (self.session.query(Proxy)
-                              .filter_by(scheme="direct", cluster_id=cid).first())
-                    if direct is not None:
-                        if not circuit.is_selectable(source, direct.id):
-                            return None  # this cluster's egress is banned -> source-level failover
-                        rl = pool.get_rate_limit(self.session, source)
-                        max_qps = rl.max_qps if rl else _DEFAULT_QPS
-                        if rate_limit.acquire(source, direct.id, max_qps):
-                            return (direct.id, direct)
-                        return None  # rate-saturated -> failover (retry next tick)
-                    # egress not yet registered (spider registers on start) -> synthetic
-                    # direct for this fetch; circuit won't track until registered.
-        if os.environ.get("FD_PROXY_POOL") == "off":
-            # local dev: my Mac's egress is trusted — skip the cluster proxy pool
-            # (free proxies break akshare/eastmoney; see CLAUDE.md gotcha)
-            return (None, _DIRECT)
         rl = pool.get_rate_limit(self.session, source)
         max_qps = rl.max_qps if rl else _DEFAULT_QPS
         proxies = pool.active_proxies(self.session)
