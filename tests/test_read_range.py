@@ -139,25 +139,32 @@ def test_fresh_cache_hit_skips_fetch(session, catalog, monkeypatch):
 
 
 def test_stale_cache_row_triggers_refetch(session, catalog, monkeypatch):
-    """Any stale row in the range => the whole range is re-fetched and the cache
-    refreshed (partial-coverage detection is by staleness, documented caveat)."""
+    """A stale row in the CURRENT period (today) => the whole range is
+    re-fetched and the cache refreshed. Past-dated rows are immutable
+    historical facts and never trigger a refetch on their own (documented
+    staleness-only coverage caveat), so the stale row must be today's."""
+    today = datetime.now(timezone.utc).date()
+    start = (today - timedelta(days=1)).strftime("%Y-%m-%d")
+    end = today.strftime("%Y-%m-%d")
+    two_day_df = pd.DataFrame({"日期": [start, end], "收盘": [1800.0, 1850.0]})
+
     calls: list = []
-    monkeypatch.setattr(dispatch_mod, "instrumented_fetch", _fake_fetch_ok(calls))
-    read_range(session, [catalog.id], ENTITY_TYPE, ENTITY_ID, START, END)
+    monkeypatch.setattr(dispatch_mod, "instrumented_fetch", _fake_fetch_ok(calls, two_day_df))
+    read_range(session, [catalog.id], ENTITY_TYPE, ENTITY_ID, start, end)
     assert len(calls) == 1
 
     stale_ts = datetime.now(timezone.utc) - timedelta(hours=48)
     row = session.query(SemanticObservation).filter_by(
-        concept_id=catalog.id, date="2024-07-24",
+        concept_id=catalog.id, date=end,
     ).one()
     row.fetched_at = stale_ts
     session.commit()
 
-    out = read_range(session, [catalog.id], ENTITY_TYPE, ENTITY_ID, START, END)
-    assert len(calls) == 2  # refetched
-    assert len(out[catalog.id]) == 5
+    out = read_range(session, [catalog.id], ENTITY_TYPE, ENTITY_ID, start, end)
+    assert len(calls) == 2  # today's row is TTL-stale (48h > 20h) -> refetch
+    assert len(out[catalog.id]) == 2
     refreshed = session.query(SemanticObservation).filter_by(
-        concept_id=catalog.id, date="2024-07-24",
+        concept_id=catalog.id, date=end,
     ).one()
     assert refreshed.fetched_at.replace(tzinfo=timezone.utc) > stale_ts
 

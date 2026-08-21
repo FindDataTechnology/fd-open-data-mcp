@@ -47,18 +47,53 @@ def test_ensure_rankings(session):
 
 
 def test_is_stale_ttl():
+    # Today's row is still the current period -> the fetched_at TTL governs.
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     stale = SemanticObservation(
-        concept_id=1, entity_type="stock", entity_id=1, date="2024-01-01",
-        value="1", unit="currency", source_used="akshare",
+        concept_id=1, entity_type="stock", entity_id=1, date=today,
+        granularity="day", value="1", unit="currency", source_used="akshare",
         fetched_at=datetime.now(timezone.utc) - timedelta(hours=25),
     )
     assert is_stale(stale, "daily") is True
     fresh = SemanticObservation(
-        concept_id=1, entity_type="stock", entity_id=1, date="2024-01-01",
-        value="1", unit="currency", source_used="akshare",
+        concept_id=1, entity_type="stock", entity_id=1, date=today,
+        granularity="day", value="1", unit="currency", source_used="akshare",
         fetched_at=datetime.now(timezone.utc) - timedelta(hours=1),
     )
     assert is_stale(fresh, "daily") is False
+
+
+def test_is_stale_historical_immutable():
+    """A fully-elapsed period is an immutable fact — never stale, even when
+    fetched_at is far older than the TTL. Only the current period is TTL-gated
+    (its value may still be revised)."""
+    # A past day: final -> never stale regardless of fetched_at.
+    past_day = SemanticObservation(
+        concept_id=1, entity_type="stock", entity_id=1, date="2024-01-01",
+        granularity="day", value="1", unit="currency", source_used="akshare",
+        fetched_at=datetime.now(timezone.utc) - timedelta(days=365),
+    )
+    assert is_stale(past_day, "daily") is False
+
+    now = datetime.now(timezone.utc)
+    this_month = now.strftime("%Y-%m-01")
+    last_month = (now.replace(day=1) - timedelta(days=1)).strftime("%Y-%m-01")
+
+    # Current month (granularity=month): not final -> TTL applies (40d > 25d).
+    current_month = SemanticObservation(
+        concept_id=1, entity_type="country", entity_id=1, date=this_month,
+        granularity="month", value="1", unit="index", source_used="wbgapi",
+        fetched_at=now - timedelta(days=40),
+    )
+    assert is_stale(current_month, "monthly") is True
+
+    # Last month (granularity=month): final -> never stale, even at 400d old.
+    previous_month = SemanticObservation(
+        concept_id=1, entity_type="country", entity_id=1, date=last_month,
+        granularity="month", value="1", unit="index", source_used="wbgapi",
+        fetched_at=now - timedelta(days=400),
+    )
+    assert is_stale(previous_month, "monthly") is False
 
 
 def test_write_cache_conflict_policy(session):
