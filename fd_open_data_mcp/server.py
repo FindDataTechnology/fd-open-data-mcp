@@ -15,7 +15,21 @@ from fastmcp import FastMCP
 
 from fd_open_data_mcp.db import get_database
 
-mcp = FastMCP(name="fd-open-data-mcp")
+mcp = FastMCP(
+    name="fd-open-data-mcp",
+    instructions=(
+        "Financial & economic data server. Call the FEWEST tools that answer the question; "
+        "do not fan out search tools in parallel (they overlap and return duplicate data).\n"
+        "• Known entity code (ticker AAPL, country code CN) -> get_entity(type, code). "
+        "Do not use search tools when the code is already known.\n"
+        "• Fuzzy / natural-language discovery ('concepts about X', 'Asian inflation') -> "
+        "ai_search. It is the superset of semantic_search / semantic_search_entities / "
+        "semantic_search_unified (concepts + entities + cached values). Call it ONCE; do not "
+        "also call the other three in parallel.\n"
+        "• Read a concrete value for entity+date -> read(concept_id, entity_type, entity_id, dates).\n"
+        "• Rank / inspect candidate sources for a concept -> rank_sources."
+    ),
+)
 
 # Attach the crawl-policy control-plane tools (add-fund-crawl-control-center).
 from fd_open_data_mcp.policy_tools import register_policy_tools
@@ -369,7 +383,8 @@ def list_entities(entity_type: str, limit: int = 100, offset: int = 0) -> list[d
 
 @mcp.tool
 def get_entity(entity_type: str, code: str) -> dict | None:
-    """Get a specific entity by type and code."""
+    """Look up one entity by exact type+code (ticker AAPL, country CN).
+    Use when the code is known; do not use search tools for this."""
     from fd_open_data_mcp.entity_graph_tools import get_entity as _get
 
     return _get(entity_type, code)
@@ -606,16 +621,6 @@ def semantic_search_entities(
 
     Returns:
         List of entities with similarity scores, sorted by relevance
-
-    Examples:
-        # Search for Asian countries
-        semantic_search_entities("Asian countries", entity_type="country")
-
-        # Search for technology companies
-        semantic_search_entities("technology companies", entity_type="company")
-
-        # Search for inflation indicators
-        semantic_search_entities("inflation indicators")
     """
     from fd_open_data_mcp.semantic.entity_search import EntitySemanticSearch
     from fd_open_data_mcp.db import get_database
@@ -641,11 +646,6 @@ def semantic_search_unified(
 
     Returns:
         List of results (entities and concepts) with similarity scores
-
-    Examples:
-        # Search for inflation-related entities and concepts
-        semantic_search_unified("inflation indicators")
-        # Returns: [CPI_YOY (concept), Asian countries (entities), ...]
     """
     from fd_open_data_mcp.semantic.entity_search import EntitySemanticSearch
     from fd_open_data_mcp.db import get_database
@@ -673,7 +673,9 @@ def ai_search(
     include_values: bool = False,
     value_date: str | None = None,
 ) -> dict:
-    """AI-powered search: semantic search -> graph traversal -> value query.
+    """Default search entry point — call this for fuzzy/natural-language discovery.
+    Superset of semantic_search/semantic_search_entities/semantic_search_unified
+    (concepts + entities + cached values); do not call those in parallel with this.
 
     Args:
         query: Natural language query (e.g., "Asian inflation indicators")
