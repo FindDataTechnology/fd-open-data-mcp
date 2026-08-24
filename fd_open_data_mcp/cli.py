@@ -553,5 +553,56 @@ def list_sources_cmd():
     _echo({"sources": results})
 
 
+# ─── crawl visibility (add-crawl-visibility) ────────────────────────────────
+@cli.command("scan")
+def scan_cmd():
+    """Run one crawl-watcher failure + stale-run scan tick.
+
+    Reads ``policy_runs`` past the scan watermark, detects newly-failed /
+    newly-refused / newly-stale runs, dedups via Redis, batches them into one
+    notification (ServerChan → WeChat by default), and advances the watermark.
+    Read-only: never mutates crawl state.
+    """
+    from fd_open_data_mcp.visibility.scan import scan_once
+    from fd_open_data_mcp.db import get_database
+
+    s = get_database().get_session()
+    try:
+        _echo(scan_once(s))
+    finally:
+        s.close()
+
+
+@cli.command("digest")
+def digest_cmd():
+    """Emit the datasource-centric daily crawl digest (one WeChat message).
+
+    WHAT HAPPENED (last 24h): per-``real_source`` ok/error + circuit state.
+    WHAT WILL HAPPEN: today's scheduled policies projected to target
+    datasources. Shares the snapshot with the ``crawl_status`` MCP tool.
+    """
+    from fd_open_data_mcp.visibility.digest import digest_once
+
+    _echo(digest_once())
+
+
+@cli.command("crawl-status")
+def crawl_status_cmd():
+    """Print the crawl status snapshot (the on-demand ``crawl_status`` payload).
+
+    Structured datasource-centric view: recent runs, fleet health, stale runs,
+    per-source fetch outcome, circuit state, and today's scheduled target
+    datasources. Read-only.
+    """
+    from fd_open_data_mcp.visibility import snapshot
+    from fd_open_data_mcp.db import get_database
+
+    s = get_database().get_session()
+    try:
+        _echo(snapshot.build_snapshot(s))
+    finally:
+        s.close()
+
+
 if __name__ == "__main__":
     cli()

@@ -36,6 +36,12 @@ from fd_open_data_mcp.policy_tools import register_policy_tools
 
 register_policy_tools(mcp)
 
+# Attach the crawl-visibility tools (add-crawl-visibility): on-demand
+# `crawl_status` snapshot, shared with the scan/digest watcher entrypoints.
+from fd_open_data_mcp.visibility_tools import register_visibility_tools
+
+register_visibility_tools(mcp)
+
 
 def _session():
     return get_database().get_session()
