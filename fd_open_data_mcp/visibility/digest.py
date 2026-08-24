@@ -73,8 +73,11 @@ def format_digest(snap: dict, tz: ZoneInfo) -> tuple[str, str]:
 
     # --- FLEET ---
     fleet = snap.get("fleet", [])
-    on = " ".join(f"{f['name']}✓" for f in fleet if f["enabled"])
+    on = " ".join(f"{f['name']}✓" for f in fleet if f["enabled"] and f.get("reachable"))
     off = " ".join(f"{f['name']}(off)" for f in fleet if not f["enabled"])
+    unavail = " ".join(f"{f['name']}✗" for f in fleet if f["enabled"] and not f.get("reachable"))
+    if unavail:
+        on = (on + " " + unavail).strip() if on else unavail
     unreachable = snap.get("summary", {}).get("fleet_unreachable", [])
     fleet_line = f"FLEET  {on}   {off}".strip()
     if unreachable:
