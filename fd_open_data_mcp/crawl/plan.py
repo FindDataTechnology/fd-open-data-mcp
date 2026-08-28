@@ -25,6 +25,10 @@ class PlanSource(BaseModel):
     column_name: str
     binding_id: int
     confidence: float
+    # fix-silent-zero-yield-crawls D6: this function returns the full entity
+    # cross-section for one date — the executor collapses to ONE cell per date
+    # and filters the frame to the entity scope locally.
+    bulk_snapshot: bool = False
 
 
 class PlanConcept(BaseModel):
@@ -71,6 +75,11 @@ class CrawlPlan(BaseModel):
     unroutable: list[dict] = Field(default_factory=list)  # concepts refused (no binding / mismatch / mode)
     unmapped: list[dict] = Field(default_factory=list)     # (entity, source) pairs with no identifier
     persistence: dict = Field(default_factory=lambda: {"table": "semantic_observations"})
+    # fix-silent-zero-yield-crawls: the number of cells the plan emits. 0 means
+    # the plan carries no work (a caught-up watermark) — which the reconciler
+    # classifies as `no_op`, distinct from work that yielded nothing. None means
+    # the count was not computed (hand-edited plans predate the field).
+    plan_cells: Optional[int] = None
 
     def to_yaml(self) -> str:
         import yaml

@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import text
+from sqlalchemy import func, text
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.crawl.plan import (
@@ -60,6 +60,9 @@ def plan_crawl(
     """
     if mode not in ("per_date", "series"):
         raise ValueError(f"mode must be 'per_date' or 'series', got {mode!r}")
+    # (concept_id, source) pairs whose bound function carries bulk_snapshot —
+    # resolved to a subset check once the unmapped report exists (D6)
+    snapshot_candidates: set[tuple[int, str]] = set()
     # since_last derives date_range.start from the per-concept watermark — but ONLY when
     # no explicit start was given (explicit start wins, per spec). CLI/MCP also clear
     # since_last when --start is set; this guard makes the planner robust on direct call.
@@ -89,7 +92,7 @@ def plan_crawl(
             ])
             return CrawlPlan(
                 wanted_concepts=[], entity_scope=entity_scope, date_range=date_range,
-                unroutable=unroutable, unmapped=[], mode=mode,
+                unroutable=unroutable, unmapped=[], mode=mode, plan_cells=0,
             )
 
     wanted: list[PlanConcept] = []
@@ -133,7 +136,13 @@ def plan_crawl(
                     function_id=fn.id, function_command=fn.command,
                     column_name=binding.column.name, binding_id=binding.id,
                     confidence=binding.confidence,
+                    bulk_snapshot=bool(getattr(fn, "bulk_snapshot", False)),
                 ))
+                # D6 snapshot-first: a bulk_snapshot function marked below (the
+                # subset check needs the unmapped report, computed after the
+                # wanted list is built) collapses to ONE cell per date.
+                if getattr(fn, "bulk_snapshot", False):
+                    snapshot_candidates.add((cid, src))
         if not sources:
             unroutable.append({
                 "concept_id": cid, "code": concept.code,
@@ -150,14 +159,87 @@ def plan_crawl(
 
     unmapped = _identifier_coverage(session, wanted, entity_scope)
 
-    return CrawlPlan(
+    # D6 snapshot-first subset check: the snapshot covers the scope when the
+    # scope is "all entities" (the snapshot IS the cross-section) or when every
+    # explicit entity has an identifier for that source (no unmapped pair for
+    # (source, concept)). Explicit ids partially unmapped -> keep the fan-out.
+    unmapped_keys = {(u["source"], u["concept_id"]) for u in unmapped}
+    for concept in wanted:
+        for ps in concept.ranked_sources:
+            if (concept.concept_id, ps.source) in snapshot_candidates:
+                ps.bulk_snapshot = (
+                    entity_scope.entity_ids is None
+                    or (ps.source, concept.concept_id) not in unmapped_keys
+                )
+
+    plan = CrawlPlan(
         wanted_concepts=wanted,
         entity_scope=entity_scope,
         date_range=date_range,
         unroutable=unroutable,
         unmapped=unmapped,
         mode=mode,
+        plan_cells=_count_cells(session, wanted, entity_scope, date_range, mode),
     )
+    return plan
+
+
+def _count_cells(
+    session: Session, wanted: list, entity_scope: EntityScope,
+    date_range: DateRange, mode: str,
+) -> int:
+    """Cells the executor will emit — the no_op/zero_yield discriminator (D3).
+
+    Mirrors the executor's expansion: per_date = entities x dates, series =
+    entities, and a bulk_snapshot source collapses to ONE cell per date
+    regardless of entity count. For a lazy scope (entity_ids None) the entity
+    count is the distinct identifiers for the ranked sources — the same
+    estimate the guardrail uses; exact scopes are exact.
+    """
+    if not wanted:
+        return 0
+    if entity_scope.entity_ids:
+        n_entities = len(entity_scope.entity_ids)
+    else:
+        sources = {ps.source for pc in wanted for ps in pc.ranked_sources}
+        if not sources:
+            return 0
+        from fd_open_data_mcp.models import EntitySourceIdentifier
+        n_entities = (
+            session.query(func.count(func.distinct(EntitySourceIdentifier.entity_id)))
+            .filter(EntitySourceIdentifier.entity_type == entity_scope.entity_type,
+                    EntitySourceIdentifier.source.in_(sources))
+            .scalar()
+        ) or 0
+    total = 0
+    for pc in wanted:
+        if any(ps.bulk_snapshot for ps in pc.ranked_sources):
+            # D6: one snapshot cell per date, independent of entity count
+            total += _date_count(date_range.start, date_range.end,
+                                 pc.frequency or date_range.frequency) \
+                if mode != "series" and date_range.start is not None else 1
+            continue
+        if mode == "series" or date_range.start is None:
+            n_dates = 1
+        else:
+            n_dates = _date_count(date_range.start, date_range.end,
+                                  pc.frequency or date_range.frequency)
+        total += n_entities * n_dates
+    return total
+
+
+def _date_count(start: str, end: str, frequency: str | None) -> int:
+    """Number of fetch dates in [start, end] for a cadence (mirrors the spider's
+    ``_expand_dates``): yearly -> one per year, monthly -> one per month, else daily."""
+    s = dt.date.fromisoformat(start[:10])
+    e = dt.date.fromisoformat(end[:10])
+    if e < s:
+        s, e = e, s
+    if frequency == "yearly":
+        return e.year - s.year + 1
+    if frequency == "monthly":
+        return (e.year - s.year) * 12 + (e.month - s.month) + 1
+    return (e - s).days + 1
 
 
 def _identifier_coverage(

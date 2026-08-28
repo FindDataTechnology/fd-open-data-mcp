@@ -36,12 +36,25 @@ _STALE_MIN = int(os.environ.get("SCRAW_STALE_MINUTES", "90"))
 
 
 def _classify(run: PolicyRun) -> str | None:
-    """Map a terminal run to an alert event class, or None (not alertable)."""
+    """Map a terminal run to an alert event class, or None (not alertable).
+
+    fix-silent-zero-yield-crawls: ``zero_yield`` joins ``failed`` in the
+    terminal non-success set — it IS the outage signal this watcher was blind
+    to. ``no_op`` (empty plan) and ``redundant`` (fetched, nothing new) are
+    recorded but non-alerting; the digest surfaces redundant STREAKS instead.
+    """
     if run.status == "failed":
         if (run.detail or "").lower().startswith("refused:"):
             return "refused"
         return "failed"
+    if run.status == "zero_yield":
+        return "zero_yield"
     return None
+
+
+# Terminal non-success statuses the scan queries for (spec crawl-visibility:
+# failed, zero_yield, including guardrail refusals recorded as failed rows).
+_ALERT_STATUSES = ("failed", "zero_yield")
 
 
 def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
@@ -51,14 +64,14 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
         now = now.replace(tzinfo=dt.timezone.utc)
     notifier = get_notifier()
 
-    summary = {"scanned_at": snapshot._iso(now), "failed": [], "refused": [], "stale": [],
-               "notified": False}
+    summary = {"scanned_at": snapshot._iso(now), "failed": [], "refused": [],
+               "zero_yield": [], "stale": [], "notified": False}
 
-    # 1. terminal runs since the watermark (failed / refused)
+    # 1. terminal runs since the watermark (failed / refused / zero_yield)
     wm = state.get_scan_watermark()
     q = (session.query(PolicyRun, CrawlPolicy.name)
          .join(CrawlPolicy, PolicyRun.policy_id == CrawlPolicy.id)
-         .filter(PolicyRun.status == "failed"))
+         .filter(PolicyRun.status.in_(_ALERT_STATUSES)))
     if wm is not None:
         # The DB column is TIMESTAMP WITHOUT TIME ZONE (naive-UTC writer
         # contract), so filter against a naive cutoff to avoid a naive/aware
@@ -72,6 +85,7 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
 
     new_failed: list[dict] = []
     new_refused: list[dict] = []
+    new_zero_yield: list[dict] = []
     for run, pname in terminal:
         event = _classify(run)
         if event is None:
@@ -87,7 +101,13 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
             "finished_at": snapshot._iso(run.finished_at),
             "detail": (run.detail or "")[:160],
         }
-        if event == "refused":
+        if event == "zero_yield":
+            # plan_cells travels WITH the alert so the operator can tell a
+            # broken fetch path from an empty plan without querying the DB
+            rec["plan_cells"] = run.plan_cells
+            rec["rows_attempted"] = run.rows_attempted
+            new_zero_yield.append(rec)
+        elif event == "refused":
             new_refused.append(rec)
         else:
             new_failed.append(rec)
@@ -105,16 +125,17 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
 
     summary["failed"] = new_failed
     summary["refused"] = new_refused
+    summary["zero_yield"] = new_zero_yield
     summary["stale"] = new_stale
 
     # 3. batch all new events into ONE message (ServerChan rate-limit aware)
-    n_total = len(new_failed) + len(new_refused) + len(new_stale)
+    n_total = len(new_failed) + len(new_refused) + len(new_zero_yield) + len(new_stale)
     if n_total > 0:
-        title, body = _format_message(new_failed, new_refused, new_stale)
+        title, body = _format_message(new_failed, new_refused, new_zero_yield, new_stale)
         notifier.send(title, body, level="error")
         summary["notified"] = True
         # mark only AFTER a send attempt so a sink outage doesn't drop alerts
-        for rec in new_failed + new_refused:
+        for rec in new_failed + new_refused + new_zero_yield:
             state.mark_alerted(rec["run_id"], rec["event"])
         for rec in new_stale:
             state.mark_alerted(rec["run_id"], "stale")
@@ -129,9 +150,11 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
     return summary
 
 
-def _format_message(failed: list[dict], refused: list[dict], stale: list[dict]) -> tuple[str, str]:
-    n = len(failed) + len(refused) + len(stale)
-    title = f"🚨 CRAWL FAILURE · {n} run(s)" if (failed or refused) else f"⏳ CRAWL STALE · {n} run(s)"
+def _format_message(failed: list[dict], refused: list[dict],
+                    zero_yield: list[dict], stale: list[dict]) -> tuple[str, str]:
+    n = len(failed) + len(refused) + len(zero_yield) + len(stale)
+    alerting = failed or refused or zero_yield
+    title = f"🚨 CRAWL FAILURE · {n} run(s)" if alerting else f"⏳ CRAWL STALE · {n} run(s)"
     lines: list[str] = []
     for rec in failed:
         ds = " → ".join(rec["datasources"]) or "?"
@@ -139,12 +162,18 @@ def _format_message(failed: list[dict], refused: list[dict], stale: list[dict]) 
     for rec in refused:
         ds = " → ".join(rec["datasources"]) or "?"
         lines.append(f" • {rec['policy']}   REFUSED   {rec['detail'].splitlines()[0] if rec['detail'] else ''}")
+    for rec in zero_yield:
+        ds = " → ".join(rec["datasources"]) or "?"
+        # plan_cells separates "planned work, fetched nothing" (the outage) from
+        # an empty plan; rows_attempted distinguishes a dead fetch path
+        lines.append(f" • {rec['policy']}   ZERO-YIELD ({rec.get('plan_cells')} cells, "
+                     f"{rec.get('rows_attempted')} rows attempted)   {ds}")
     for rec in stale:
         ds = " → ".join(rec["datasources"]) or "?"
         lines.append(f" • {rec['policy']}   stale {rec['age_minutes']}min   {rec['job_ref'] or ''}")
     body = "\n".join(lines)
-    if failed or refused:
-        jobs = ", ".join(r["job_ref"] for r in (failed + refused) if r.get("job_ref"))
+    if alerting:
+        jobs = ", ".join(r["job_ref"] for r in (failed + refused + zero_yield) if r.get("job_ref"))
         body += f"\njob: {jobs}" if jobs else ""
         body += '\n→ ask Claude: "scraw status"'
     return title[:32], body

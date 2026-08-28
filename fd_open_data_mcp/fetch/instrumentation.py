@@ -37,6 +37,7 @@ the worker's own node IP — no rotation, but still functional.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from datetime import datetime, timezone
 from typing import Any, Optional
@@ -88,12 +89,18 @@ def _is_readonly_tx(exc: BaseException) -> bool:
 def _record(session, source: str, proxy_id: Optional[int], classification: str,
             latency_ms: int, status: str, detail: Optional[str],
             concept_id: Optional[int] = None, entity_type: Optional[str] = None,
-            entity_id: Optional[int] = None, real_source: Optional[str] = None) -> None:
+            entity_id: Optional[int] = None, real_source: Optional[str] = None,
+            function_id: Optional[int] = None,
+            cluster_id: Optional[int] = None) -> None:
     """Write fetch_log (cold) + the outcomes stream (hot).
 
     Args:
         source: Library-level source name (e.g., "akshare")
         real_source: Real data source name (e.g., "eastmoney") if available
+        function_id: The functions row whose endpoint was called (D5 — failure
+            attribution keys on the endpoint, not the source)
+        cluster_id: The egress the fetch ran from (pods carry SCRAW_CLUSTER_ID;
+            None on the read() path / ships-dark)
     """
     try:
         session.add(FetchLog(
@@ -102,6 +109,7 @@ def _record(session, source: str, proxy_id: Optional[int], classification: str,
             detail=detail[:500] if detail else None,
             proxy_id=proxy_id, classification=classification,
             real_source=real_source,
+            function_id=function_id, cluster_id=cluster_id,
         ))
         session.commit()
     except Exception as e:  # noqa: BLE001 - never let logging break the fetch
@@ -137,6 +145,7 @@ def instrumented_fetch(
     entity_id: Optional[int] = None,
     max_proxies: int = 3,
     real_source: Optional[str] = None,
+    function_id: Optional[int] = None,
 ) -> Any:
     """Run an upstream fetch through the proxy/circuit pipeline. Returns the
     upstream result. Raises ``FetchError`` on a transient failure that exhausts
@@ -150,11 +159,23 @@ def instrumented_fetch(
         source: Library-level source name (e.g., "akshare")
         real_source: Real data source name (e.g., "eastmoney") if available.
                      Used for circuit breaker tracking and ban classification.
+        function_id: The functions row whose endpoint is called — recorded on
+                     every fetch_log row this function writes (spec
+                     concept-fetch: "fetch_log identifies the endpoint called").
     """
     injection.install()
     own_session = session is None
     if own_session:
         session = get_database().get_session()
+    # Pods carry SCRAW_CLUSTER_ID (injected by the launchers); per-(cluster,
+    # function) demotion keys on it. read()-path callers leave it unset.
+    cluster_id: Optional[int] = None
+    raw_cluster = os.environ.get("SCRAW_CLUSTER_ID")
+    if raw_cluster:
+        try:
+            cluster_id = int(raw_cluster)
+        except ValueError:
+            cluster_id = None
     tried: list[int] = []
     last_error: Optional[str] = None
     # Use real_source for circuit operations if available, otherwise fall back to source
@@ -171,12 +192,14 @@ def instrumented_fetch(
             value = run_upstream(source, command, params)
             elapsed_ms = int((time.time() - t0) * 1000)
             _record(session, source, None, "ok", elapsed_ms, "ok", None,
-                    concept_id, entity_type, entity_id, real_source)
+                    concept_id, entity_type, entity_id, real_source,
+                    function_id, cluster_id)
             return value
         except FetchError as e:
             elapsed_ms = int((time.time() - t0) * 1000)
             _record(session, source, None, "error", elapsed_ms, "error", str(e),
-                    concept_id, entity_type, entity_id, real_source)
+                    concept_id, entity_type, entity_id, real_source,
+                    function_id, cluster_id)
             raise
 
     try:
@@ -190,7 +213,17 @@ def instrumented_fetch(
             # failed within THIS fetch's retry loop (Bug 5). Without it a dead
             # proxy is re-acquired on the next max_proxies iteration; with it the
             # forwarder rotates to a different upstream. Empty on the first pass.
-            acq = injection.proxy_client.acquire(circuit_source, exclude=tried)
+            try:
+                acq = injection.proxy_client.acquire(circuit_source, exclude=tried)
+            except Exception as e:  # noqa: BLE001 - pre-network failure
+                # spec concept-fetch: attempts that fail BEFORE any network I/O
+                # (acquisition itself broken) still write exactly one fetch_log
+                # row, so the failure class is recoverable.
+                _record(session, source, None, "error", 0, "error",
+                        f"acquire failed: {e}", concept_id, entity_type,
+                        entity_id, real_source, function_id, cluster_id)
+                raise SourceUnavailable(
+                    f"proxy acquisition failed for {circuit_source}: {e}") from e
             tried.append(acq.addr_id or 0)
             for attempt in range(2):  # 1 retry on transient
                 t0 = time.time()
@@ -226,7 +259,8 @@ def instrumented_fetch(
                 injection.proxy_client.release(
                     circuit_source, acq.addr_id, acq.provider, classification)
                 _record(session, source, acq.addr_id, classification, elapsed_ms,
-                        status, detail, concept_id, entity_type, entity_id, real_source)
+                        status, detail, concept_id, entity_type, entity_id,
+                        real_source, function_id, cluster_id)
                 if classification == "ok":
                     return value
                 if classification == "blocked":

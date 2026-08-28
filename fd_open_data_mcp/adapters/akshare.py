@@ -189,6 +189,35 @@ class _AkshareBase:
                 out[d] = val
         return out
 
+    def extract_snapshot(self, result: Any, column_name: str, date: str) -> Optional[dict]:
+        """``{identifier: value}`` for the FULL entity cross-section (D6).
+
+        One pass over the frame keyed by this adapter's entity column — the
+        bulk form of ``extract_value(identifier=...)`` the snapshot crawl path
+        uses (one request instead of one per entity). Returns None when this
+        adapter has no entity key column (cannot serve snapshots).
+        """
+        import pandas as pd
+
+        if not isinstance(result, pd.DataFrame) or result.empty:
+            return {}
+        key = getattr(self, "_KEY_COL", "") or ""
+        if key and key not in result.columns:
+            return None
+        col = column_name if column_name in result.columns else self._ALIASES.get(column_name)
+        if col is None or col not in result.columns:
+            return None
+        out: dict[str, Any] = {}
+        if key:
+            keys = result[key].astype(str).str.strip().tolist()
+        else:
+            keys = [str(i) for i in result.index.tolist()]
+        values = result[col].tolist()
+        for ident, val in zip(keys, values):
+            if ident and not pd.isna(val):
+                out[ident] = val
+        return out
+
     def call(self, command: str, params: dict) -> Any:
         """Invoke ``akshare.<command>(**params)`` with a native timeout + simple retry.
 
@@ -701,6 +730,60 @@ class FundManagerEmAdapter(_FundRankFrameAdapter):
         return super().extract_value(result, column_name, date, identifier=identifier)
 
 
+# --- bulk-snapshot cross-sections (fix-silent-zero-yield-crawls D6) ---------------
+# One call returns the FULL entity cross-section for one date, on hosts verified
+# reachable from the crawl cluster (datacenter.eastmoney.com / fund.eastmoney.com
+# — unlike push2*.eastmoney.com, which is egress-blocked). These are what the
+# snapshot-first planner collapses to ONE cell per date.
+
+class _EmAggregateAdapter(_AkshareBase):
+    """Common base for 东财 report-date cross-section endpoints (stock_*_em).
+
+    Signature: ``(date='YYYYMMDD')`` — one row per listed stock for that report
+    date (~5k rows). Key column ``股票代码``; ``date`` selects the period.
+    """
+
+    _DATE_COL = None
+    _ALIASES = {}
+    _KEY_COL = "股票代码"
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        # identifier unused: the call covers every entity (snapshot shape)
+        return {"date": _compact(date)} if date else {}
+
+
+class StockZcfzEmAdapter(_EmAggregateAdapter):
+    """``ak.stock_zcfz_em`` - 东财资产负债表 cross-section (~5.2k rows/call)."""
+
+
+class StockLrbEmAdapter(_EmAggregateAdapter):
+    """``ak.stock_lrb_em`` - 东财利润表 cross-section (~5.2k rows/call)."""
+
+
+class StockYjbbEmAdapter(_EmAggregateAdapter):
+    """``ak.stock_yjbb_em`` - 东财业绩报表 cross-section (~6k rows/call)."""
+
+
+class StockFhpsEmAdapter(_EmAggregateAdapter):
+    """``ak.stock_fhps_em`` - 东财分红送配 cross-section (~3.7k rows/call)."""
+
+
+class FundOpenFundDailyEmAdapter(_AkshareBase):
+    """``ak.fund_open_fund_daily_em`` - 东财开放基金每日净值 cross-section.
+
+    Signature: ``()`` — ~24k rows, one per fund, as-of the latest trading day.
+    Key column ``基金代码``. No date param: the observation lands on the run's
+    requested date (snapshot semantics — dedup happens at the upsert key).
+    """
+
+    _DATE_COL = None
+    _ALIASES = {}
+    _KEY_COL = "基金代码"
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {}
+
+
 # --- registration (import-time; register() is an idempotent overwrite) ----------
 def register_all() -> None:
     """Register all built-in akshare adapters (idempotent).
@@ -728,6 +811,12 @@ def register_all() -> None:
     register("akshare", "fund_open_fund_rank_em", FundOpenFundRankEmAdapter())
     register("akshare", "fund_rating_all", FundRatingAllAdapter())
     register("akshare", "fund_manager_em", FundManagerEmAdapter())
+    # bulk-snapshot cross-sections (fix-silent-zero-yield-crawls D6)
+    register("akshare", "stock_zcfz_em", StockZcfzEmAdapter())
+    register("akshare", "stock_lrb_em", StockLrbEmAdapter())
+    register("akshare", "stock_yjbb_em", StockYjbbEmAdapter())
+    register("akshare", "stock_fhps_em", StockFhpsEmAdapter())
+    register("akshare", "fund_open_fund_daily_em", FundOpenFundDailyEmAdapter())
 
 
 register_all()

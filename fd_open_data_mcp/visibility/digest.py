@@ -59,12 +59,20 @@ def format_digest(snap: dict, tz: ZoneInfo) -> tuple[str, str]:
     runs = snap.get("recent_runs", [])
     n_succ = sum(1 for r in runs if r["status"] == "success")
     n_fail = sum(1 for r in runs if r["status"] == "failed")
+    n_zero = sum(1 for r in runs if r["status"] == "zero_yield")
+    n_redun = sum(1 for r in runs if r["status"] == "redundant")
+    n_noop = sum(1 for r in runs if r["status"] == "no_op")
     n_stale = snap.get("summary", {}).get("stale_run_count", 0)
     src_rows = snap.get("per_source_outcome", [])
     circuits = {c["source"]: c for c in snap.get("circuit_state", [])}
+    fy = snap.get("fleet_yield", {})
 
     lines: list[str] = []
-    lines.append(f"YESTERDAY — {len(runs)} runs: {n_succ} ✅ {n_fail} ❌   STALE: {n_stale}")
+    lines.append(f"YESTERDAY — {len(runs)} runs: {n_succ} ✅ {n_fail} ❌ "
+                 f"{n_zero} 0️⃣ {n_redun} ♻️ {n_noop} ⏭️   STALE: {n_stale}")
+    # fleet yield: the single number that makes a zero-acquisition day visible
+    lines.append(f"  ACQUIRED {fy.get('rows_new', 0)} new rows "
+                 f"(of {fy.get('rows_attempted', 0)} attempted, {fy.get('runs', 0)} runs)")
     lines.append("  datasource       ok      err    circuit")
     for s in src_rows[:12]:
         circ = circuits.get(s["datasource"])
@@ -84,6 +92,16 @@ def format_digest(snap: dict, tz: ZoneInfo) -> tuple[str, str]:
         fleet_line += f"   ⚠️ unreachable: {', '.join(unreachable)}"
     lines.append("")
     lines.append(fleet_line)
+
+    # --- REDUNDANT STREAKS (frozen-window smell) ---
+    streaks = snap.get("redundant_streaks", [])
+    if streaks:
+        lines.append("")
+        lines.append(f"♻️ REDUNDANT {len(streaks)} policy(ies) acquiring nothing:")
+        for s in streaks:
+            mode = (s.get("date_policy") or {}).get("mode", "?")
+            lines.append(f"  {s['policy']:<22} last {s['streak']} runs redundant "
+                         f"(date_policy={mode})")
 
     # --- WHAT WILL HAPPEN (today, target datasources) ---
     sched = snap.get("today_scheduled", [])

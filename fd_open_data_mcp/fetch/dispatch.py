@@ -186,7 +186,7 @@ def dispatch_one(
                     result = instrumented_fetch(
                         source, fn.command, params,
                         real_source=real_source,  # Pass real_source for circuit tracking
-                        session=session,
+                        session=session, function_id=fn.id,
                         concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
                     )
                 except SourceUnavailable:
@@ -428,7 +428,7 @@ def _read_range_one(
                     result = instrumented_fetch(
                         source, fn.command, params,
                         real_source=real_source,
-                        session=session,
+                        session=session, function_id=fn.id,
                         concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
                     )
                 except SourceUnavailable:

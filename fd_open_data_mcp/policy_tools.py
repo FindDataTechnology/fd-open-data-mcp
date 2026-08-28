@@ -39,6 +39,28 @@ def register_policy_tools(mcp: FastMCP) -> None:
         dp = payload.get("date_policy") or {}
         if dp.get("mode") not in ("since_last", "trailing", "explicit", None):
             raise ValueError(f"invalid date_policy.mode: {dp.get('mode')}")
+        # fix-silent-zero-yield-crawls D4: a RECURRING (enabled) policy with an
+        # explicit window ending before its local today can never yield new
+        # observations — refuse it at validation time, naming the rolling
+        # alternatives. One-shot backfills stay possible via policy_trigger_now
+        # (the reconciler's cron path enforces the same refusal).
+        if payload.get("enabled", True) and dp.get("mode") == "explicit" and dp.get("end"):
+            import datetime as dt
+            from zoneinfo import ZoneInfo
+            tz = ZoneInfo(payload.get("timezone") or "UTC")
+            today = dt.datetime.now(tz).date()
+            try:
+                end_d = dt.date.fromisoformat(str(dp["end"])[:10])
+            except ValueError as e:
+                raise ValueError(f"invalid date_policy.end: {dp.get('end')}") from e
+            if end_d < today:
+                raise ValueError(
+                    f"date_policy.explicit window ends {end_d}, before local today "
+                    f"{today} (timezone {payload.get('timezone') or 'UTC'}): the window "
+                    f"is already complete and can never yield new observations on a "
+                    f"recurring policy. Use date_policy mode 'trailing' or 'since_last' "
+                    f"instead, or invoke policy_trigger_now for a deliberate one-shot "
+                    f"backfill of the explicit window.")
 
     @mcp.tool
     def policy_create(
@@ -54,6 +76,9 @@ def register_policy_tools(mcp: FastMCP) -> None:
         source_filter: list[str] | None = None,
         force: bool = False,
         enabled: bool = True,
+        executor: str = "scrapy",
+        script: str | None = None,
+        script_args: list[str] | None = None,
     ) -> dict:
         """Create a crawl policy.
 
@@ -70,6 +95,13 @@ def register_policy_tools(mcp: FastMCP) -> None:
             source_filter: Optional list of source names to restrict to (NULL = all ranked sources).
             force: Override POLICY_MAX_FETCHES guardrail (default False).
             enabled: Enable the policy (default True).
+            executor: "scrapy" (default) runs the concept_crawl spider; "direct"
+                runs a Python script (see `script`) as a k8s Job.
+            script: For executor="direct": the script module name (e.g.
+                "bulk_ingest_financials_aggregate"); mounted from a ConfigMap.
+            script_args: For executor="direct": CLI args passed to the script
+                (e.g. ["--start-year","2015","--end-year","2026"]). --db-url is
+                injected automatically from the cluster env.
 
         Returns:
             The created policy as a dict.
@@ -79,6 +111,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
             "cron_expr": cron_expr, "timezone": timezone, "entity_ids": entity_ids,
             "date_policy": date_policy or {"mode": "since_last"}, "frequency": frequency,
             "mode": mode, "source_filter": source_filter, "force": force, "enabled": enabled,
+            "executor": executor, "script": script, "script_args": script_args,
         }
         _validate(payload)
         s = _session()
@@ -130,6 +163,9 @@ def register_policy_tools(mcp: FastMCP) -> None:
         source_filter: list[str] | None = None,
         force: bool | None = None,
         enabled: bool | None = None,
+        executor: str | None = None,
+        script: str | None = None,
+        script_args: list[str] | None = None,
     ) -> dict:
         """Update a crawl policy. Only provided fields are changed."""
         s = _session()
@@ -142,6 +178,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
                 "cron_expr": cron_expr, "timezone": timezone, "entity_ids": entity_ids,
                 "date_policy": date_policy, "frequency": frequency, "mode": mode,
                 "source_filter": source_filter, "force": force, "enabled": enabled,
+                "executor": executor, "script": script, "script_args": script_args,
             }
             for k, v in updates.items():
                 if v is not None:
@@ -265,5 +302,30 @@ def register_policy_tools(mcp: FastMCP) -> None:
                 "unmapped": [u.model_dump(mode="json") for u in plan.unmapped],
                 "policy_max_fetches": POLICY_MAX_FETCHES,
             }
+        finally:
+            s.close()
+
+    @mcp.tool
+    def data_stats(
+        concept_id: int | None = None,
+        entity_type: str | None = None,
+    ) -> list[dict]:
+        """Per-concept observation coverage from ``semantic_observations``.
+
+        Answers "how much data do we have and how fresh is it": row count,
+        latest observation date, distinct sources used, and most recent fetch
+        per concept, ordered by row count descending. Read-only; the same
+        aggregation powers the panel's ``/panel/data`` page.
+
+        Args:
+            concept_id: Restrict to one concept.
+            entity_type: Restrict to one entity type (stock/fund/country/...).
+        """
+        from fd_open_data_mcp.visibility.coverage import coverage_by_concept
+
+        s = _session()
+        try:
+            return coverage_by_concept(s, concept_id=concept_id,
+                                       entity_type=entity_type)
         finally:
             s.close()

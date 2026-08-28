@@ -56,38 +56,52 @@ log = logging.getLogger("fin-agg")
 
 ENTITY_TYPE = "stock"
 SOURCE = "akshare"
+# These frames are QUARTERLY report periods (0331/0630/0930/1231), so the rows
+# must be tagged 'quarter'. `semantic_observations_read` partitions on
+# (concept, entity_type, entity, date, granularity) — tagging a quarterly
+# statement 'day' puts it in a different partition from the same fact stored
+# correctly, so readers get both values instead of one.
+GRANULARITY = "quarter"
 SOCKET_TIMEOUT = 120  # per-recv safety net (aggregate calls take ~5s normally)
 FETCH_ALARM = 200     # hard SIGALRM limit per aggregate fetch (kills trickle hangs)
 
 # --------------------------------------------------------------------------
-# Concept code -> aggregate Chinese column name (verified from probe output)
+# Concept code -> aggregate Chinese column name.
+# Keys are `concepts.code` for entity_type='stock' in the canonical DB; values
+# are akshare frame columns (both verified against akshare 1.18.94 live).
+#
+# Every numeric line item the three aggregate frames expose is mapped. The
+# remaining frame columns are 序号 / 股票简称 / 公告日期 and the *同比 / *占比
+# year-over-year and ratio derivatives, which are computable from the levels
+# and so are deliberately not stored.
 # --------------------------------------------------------------------------
 BS_AGG_COLS = {
-    "BS_MONETARY_CAPITAL": "资产-货币资金",
-    "BS_ACCOUNTS_RECEIVABLE": "资产-应收账款",
-    "BS_INVENTORY": "资产-存货",
-    "BS_TOTAL_ASSETS": "资产-总资产",
-    "BS_ACCOUNTS_PAYABLE": "负债-应付账款",
-    "BS_TOTAL_LIABILITIES": "负债-总负债",
-    "BS_TOTAL_EQUITY": "股东权益合计",
+    "financials.monetary_capital": "资产-货币资金",
+    "financials.accounts_receivable": "资产-应收账款",
+    "financials.inventory": "资产-存货",
+    "financials.total_assets": "资产-总资产",
+    "financials.accounts_payable": "负债-应付账款",
+    "financials.total_liabilities": "负债-总负债",
+    "financials.equity": "股东权益合计",
+    "financials.debt_ratio": "资产负债率",
 }
 
 PS_AGG_COLS = {
-    "PS_NET_PROFIT": "净利润",
-    "PS_REVENUE": "营业总收入",
-    "PS_COST_OF_SALES": "营业总支出-营业支出",
-    "PS_SELLING_EXPENSE": "营业总支出-销售费用",
-    "PS_ADMIN_EXPENSE": "营业总支出-管理费用",
-    "PS_FINANCE_EXPENSE": "营业总支出-财务费用",
-    "PS_OPERATING_PROFIT": "营业利润",
-    "PS_TOTAL_PROFIT": "利润总额",
+    "financials.net_income": "净利润",
+    "financials.revenue": "营业总收入",
+    "financials.operating_cost": "营业总支出-营业支出",
+    "financials.selling_expense": "营业总支出-销售费用",
+    "financials.admin_expense": "营业总支出-管理费用",
+    "financials.finance_expense": "营业总支出-财务费用",
+    "financials.operating_profit": "营业利润",
+    "financials.total_profit": "利润总额",
 }
 
 CF_AGG_COLS = {
-    "CF_NET": "净现金流-净现金流",
-    "CF_OPERATING": "经营性现金流-现金流量净额",
-    "CF_INVESTING": "投资性现金流-现金流量净额",
-    "CF_FINANCING": "融资性现金流-现金流量净额",
+    "financials.net_cash_flow": "净现金流-净现金流",
+    "financials.operating_cash_flow": "经营性现金流-现金流量净额",
+    "financials.investing_cash_flow": "投资性现金流-现金流量净额",
+    "financials.financing_cash_flow": "融资性现金流-现金流量净额",
 }
 
 CODE_COL = "股票代码"  # stock code column in all three aggregate DataFrames
@@ -239,7 +253,7 @@ def extract_from_df(df, col_map, concepts, code_map, obs_date, now) -> list[dict
                 "concept_id": meta["id"], "entity_type": ENTITY_TYPE,
                 "entity_id": eid, "date": obs_date, "value": val,
                 "unit": meta["unit"], "source_used": SOURCE,
-                "fetched_at": now, "granularity": "day",
+                "fetched_at": now, "granularity": GRANULARITY,
             })
     return rows
 
@@ -315,6 +329,13 @@ def main() -> int:
         else:
             log.info("[%2d/%d] %s: no rows (skipped)", i, len(dates), date_str)
     log.info("=== done: %d total observations upserted ===", grand_total)
+    # yield accounting (fix-silent-zero-yield-crawls): report so the run row's
+    # D3 classification reflects landed data instead of reading zero_yield
+    try:
+        from fd_open_data_mcp.refresh.yield_report import report_run_yield
+        report_run_yield(grand_total, grand_total)
+    except Exception:  # noqa: BLE001 - accounting must never fail the ingest
+        log.warning("yield report skipped", exc_info=True)
     return 0
 
 

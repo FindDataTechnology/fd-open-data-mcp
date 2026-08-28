@@ -86,6 +86,9 @@ class Function(Base):
     frequency = Column(String(32), nullable=True)  # daily/weekly/monthly/yearly/irregular/unknown
     real_sources = Column(JSONB, nullable=True)  # real data sources this function calls
     bulk_history = Column(Boolean, nullable=False, default=False)  # one call returns the full dated series (series-mode crawl)
+    # fix-silent-zero-yield-crawls: one call returns the full entity cross-section
+    # for a single date (snapshot planning — one request instead of one per entity)
+    bulk_snapshot = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=_now)
     updated_at = Column(DateTime, default=_now, onupdate=_now)
 
@@ -106,6 +109,7 @@ class Function(Base):
             "parameters": self.parameters or [], "verified": self.verified,
             "scanner_mode": self.scanner_mode, "frequency": self.frequency,
             "real_sources": self.real_sources, "bulk_history": self.bulk_history,
+            "bulk_snapshot": self.bulk_snapshot,
             "columns": [c.toDict() for c in self.columns] if self.columns else [],
         }
 
@@ -348,6 +352,13 @@ class FetchLog(Base):
     proxy_id = Column(Integer, nullable=True, index=True)
     classification = Column(String(16), nullable=True)  # ok / transient / ban / blocked
     real_source = Column(String(64), nullable=True, index=True)  # real data source (e.g., "eastmoney")
+    # fix-silent-zero-yield-crawls: the endpoint actually called + the egress it
+    # was called from. source/real_source alone cannot locate a failure — one
+    # source spans reachable and unreachable hosts simultaneously (D5); the
+    # cluster_id is what per-(cluster, function) demotion keys on (pods carry
+    # SCRAW_CLUSTER_ID; read()-path rows leave it NULL).
+    function_id = Column(Integer, ForeignKey("functions.id"), nullable=True, index=True)
+    cluster_id = Column(Integer, nullable=True, index=True)
     timestamp = Column(DateTime, nullable=False, default=_now)
 
     def toDict(self) -> dict:
@@ -358,6 +369,7 @@ class FetchLog(Base):
             "real_source": self.real_source,
             "detail": self.detail,
             "proxy_id": self.proxy_id, "classification": self.classification,
+            "function_id": self.function_id, "cluster_id": self.cluster_id,
             "timestamp": self.timestamp.isoformat() if self.timestamp else None,
         }
 
@@ -422,6 +434,9 @@ class CrawlPolicy(Base):
     mode = Column(String(16), nullable=False, default="per_date")     # series | per_date
     source_filter = Column(JSONB, nullable=True)           # NULL = all ranked sources
     force = Column(Boolean, nullable=False, default=False)  # override POLICY_MAX_FETCHES guardrail
+    executor = Column(String(16), nullable=False, default="scrapy")  # scrapy | direct
+    script = Column(String(255), nullable=True)   # direct: module name to run (e.g. bulk_ingest_financials_aggregate)
+    script_args = Column(JSONB, nullable=True)    # direct: CLI args for the script
     cron_expr = Column(String(128), nullable=False)
     timezone = Column(String(64), nullable=False, default="UTC")
     last_run_at = Column(DateTime, nullable=True)
@@ -436,6 +451,8 @@ class CrawlPolicy(Base):
             "entity_ids": self.entity_ids, "date_policy": self.date_policy,
             "frequency": self.frequency, "mode": self.mode,
             "source_filter": self.source_filter, "force": self.force,
+            "executor": self.executor, "script": self.script,
+            "script_args": self.script_args,
             "cron_expr": self.cron_expr, "timezone": self.timezone,
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,
             "created_at": self.created_at.isoformat() if self.created_at else None,
@@ -455,6 +472,13 @@ class PolicyRun(Base):
     started_at = Column(DateTime, nullable=False, default=_now)
     finished_at = Column(DateTime, nullable=True)
     detail = Column(String, nullable=True)
+    # fix-silent-zero-yield-crawls: run yield. plan_cells is recorded at launch
+    # (the planner's emitted cell count); rows_attempted/rows_new are updated
+    # INCREMENTALLY by the pod on each pipeline flush keyed by SCRAW_JOB_REF —
+    # nullable so "absent" means "the pod never reported" (D1/D2/D3).
+    plan_cells = Column(Integer, nullable=True)
+    rows_attempted = Column(Integer, nullable=True)
+    rows_new = Column(Integer, nullable=True)
 
     policy = relationship("CrawlPolicy", back_populates="runs")
     cluster = relationship("Cluster")
@@ -467,6 +491,9 @@ class PolicyRun(Base):
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
             "detail": self.detail,
             "cluster_id": self.cluster_id,
+            "plan_cells": self.plan_cells,
+            "rows_attempted": self.rows_attempted,
+            "rows_new": self.rows_new,
         }
 
 
@@ -494,6 +521,11 @@ class Cluster(Base):
     capacity = Column(Integer, nullable=False, default=4)   # max concurrent open runs
     kubeconfig_secret = Column(String(128), nullable=True)  # k8s Secret name holding this cluster's kubeconfig
     enabled = Column(Boolean, nullable=False, default=True)
+    # Runtime hints for Jobs launched on this cluster (china-cheap onboarding):
+    # {"database_url": ..., "redis_url": ..., "dns_nameservers": [...]} — pods on
+    # nodes whose ONLY reachable path to the canonical DB is a relay (e.g. the
+    # aliyun NodePort forwarders) or whose pod-overlay DNS is unreachable.
+    runtime_hints = Column(JSONB, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
 
     def toDict(self) -> dict:

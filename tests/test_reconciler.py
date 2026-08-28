@@ -121,8 +121,20 @@ def test_completion_probe_closes_finished_runs(session):
     launcher = _FakeLauncher(poll_state="success")
     summary = reconcile_once(session, launcher, now=NOW)
     assert summary["probed_closed"] == 1
-    assert run.status == "success"
+    # fix-silent-zero-yield-crawls D3: a succeeded job that never reported
+    # yield counters closes zero_yield — exit code 0 no longer means "success"
+    assert run.status == "zero_yield"
     assert run.finished_at.replace(tzinfo=timezone.utc) == NOW
+
+    # ...and one that DID report counters closes on its yield
+    ok = PolicyRun(policy_id=p.id, status="running", job_ref="done-job-2",
+                   started_at=NOW - timedelta(hours=3),
+                   plan_cells=10, rows_attempted=10, rows_new=4)
+    session.add(ok)
+    session.commit()
+    summary = reconcile_once(session, _FakeLauncher(poll_state="success"), now=NOW)
+    assert summary["probed_closed"] == 1
+    assert ok.status == "success"
 
 
 def test_legacy_schedules_table_is_not_executed(session):

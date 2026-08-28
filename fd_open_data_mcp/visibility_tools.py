@@ -37,13 +37,16 @@ def register_visibility_tools(mcp: FastMCP) -> None:
             run_limit: How many recent policy_runs to return (default 20).
 
         Returns:
-            ``{recent_runs, fleet, stale_runs, per_source_outcome,
-            circuit_state, today_scheduled, summary}`` — recent runs with
-            status + target datasources; fleet health (enabled, reachable,
-            open-runs vs capacity); stale runs (>90 min in 'running'); per-
-            ``real_source`` ok/error over the window; circuit state; today's
-            scheduled policies projected to target datasources; and a roll-up
-            ``summary``.
+            ``{recent_runs, running_runs, fleet, stale_runs,
+            per_source_outcome, circuit_state, next_runs, today_scheduled,
+            summary}`` — recent runs with status + target datasources;
+            currently open runs with live yield counters; fleet health
+            (enabled, reachable, open-runs vs capacity); stale runs (>90 min
+            in 'running'); per-``real_source`` ok/error over the window;
+            circuit state; ``next_runs`` — each enabled policy's next cron
+            fire in its own timezone, nearest first (the forward-looking
+            schedule section; ``today_scheduled`` remains for the daily
+            digest); and a roll-up ``summary``.
         """
         s = _session()
         try:

@@ -79,6 +79,11 @@ def recent_runs(session: Session, limit: int = 20) -> list[dict]:
             "job_ref": run.job_ref,
             "started_at": _iso(run.started_at), "finished_at": _iso(run.finished_at),
             "detail": run.detail,
+            # recorded yield (fix-silent-zero-yield-crawls): absent counters read
+            # as null — which is itself the "pod never reported" signal
+            "plan_cells": run.plan_cells,
+            "rows_attempted": run.rows_attempted,
+            "rows_new": run.rows_new,
             "datasources": _plan_datasources(run.plan_json),
         })
     return out
@@ -181,7 +186,12 @@ def per_source_outcome(session: Session, hours: int = 24) -> list[dict]:
     ``real_source`` is the true upstream (eastmoney, wbgapi, …); rows with no
     real_source (untagged adapter calls) are bucketed under ``(untracked)`` so
     they don't disappear from the digest but stay distinguishable.
+
+    Every count is filtered to the requested window (fix-silent-zero-yield-
+    crawls R6: a windowed query must never return the lifetime table).
     """
+    if hours <= 0:
+        hours = 24
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
     since_naive = since.replace(tzinfo=None)  # naive-UTC column, see stale_runs
     rows = (
@@ -301,6 +311,52 @@ def today_scheduled(session: Session, tz: str = _DIGEST_TZ) -> list[dict]:
     return out
 
 
+# --- next-fire projection (add-panel-crawl-observability) ---------------------
+def next_runs(session: Session, now: dt.datetime | None = None) -> list[dict]:
+    """Per enabled policy, the next cron fire in the policy's own timezone.
+
+    Forward-looking projection for the panel home + the ``crawl_status``
+    schedule section. Base is ``last_run_at`` (or ``created_at`` when never
+    run) — the same reference ``_cron_due`` uses, so what the panel shows and
+    when the reconciler fires agree. Single-flight is deliberately NOT folded
+    in: a policy whose fire would be skipped due to an open run is shown at
+    its raw next fire; the running-runs section shows the open run next to
+    it, which is the truthful picture. The digest keeps ``today_scheduled``
+    (its "what fired today" semantics are digest-shaped).
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out: list[dict] = []
+    for p in session.query(CrawlPolicy).filter_by(enabled=True).all():
+        try:
+            ptz = _policy_tz(p)
+            base = _as_aware_utc(p.last_run_at) or _as_aware_utc(p.created_at)
+            if base is None:
+                fire_local = croniter(p.cron_expr, now.astimezone(ptz)).get_next(dt.datetime)
+            else:
+                fire_local = croniter(p.cron_expr, base.astimezone(ptz)).get_next(dt.datetime)
+                # "next" is future-looking for the panel: if the base-derived
+                # fire already passed (an overdue or already-executed schedule),
+                # project from now instead of showing a stale timestamp.
+                base_fire_utc = fire_local.astimezone(dt.timezone.utc)
+                if base_fire_utc <= now:
+                    fire_local = croniter(p.cron_expr, now.astimezone(ptz)).get_next(dt.datetime)
+        except Exception as e:  # noqa: BLE001 - a bad cron must not break the projection
+            logger.warning("next_runs: policy %s cron parse failed: %s", p.name, e)
+            continue
+        fire_utc = fire_local.astimezone(dt.timezone.utc)
+        out.append({
+            "policy_id": p.id, "policy": p.name,
+            "frequency": p.frequency, "cron_expr": p.cron_expr,
+            "timezone": p.timezone or "UTC",
+            # UTC instant is the sort key; the local rendering is what a human reads
+            "next_fire": fire_utc.isoformat(),
+            "next_fire_local": fire_local.isoformat(),
+            "minutes_until": int((fire_utc - now).total_seconds() // 60),
+        })
+    out.sort(key=lambda x: x["next_fire"])
+    return out
+
+
 def _entity_count(session: Session, policy: CrawlPolicy, sources: list[str]) -> int | None:
     """Entity count for a policy scope: explicit list length, or the count of
     entities of the type carrying an identifier for at least one ranked source
@@ -318,6 +374,89 @@ def _entity_count(session: Session, policy: CrawlPolicy, sources: list[str]) -> 
     return n
 
 
+# --- redundant-policy streak + fleet yield (fix-silent-zero-yield-crawls) ----
+_REDUNDANT_STREAK_N = int(__import__("os").environ.get("SCRAW_REDUNDANT_STREAK_N", "3"))
+
+
+def redundant_streaks(session: Session, n: int = _REDUNDANT_STREAK_N) -> list[dict]:
+    """Enabled policies whose last N runs ALL closed ``redundant``.
+
+    A permanently frozen date window produces real network traffic and real
+    success-looking runs forever; the streak is what makes it visible (spec
+    crawl-visibility: redundant-policy streak surfaced in the digest).
+    """
+    out: list[dict] = []
+    policies = session.query(CrawlPolicy).filter_by(enabled=True).all()
+    for p in policies:
+        runs = (session.query(PolicyRun.status)
+                .filter_by(policy_id=p.id)
+                .order_by(PolicyRun.started_at.desc())
+                .limit(n).all())
+        if len(runs) < n or any(status != "redundant" for (status,) in runs):
+            continue
+        out.append({
+            "policy_id": p.id, "policy": p.name,
+            "streak": len(runs),
+            "date_policy": p.date_policy,
+        })
+    return out
+
+
+def fleet_yield(session: Session, hours: int = 24) -> dict:
+    """Total rows_new / rows_attempted across runs in the window — the single
+    number that makes a zero-acquisition DAY visible (spec: digest reports
+    fleet yield)."""
+    since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
+    since_naive = since.replace(tzinfo=None)
+    row = (
+        session.query(
+            func.coalesce(func.sum(PolicyRun.rows_attempted), 0),
+            func.coalesce(func.sum(PolicyRun.rows_new), 0),
+            func.count(PolicyRun.id),
+        )
+        .filter(PolicyRun.started_at > since_naive,
+                PolicyRun.status != "running")
+        .one()
+    )
+    return {"rows_attempted": int(row[0]), "rows_new": int(row[1]),
+            "runs": int(row[2]), "window_hours": hours}
+
+
+# --- running runs (add-panel-crawl-observability) -----------------------------
+def running_runs(session: Session, now: dt.datetime | None = None) -> list[dict]:
+    """Every open ``policy_runs`` row with live yield counters + cluster name.
+
+    ``rows_attempted``/``rows_new`` are updated incrementally by the crawling
+    pod (keyed by ``SCRAW_JOB_REF``), so reading them here is live progress —
+    no new reporting mechanism. Included in ``build_snapshot`` for the panel
+    home; ``recent_runs`` is not guaranteed to contain long-running rows.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    rows = (
+        session.query(PolicyRun, CrawlPolicy.name, Cluster.name)
+        .join(CrawlPolicy, PolicyRun.policy_id == CrawlPolicy.id)
+        .outerjoin(Cluster, PolicyRun.cluster_id == Cluster.id)
+        .filter(PolicyRun.status == "running")
+        .order_by(PolicyRun.started_at.asc())
+        .all()
+    )
+    out = []
+    for run, pname, cname in rows:
+        started = _as_aware_utc(run.started_at) or now
+        elapsed_min = int((now - started).total_seconds() // 60)
+        out.append({
+            "id": run.id, "policy_id": run.policy_id, "policy": pname,
+            "status": run.status, "cluster": cname, "cluster_id": run.cluster_id,
+            "job_ref": run.job_ref,
+            "started_at": _iso(run.started_at),
+            "elapsed_minutes": elapsed_min,
+            "plan_cells": run.plan_cells,
+            "rows_attempted": run.rows_attempted,
+            "rows_new": run.rows_new,
+        })
+    return out
+
+
 # --- the composite snapshot --------------------------------------------------
 def build_snapshot(session: Session, *, hours: int = 24, run_limit: int = 20) -> dict:
     """Full datasource-centric snapshot — the one call the digest + tool share."""
@@ -327,23 +466,34 @@ def build_snapshot(session: Session, *, hours: int = 24, run_limit: int = 20) ->
     sources = per_source_outcome(session, hours=hours)
     circuits = circuit_state(session)
     scheduled = today_scheduled(session)
-    # roll-up counts
+    streaks = redundant_streaks(session)
+    yield_summary = fleet_yield(session, hours=hours)
+    running = running_runs(session)
+    upcoming = next_runs(session)
+    # roll-up counts. Labels carry the ACTUAL window (fix-silent-zero-yield-
+    # crawls R6: a 168h count under a "24h" label is a lie even when the
+    # underlying filter is right).
     n_ok = sum(r["ok"] for r in sources)
     n_err = sum(r["err"] for r in sources)
     return {
         "generated_at": _iso(dt.datetime.now(dt.timezone.utc)),
         "window_hours": hours,
         "recent_runs": runs,
+        "running_runs": running,
         "fleet": fleet,
         "stale_runs": stale,
         "per_source_outcome": sources,
         "circuit_state": circuits,
         "today_scheduled": scheduled,
+        "next_runs": upcoming,
+        "redundant_streaks": streaks,
+        "fleet_yield": yield_summary,
         "summary": {
-            "fetches_ok_24h": n_ok,
-            "fetches_err_24h": n_err,
+            f"fetches_ok_{hours}h": n_ok,
+            f"fetches_err_{hours}h": n_err,
             "stale_run_count": len(stale),
             "fleet_enabled": sum(1 for f in fleet if f["enabled"]),
             "fleet_unreachable": [f["name"] for f in fleet if f["enabled"] and f["reachable"] is False],
+            "rows_new_window": yield_summary["rows_new"],
         },
     }

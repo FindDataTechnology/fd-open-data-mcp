@@ -213,6 +213,9 @@ class K8sJobLauncher:
                                     {"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
                                      "value": self.database_url},
                                     {"name": "REDIS_URL", "value": self.redis_url},
+                                    # the pod's yield reports key on this (D1):
+                                    # it equals the job_ref stored on the run row
+                                    {"name": "SCRAW_JOB_REF", "value": name},
                                     {"name": "PYTHONUNBUFFERED", "value": "1"},
                                 ],
                                 "resources": {
@@ -329,16 +332,51 @@ class ClusterK8sClient:
         return "unknown"
 
 
-def pick_cluster(session: Session, plan: CrawlPlan) -> Cluster | None:
-    """ClusterScheduler: choose a worker cluster for a plan.
 
-    Filters: enabled; tags cover the plan's real_sources (empty tags = wildcard,
+def _read_script(script_path: str) -> str:
+    """Read a script's source from disk for ConfigMap mounting.
+
+    Looks in the scraw image's /app/scripts/ dir (vendored source), the
+    fd-open-data-mcp scripts dir (both image roots — the bulk-ingest scripts
+    live in the fd-open-data-mcp repo, not scraw), and ``FD_SCRIPTS_DIR``
+    (ConfigMap-mounted scripts for control-plane pods that run no repo
+    checkout). Raises if not found so launch fails loudly rather than shipping
+    an empty ConfigMap."""
+    import os
+    search = [
+        "/app/scripts",
+        "/opt/fd-scripts",
+        os.environ.get("FD_SCRIPTS_DIR", ""),
+    ]
+    for base in search:
+        if not base:
+            continue
+        p = os.path.join(base, os.path.basename(script_path))
+        if os.path.isfile(p):
+            with open(p, "r", encoding="utf-8") as f:
+                return f.read()
+    raise FileNotFoundError(f"script not found: {script_path}")
+
+
+def pick_cluster(session: Session, plan: CrawlPlan | None, policy: CrawlPolicy | None = None) -> Cluster | None:
+    """ClusterScheduler: choose a worker cluster for a plan or direct policy.
+
+    Filters: enabled; tags cover the required sources (empty tags = wildcard,
     fetch anything); open runs < capacity; egress not circuit-open for any
     required source. Ranks by fewest open runs (load balance). None if no
-    eligible cluster (the reconciler records the run as failed)."""
+    eligible cluster (the reconciler records the run as failed).
+
+    For direct-script policies (plan=None, policy set), sources come from the
+    policy's source_filter; if that's NULL (all sources), any tagged cluster is
+    eligible."""
     from fd_open_data_mcp.proxy.circuit import is_selectable
 
-    sources = {rs.source for pc in plan.wanted_concepts for rs in pc.ranked_sources}
+    if plan is not None:
+        sources = {rs.source for pc in plan.wanted_concepts for rs in pc.ranked_sources}
+    elif policy is not None:
+        sources = set(policy.source_filter or [])
+    else:
+        sources = set()
     candidates = session.query(Cluster).filter_by(enabled=True).all()
     if not candidates:
         return None
@@ -380,16 +418,50 @@ class MultiClusterLauncher:
             "SCRAW_K8S_DATABASE_URL",
             "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres")
         self.redis_url = redis_url or os.environ.get(
-            "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:6379/0")
+            "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:5432/postgres")
+
+    def _common_env(self, cluster) -> list[dict]:
+        """Env shared by Scrapy and direct pods: DB, Redis, cluster id, forwarder.
+
+        ``clusters.runtime_hints`` may override the DB/Redis URLs for this
+        cluster (e.g. the aliyun cluster's cheap nodes reach the canonical DB
+        only through the NodePort relays on aliyun's public IP)."""
+        hints = getattr(cluster, "runtime_hints", None) or {}
+        env = [
+            # K8S_NODE_IP MUST precede the URLs: k8s only expands $(VAR) refs
+            # to earlier entries, and hint URLs may template it (per-node relay).
+            {"name": "K8S_NODE_IP",
+             "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}},
+            {"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
+             "value": hints.get("database_url", self.database_url)},
+            {"name": "REDIS_URL", "value": hints.get("redis_url", self.redis_url)},
+            {"name": "SCRAW_CLUSTER_ID", "value": str(cluster.id)},
+            {"name": "SCRAW_CLUSTER_NAME", "value": str(cluster.name)},
+            {"name": "FD_PROXY_FORWARDER",
+             "value": "http://$(K8S_NODE_IP):8080"},
+            {"name": "PYTHONUNBUFFERED", "value": "1"},
+        ]
+        return env
+
+    @staticmethod
+    def _dns_config(cluster) -> dict | None:
+        """Public-DNS dnsConfig for clusters whose pod overlay to coredns is
+        unreachable (runtime_hints.dns_nameservers) — e.g. NAT'd agent nodes
+        that can only reach the control plane on the API port."""
+        hints = getattr(cluster, "runtime_hints", None) or {}
+        ns = hints.get("dns_nameservers") or []
+        if not ns:
+            return None
+        return {"policy": "None", "nameservers": [str(x) for x in ns]}
 
     def _session(self) -> Session:
         from fd_open_data_mcp.db import get_database
         return get_database().get_session()
 
-    def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> tuple[str, int | None]:
+    def launch(self, plan: CrawlPlan | None, policy: CrawlPolicy) -> tuple[str, int | None]:
         session = self._session()
         try:
-            cluster = pick_cluster(session, plan)
+            cluster = pick_cluster(session, plan, policy)
             if cluster is None:
                 raise RuntimeError(
                     "no eligible worker cluster for plan (check clusters table: "
@@ -398,8 +470,116 @@ class MultiClusterLauncher:
             session.close()
         ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S")
         name = f"crawl-policy-{policy.id}-{ts}"
-        plan_json = json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2)
-        docs = [
+        if getattr(policy, "executor", "scrapy") == "direct":
+            docs = self._direct_manifests(name, policy, cluster)
+        else:
+            plan_json = json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2)
+            docs = self._scrapy_manifests(name, plan_json, policy, cluster)
+        # SCRAW_JOB_REF must equal the job_ref stored on the run row (D1) so the
+        # pod's incremental yield reports land on the right policy_runs row.
+        job_ref = f"{cluster.name}/{name}"
+        for doc in docs:
+            if doc["kind"] != "Job":
+                continue
+            for c in doc["spec"]["template"]["spec"]["containers"]:
+                c["env"].append({"name": "SCRAW_JOB_REF", "value": job_ref})
+        client = ClusterK8sClient(cluster)
+        client.create(docs[0])
+        client.create(docs[1])
+        logger.info("launched policy %s on cluster %s as job=%s", policy.name, cluster.name, name)
+        return (job_ref, cluster.id)
+
+    def _direct_manifests(self, name: str, policy: CrawlPolicy, cluster) -> list[dict]:
+        """ConfigMap (script source) + Job for a direct-script policy."""
+        import base64
+        script_name = policy.script
+        script_path = f"/app/scripts/{script_name}.py"
+        args = list(policy.script_args or [])
+        # inject --db-url from the shared env so scripts don't hardcode creds
+        cmd = (f"/opt/venv/bin/python /src/{script_name}.py "
+               + " ".join(args)
+               + ' --db-url "$FD_OPEN_DATA_MCP_DATABASE_URL"')
+        env = self._common_env(cluster)
+        dns = self._dns_config(cluster)
+        pod_spec = {
+            "restartPolicy": "OnFailure",
+            "imagePullSecrets": [{"name": "fd-harbor-pull"}],
+            "containers": [{
+                "name": "crawler",
+                "image": cluster.image,
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["sh", "-c", cmd],
+                "env": env,
+                "resources": {
+                    "requests": {"memory": "256Mi", "cpu": "200m"},
+                    "limits": {"memory": "1Gi", "cpu": "1000m"},
+                },
+                "volumeMounts": [{"name": "script-volume",
+                                  "mountPath": "/src", "readOnly": True}],
+            }],
+            "volumes": [{"name": "script-volume",
+                         "configMap": {"name": f"{name}-script"}}],
+        }
+        if dns:
+            pod_spec["dnsPolicy"] = dns["policy"]
+            pod_spec["dnsConfig"] = {"nameservers": dns["nameservers"]}
+        return [
+            {
+                "apiVersion": "v1", "kind": "ConfigMap",
+                "metadata": {"name": f"{name}-script", "namespace": cluster.namespace,
+                             "labels": {"app": "direct-crawl", "policy-id": str(policy.id),
+                                        "cluster": cluster.name}},
+                "data": {f"{script_name}.py": _read_script(script_path)},
+            },
+            {
+                "apiVersion": "batch/v1", "kind": "Job",
+                "metadata": {"name": name, "namespace": cluster.namespace,
+                             "labels": {"app": "direct-crawl", "policy-id": str(policy.id),
+                                        "cluster": cluster.name}},
+                "spec": {
+                    "backoffLimit": 1,
+                    "ttlSecondsAfterFinished": 86400,
+                    "template": {
+                        "metadata": {"labels": {"app": "direct-crawl",
+                                                "policy-id": str(policy.id),
+                                                "cluster": cluster.name}},
+                        "spec": pod_spec,
+                    },
+                },
+            },
+        ]
+
+    def _scrapy_manifests(self, name: str, plan_json: str, policy: CrawlPolicy, cluster) -> list[dict]:
+        """ConfigMap (plan.json) + Job for a Scrapy concept_crawl policy."""
+        dns = self._dns_config(cluster)
+        pod_spec = {
+            "restartPolicy": "OnFailure",
+            "imagePullSecrets": [{"name": "fd-harbor-pull"}],
+            "containers": [{
+                "name": "crawler",
+                "image": cluster.image,
+                # IfNotPresent: preloaded worker nodes (pool=cheap,
+                # label scraw.io/preloaded=true) cannot reach the
+                # registry and run from a preloaded image; the
+                # registry-capable nodes stay fresh via the
+                # image-puller DaemonSet that Always-pulls :latest.
+                "imagePullPolicy": "IfNotPresent",
+                "command": ["scraw-fd-open-data-mcp", "crawl", "/plan/plan.json"],
+                "volumeMounts": [{"name": "plan-volume", "mountPath": "/plan",
+                                  "readOnly": True}],
+                "env": self._common_env(cluster),
+                "resources": {
+                    "requests": {"memory": "256Mi", "cpu": "200m"},
+                    "limits": {"memory": "1Gi", "cpu": "1000m"},
+                },
+            }],
+            "volumes": [{"name": "plan-volume",
+                         "configMap": {"name": f"{name}-plan"}}],
+        }
+        if dns:
+            pod_spec["dnsPolicy"] = dns["policy"]
+            pod_spec["dnsConfig"] = {"nameservers": dns["nameservers"]}
+        return [
             {
                 "apiVersion": "v1", "kind": "ConfigMap",
                 "metadata": {"name": f"{name}-plan", "namespace": cluster.namespace,
@@ -419,65 +599,11 @@ class MultiClusterLauncher:
                         "metadata": {"labels": {"app": "concept-crawl",
                                                 "policy-id": str(policy.id),
                                                 "cluster": cluster.name}},
-                        "spec": {
-                            "restartPolicy": "OnFailure",
-                            "imagePullSecrets": [{"name": "fd-harbor-pull"}],
-                            "containers": [{
-                                "name": "crawler",
-                                "image": cluster.image,
-                                "imagePullPolicy": "Always",
-                                "command": ["scraw-fd-open-data-mcp", "crawl", "/plan/plan.json"],
-                                "volumeMounts": [{"name": "plan-volume", "mountPath": "/plan",
-                                                  "readOnly": True}],
-                                "env": [
-                                    {"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
-                                     "value": self.database_url},
-                                    {"name": "REDIS_URL", "value": self.redis_url},
-                                    # tells the worker which cluster it is (used by
-                                    # pick_cluster's per-cluster circuit check + by
-                                    # the worker's own egress self-registration)
-                                    {"name": "SCRAW_CLUSTER_ID", "value": str(cluster.id)},
-                                    {"name": "SCRAW_CLUSTER_NAME", "value": cluster.name},
-                                    # Standalone forwarder: the worker calls
-                                    # ``proxy_client.acquire(source)`` per fetch,
-                                    # the forwarder returns an upstream_url
-                                    # (gost-own on this cluster's node), and the
-                                    # worker injects it into its own HTTP client
-                                    # (terminating TLS itself to classify bans).
-                                    # The hostNetwork forwarder binds the node
-                                    # IP:8080 (no Service possible under the
-                                    # crawl-worker SA) and worker clusters are
-                                    # single-node, so the pod's OWN node IP —
-                                    # downward API ``status.hostIP`` — is the
-                                    # forwarder's address. K8S_NODE_IP must be
-                                    # declared BEFORE FD_PROXY_FORWARDER: k8s
-                                    # only expands ``$(VAR)`` refs to earlier
-                                    # env entries.
-                                    {"name": "K8S_NODE_IP",
-                                     "valueFrom": {"fieldRef": {
-                                         "fieldPath": "status.hostIP"}}},
-                                    {"name": "FD_PROXY_FORWARDER",
-                                     "value": "http://$(K8S_NODE_IP):8080"},
-                                    {"name": "PYTHONUNBUFFERED", "value": "1"},
-                                ],
-                                "resources": {
-                                    "requests": {"memory": "256Mi", "cpu": "200m"},
-                                    "limits": {"memory": "1Gi", "cpu": "1000m"},
-                                },
-                            }],
-                            "volumes": [{"name": "plan-volume",
-                                         "configMap": {"name": f"{name}-plan"}}],
-                        },
+                        "spec": pod_spec,
                     },
                 },
             },
         ]
-        client = ClusterK8sClient(cluster)
-        client.create(docs[0])
-        client.create(docs[1])
-        logger.info("launched policy %s on cluster %s as job=%s", policy.name, cluster.name, name)
-        return (f"{cluster.name}/{name}", cluster.id)
-
     def poll(self, job_ref: str) -> str:
         if "/" not in job_ref:
             return "unknown"
@@ -535,7 +661,14 @@ def _date_count(start: str, end: str, frequency: str | None) -> int:
 
 def estimate_fetches(session: Session, plan: CrawlPlan) -> int:
     """Estimated fetch count: sum over concepts of entities x dates
-    (series mode: one fetch per (concept, entity), design D6)."""
+    (series mode: one fetch per (concept, entity), design D6).
+
+    fix-silent-zero-yield-crawls: the planner now computes the same number
+    (``plan.plan_cells``, snapshot-collapse aware) — prefer it when present;
+    the local computation remains for hand-edited plans without the field.
+    """
+    if getattr(plan, "plan_cells", None) is not None:
+        return plan.plan_cells
     scope = plan.entity_scope
     if scope.entity_ids:
         n_entities = len(scope.entity_ids)
@@ -590,6 +723,44 @@ def _open_run(session: Session, policy_id: int) -> PolicyRun | None:
 
 
 # ─── single-policy launch (shared by reconciler tick and MCP trigger-now) ───
+def _launch_direct(
+    session: Session,
+    policy: CrawlPolicy,
+    launcher: Launcher,
+    now: dt.datetime,
+) -> dict:
+    """Launch a direct-script policy (non-Scrapy executor).
+
+    Skips plan_crawl (the script owns its own fetch logic) but goes through
+    pick_cluster + MultiClusterLauncher.launch so the run gets multi-cluster
+    dispatch, policy_runs tracking, and the same env as a Scrapy pod.
+    """
+    if not policy.script:
+        detail = "refused: direct policy has no script"
+        session.add(PolicyRun(policy_id=policy.id, status="failed",
+                              started_at=now, finished_at=now, detail=detail))
+        policy.last_run_at = now
+        session.commit()
+        return {"policy": policy.name, "status": "refused", "reason": detail}
+    try:
+        job_ref, cluster_id = launcher.launch(None, policy)
+    except Exception as e:  # noqa: BLE001
+        logger.exception("policy %s direct launch failed", policy.name)
+        session.add(PolicyRun(policy_id=policy.id, status="failed",
+                              started_at=now, finished_at=now,
+                              detail=f"launch failed: {e}"))
+        policy.last_run_at = now
+        session.commit()
+        return {"policy": policy.name, "status": "refused", "reason": f"launch failed: {e}"}
+    session.add(PolicyRun(policy_id=policy.id, status=_OPEN,
+                          job_ref=job_ref, cluster_id=cluster_id, started_at=now))
+    policy.last_run_at = now
+    session.commit()
+    logger.info("policy %s launched direct job=%s", policy.name, job_ref)
+    return {"policy": policy.name, "status": "launched", "job_ref": job_ref,
+            "executor": "direct"}
+
+
 def launch_policy(
     session: Session,
     policy: CrawlPolicy,
@@ -611,6 +782,13 @@ def launch_policy(
     if _open_run(session, policy.id) is not None:
         logger.info("policy %s due but has an open run; skipping (single-flight)", policy.name)
         return {"policy": policy.name, "status": "skipped", "reason": "open run (single-flight)"}
+
+    # direct-script policies skip plan_crawl (they run a script, not a Scrapy
+    # spider) but keep single-flight, cron, policy_runs tracking, and the
+    # MultiClusterLauncher's cluster selection.
+    if getattr(policy, "executor", "scrapy") == "direct":
+        return _launch_direct(session, policy, launcher, now)
+
 
     # the crawl window uses the policy's LOCAL calendar day, not UTC's — at 01:00
     # Beijing (17:00 UTC prev day) a trailing/since_last policy must cover Beijing
@@ -653,6 +831,7 @@ def launch_policy(
 
     session.add(PolicyRun(policy_id=policy.id, status=_OPEN,
                           plan_json=plan.model_dump(mode="json"),
+                          plan_cells=getattr(plan, "plan_cells", None),
                           job_ref=job_ref, cluster_id=cluster_id, started_at=now))
     policy.last_run_at = now
     session.commit()
@@ -662,6 +841,55 @@ def launch_policy(
 
 
 # ─── the reconciler ──────────────────────────────────────────────────────────
+def classify_yield(run: PolicyRun) -> str:
+    """D3 outcome classification for a run whose executor job SUCCEEDED.
+
+    The pod reports facts (plan_cells recorded at launch; rows_attempted /
+    rows_new reported incrementally per flush); the verdict is derived HERE,
+    at run closure, because a SIGKILLed pod must not be able to withhold one:
+    a job that succeeded with no counters ever written is itself zero_yield.
+    """
+    if run.plan_cells == 0:
+        # checked before the counters-absent branch: an empty plan never
+        # flushes, so absent counters are EXPECTED here — no_op, not an alarm
+        # (design D4: a caught-up since_last watermark is legitimate)
+        return "no_op"
+    if run.rows_attempted is None or run.rows_new is None:
+        return "zero_yield"   # pod died before the first flush reported
+    if run.rows_attempted == 0:
+        return "zero_yield"   # planned work, fetched nothing — the outage shape
+    if run.rows_new == 0:
+        return "redundant"    # fetched, but the window was already complete
+    return "success"
+
+
+def _frozen_window(policy: CrawlPolicy, local_today: dt.date) -> str | None:
+    """D4: refuse RECURRING policies with an explicit window ending in the past —
+    such a window is already complete and can never yield new observations.
+    Returns the refusal detail, or None when the window is fine / rolling.
+
+    Only the cron tick path refuses; ``policy_trigger_now`` deliberately skips
+    this check (a one-shot backfill of a past window is legitimate).
+    """
+    dp = policy.date_policy or {}
+    if dp.get("mode") != "explicit":
+        return None
+    end = dp.get("end")
+    if not end:
+        return None  # open-ended explicit (end defaults to today)
+    try:
+        end_d = dt.date.fromisoformat(str(end)[:10])
+    except ValueError:
+        return None  # malformed date -> planner/validation will complain
+    if end_d < local_today:
+        return (f"refused: recurring policy's explicit date window ends {end_d}, "
+                f"before local today {local_today} — the window is already complete "
+                f"and can never yield new observations; use a rolling date_policy "
+                f"({'trailing'} or {'since_last'}), or run policy_trigger_now for a "
+                f"deliberate one-shot backfill")
+    return None
+
+
 def reconcile_once(
     session: Session,
     launcher: Launcher,
@@ -673,20 +901,37 @@ def reconcile_once(
         now = now.replace(tzinfo=dt.timezone.utc)
     summary = {"probed_closed": 0, "launched": [], "skipped": [], "refused": []}
 
-    # 0. completion probe: close open runs whose executor job ended (D5 step 5)
+    # 0. completion probe: close open runs whose executor job ended (D5 step 5).
+    # A succeeded job is classified by its recorded yield (D3) — never plain
+    # "success": exit code 0 says the process ran, not that data landed.
     for run in session.query(PolicyRun).filter_by(status=_OPEN).all():
         if not run.job_ref:
             continue
         state = launcher.poll(run.job_ref)
         if state in ("success", "failed"):
-            run.status = state
+            run.status = classify_yield(run) if state == "success" else "failed"
             run.finished_at = now
             summary["probed_closed"] += 1
+            logger.info("run %d closed as %s (plan_cells=%s attempted=%s new=%s)",
+                        run.id, run.status, run.plan_cells,
+                        run.rows_attempted, run.rows_new)
     session.commit()
 
     # 1-5. due policies
     for policy in session.query(CrawlPolicy).filter_by(enabled=True).all():
         if not _cron_due(policy, now):
+            continue
+        # D4: refuse frozen explicit windows on the recurring path (a run row is
+        # recorded as failed/refused so the watcher's `refused` class surfaces it)
+        local_today = now.astimezone(_policy_tz(policy)).date()
+        frozen = _frozen_window(policy, local_today)
+        if frozen is not None:
+            logger.warning("policy %s %s", policy.name, frozen)
+            session.add(PolicyRun(policy_id=policy.id, status="failed",
+                                  started_at=now, finished_at=now, detail=frozen))
+            policy.last_run_at = now
+            session.commit()
+            summary["refused"].append({"policy": policy.name, "reason": frozen})
             continue
         result = launch_policy(session, policy, launcher, now)
         status = result.pop("status")
