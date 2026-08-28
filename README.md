@@ -214,6 +214,19 @@ python -m fd_open_data_mcp.refresh.reconciler
   owns proxy selection in cluster crawls). The legacy `FD_PROXY_POOL`/
   `FD_EGRESS_MODE` vars are no longer read.
 
+**Panel pages** (all server-rendered, no build step, all under the token gate):
+
+| Page | What it answers |
+|---|---|
+| `/panel` | Observability home: fleet health, running runs with live attempted/new counters (htmx polling, 15 s), recent finished runs with yield classification, next-up schedule, stale/suspended-scheduler banner |
+| `/panel/policies` | Target management: list, enable/disable, editor with fetch estimate |
+| `/panel/runs`, `/panel/runs/{id}` | Run list + drill-down: compiled plan, yield vs plan cells, job ref, window-approximated fetch outcomes |
+| `/panel/data` | Data coverage: per-concept rows / latest date / sources / last fetch over `semantic_observations` |
+
+The same reads exist as MCP tools: `crawl_status` (snapshot incl. `next_runs`)
+and `data_stats` (per-concept coverage) — panel and tools share one query
+layer (`visibility/snapshot.py`, `visibility/coverage.py`).
+
 **Policy example** (via panel, or MCP `policy_create`):
 
 ```

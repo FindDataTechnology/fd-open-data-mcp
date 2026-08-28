@@ -201,7 +201,9 @@ FD_OPEN_DATA_MCP_DATABASE_URL=sqlite:///test.db fd-open-data-mcp migrate
 ### 11. Crawl control center (panel + reconciler)
 
 ```bash
-# Control-panel auth gate (if set, /panel/* requires it)
+# Control-panel auth gate (if set, /panel/* requires it — including the
+# observability home, its /panel/partials/* polling endpoints, /panel/data
+# and /panel/runs/{id})
 PANEL_TOKEN=
 
 # Plan-size guardrail: a due policy whose fetch estimate exceeds this is
