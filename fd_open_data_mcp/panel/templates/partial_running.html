@@ -1,0 +1,21 @@
+<table>
+  <tr><th>Run</th><th>Policy</th><th>Where</th><th>Elapsed</th><th>Progress</th></tr>
+  {% for r in runs %}
+  <tr>
+    <td><a href="/panel/runs/{{ r.id }}">#{{ r.id }}</a></td>
+    <td>{{ r.policy }}</td>
+    <td class="muted">{{ r.cluster or 'scrapyd' }}{% if r.job_ref %} · {{ r.job_ref }}{% endif %}</td>
+    <td class="muted">{{ r.elapsed_minutes }}m</td>
+    <td>
+      {% if r.rows_attempted is not none %}
+        {{ r.rows_attempted }}{{ ' / ' ~ r.plan_cells if r.plan_cells else '' }} attempted ·
+        <strong>{{ r.rows_new or 0 }} new</strong>
+      {% else %}
+        <span class="muted">pod has not reported yield yet</span>
+      {% endif %}
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">Nothing running.</td></tr>
+  {% endfor %}
+</table>

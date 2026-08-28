@@ -1,0 +1,18 @@
+<table>
+  <tr><th>Run</th><th>Policy</th><th>Status</th><th>Yield</th><th>Finished</th></tr>
+  {% for r in runs %}
+  <tr>
+    <td><a href="/panel/runs/{{ r.id }}">#{{ r.id }}</a></td>
+    <td>{{ r.policy }}</td>
+    <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+    <td>
+      {% if r.status == 'running' %}<span class="muted">—</span>
+      {% elif r.rows_new is none %}<span class="muted">not reported</span>
+      {% else %}{{ r.rows_new }} new / {{ r.rows_attempted or 0 }} att.{% endif %}
+    </td>
+    <td class="muted">{{ r.finished_at or '—' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">No runs yet.</td></tr>
+  {% endfor %}
+</table>

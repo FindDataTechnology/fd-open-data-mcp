@@ -1,0 +1,31 @@
+{% extends "base.html" %}
+{% block title %}Data coverage · Crawl Control Center{% endblock %}
+{% block content %}
+<h2>Data coverage</h2>
+<p class="muted">{{ n_concepts }} concepts with observations · {{ total_rows }} total rows in semantic_observations</p>
+
+<form method="get" action="/panel/data">
+  <div class="pill-row">
+    <input type="number" name="concept_id" placeholder="concept id" value="{{ concept_id or '' }}" style="max-width:140px">
+    <input type="text" name="entity_type" placeholder="entity type (stock/fund/country…)" value="{{ entity_type or '' }}" style="max-width:240px">
+    <button class="btn" type="submit">Filter</button>
+    <a class="btn" href="/panel/data">Clear</a>
+  </div>
+</form>
+
+<table>
+  <tr><th>Concept</th><th>Category</th><th>Rows</th><th>Latest date</th><th>Sources</th><th>Last fetch</th></tr>
+  {% for c in coverage %}
+  <tr>
+    <td title="id {{ c.concept_id }}">{{ c.name_zh or c.name_en or c.code or c.concept_id }}</td>
+    <td class="muted">{{ c.category or '—' }}</td>
+    <td>{{ c.rows }}</td>
+    <td>{{ c.latest_date or '—' }}</td>
+    <td>{{ c.sources }}</td>
+    <td class="muted">{{ c.last_fetch or '—' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">No observations match.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

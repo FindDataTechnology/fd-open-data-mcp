@@ -1,0 +1,15 @@
+<table>
+  <tr><th>Cluster</th><th>Open/Cap</th><th>Reachable</th><th>Tags</th></tr>
+  {% for f in fleet %}
+  <tr>
+    <td>{{ f.name }}{% if not f.enabled %} <span class="muted">(disabled)</span>{% endif %}</td>
+    <td>{{ f.open_runs }}/{{ f.capacity }}</td>
+    <td>{% if f.reachable is none %}<span class="muted">—</span>
+        {% elif f.reachable %}<span class="badge success">up</span>
+        {% else %}<span class="badge failed">unreachable</span>{% endif %}</td>
+    <td class="muted">{{ f.tags | join(', ') or '—' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">No clusters registered.</td></tr>
+  {% endfor %}
+</table>

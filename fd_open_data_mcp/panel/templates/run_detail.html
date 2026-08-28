@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+{% block title %}Run #{{ run.id }} · Crawl Control Center{% endblock %}
+{% block content %}
+<h2>Run #{{ run.id }} — {{ policy_name }}</h2>
+
+<table>
+  <tr><th>Status</th><th>Job</th><th>Cluster</th><th>Started</th><th>Finished</th><th>Duration</th></tr>
+  <tr>
+    <td><span class="badge {{ run.status }}">{{ run.status }}</span></td>
+    <td class="muted">{{ run.job_ref or '—' }}</td>
+    <td class="muted">{{ cluster_name or 'scrapyd/local' }}</td>
+    <td class="muted">{{ run.started_at or '—' }}</td>
+    <td class="muted">{{ run.finished_at or '—' }}</td>
+    <td class="muted">{{ duration_min ~ 'm' if duration_min is not none else '—' }}</td>
+  </tr>
+</table>
+
+<h3>Yield</h3>
+<table>
+  <tr><th>Plan cells</th><th>Rows attempted</th><th>Rows new</th></tr>
+  <tr>
+    <td>{{ run.plan_cells if run.plan_cells is not none else '—' }}</td>
+    <td>{{ run.rows_attempted if run.rows_attempted is not none else '—' }}</td>
+    <td>{{ run.rows_new if run.rows_new is not none else '—' }}</td>
+  </tr>
+</table>
+{% if run.detail %}<p class="muted">{{ run.detail }}</p>{% endif %}
+
+<h3>Plan</h3>
+<table>
+  <tr><th>Mode</th><th>Entity scope</th><th>Dates</th></tr>
+  <tr>
+    <td>{{ plan.mode or '—' }}</td>
+    <td class="muted">{{ plan.entity_type }}{% if plan.entity_ids %} ({{ plan.entity_ids | length }} explicit){% else %} (all){% endif %}</td>
+    <td class="muted">{{ plan.start or '?' }} → {{ plan.end or '?' }}</td>
+  </tr>
+</table>
+<table>
+  <tr><th>Concept</th><th>Ranked sources</th></tr>
+  {% for c in plan.concepts %}
+  <tr><td>{{ c.code or c.id }}</td><td class="muted">{{ c.sources | join(' → ') or '—' }}</td></tr>
+  {% else %}
+  <tr><td colspan="2" class="muted">No compiled plan on this run.</td></tr>
+  {% endfor %}
+</table>
+
+<h3>Fetches during run window</h3>
+<p class="muted">Approximation: fetch_log rows between {{ fetch_window[0] or '?' }} and {{ fetch_window[1] }},
+filtered to this run's plan concepts{% if cluster_name %} and cluster{% endif %} — overlapping runs may double-count.</p>
+<table>
+  <tr><th>Status</th><th>Count</th></tr>
+  {% for f in fetch_summary %}
+  <tr><td>{{ f.status }}</td><td>{{ f.count }}</td></tr>
+  {% else %}
+  <tr><td colspan="2" class="muted">No fetches recorded in the window.</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

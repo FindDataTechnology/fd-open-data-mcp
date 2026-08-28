@@ -1,4 +1,5 @@
-"""Panel routes: policy list + toggles, editor with estimate preview, runs view.
+"""Panel routes: observability home + partials, run detail, data coverage,
+policy list + toggles, editor with estimate preview, runs view.
 
 Served standalone (``uvicorn fd_open_data_mcp.panel.app:app`` / CLI ``panel``)
 or mounted under /panel via ``mcp.http_app().mount``. All routes hit the same
@@ -6,6 +7,7 @@ or mounted under /panel via ``mcp.http_app().mount``. All routes hit the same
 """
 from __future__ import annotations
 
+import datetime as dt
 import os
 from pathlib import Path
 
@@ -13,9 +15,13 @@ from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
+from sqlalchemy import func
 
 from fd_open_data_mcp.db import get_database
-from fd_open_data_mcp.models import Concept, CrawlPolicy, PolicyRun
+from fd_open_data_mcp.models import (
+    Cluster, Concept, CrawlPolicy, FetchLog, PolicyRun,
+)
+from fd_open_data_mcp.visibility import snapshot as _snapshot
 
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
@@ -23,6 +29,11 @@ templates = Jinja2Templates(directory=str(HERE / "templates"))
 FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "yearly"]
 MODES = ["series", "per_date"]
 DATE_POLICY_MODES = ["since_last", "trailing", "explicit"]
+
+# htmx poll cadence for the home partials (design D2) and the reconciler
+# liveness banner threshold (design: a suspended scheduler must be visible).
+POLL_SECONDS = 15
+RECONCILER_QUIET_HOURS = 24
 
 
 def _session():
@@ -131,7 +142,168 @@ def create_app() -> FastAPI:
     # ── pages ──────────────────────────────────────────────────────────────
     @app.get("/", response_class=HTMLResponse)
     def index():
-        return RedirectResponse("/panel/policies")
+        return RedirectResponse("/panel")
+
+    def _unavailable(e: Exception) -> HTMLResponse:
+        # One failing partial must not fail the page (spec: live panel refresh)
+        return HTMLResponse(f'<p class="muted">section unavailable: {e}</p>')
+
+    def _scheduler_quiet(s) -> tuple[bool, str | None]:
+        """True when no run has started within RECONCILER_QUIET_HOURS — the
+        suspended-reconciler case stays visible instead of silent."""
+        last = s.query(func.max(PolicyRun.started_at)).scalar()
+        if last is None:
+            return True, None
+        # TIMESTAMP WITHOUT TIME ZONE column, naive-UTC per the writer contract
+        age_h = (dt.datetime.utcnow() - last).total_seconds() / 3600
+        return age_h > RECONCILER_QUIET_HOURS, last.isoformat()
+
+    @app.get("/panel", response_class=HTMLResponse)
+    def home(request: Request):
+        s = _session()
+        try:
+            quiet, last_started = _scheduler_quiet(s)
+            return templates.TemplateResponse(
+                request, "home.html",
+                {"poll_seconds": POLL_SECONDS,
+                 "quiet_hours": RECONCILER_QUIET_HOURS,
+                 "scheduler_quiet": quiet, "last_run_started": last_started})
+        finally:
+            s.close()
+
+    # ── home partials (htmx polling; each degrades independently) ──────────
+    @app.get("/panel/partials/running", response_class=HTMLResponse)
+    def partial_running(request: Request):
+        try:
+            s = _session()
+            try:
+                rows = _snapshot.running_runs(s)
+            finally:
+                s.close()
+            return templates.TemplateResponse(
+                request, "partial_running.html", {"runs": rows})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
+
+    @app.get("/panel/partials/recent", response_class=HTMLResponse)
+    def partial_recent(request: Request):
+        try:
+            s = _session()
+            try:
+                rows = _snapshot.recent_runs(s, limit=15)
+            finally:
+                s.close()
+            return templates.TemplateResponse(
+                request, "partial_recent.html", {"runs": rows})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
+
+    @app.get("/panel/partials/fleet", response_class=HTMLResponse)
+    def partial_fleet(request: Request):
+        try:
+            s = _session()
+            try:
+                rows = _snapshot.fleet_health(s)
+            finally:
+                s.close()
+            return templates.TemplateResponse(
+                request, "partial_fleet.html", {"fleet": rows})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
+
+    @app.get("/panel/partials/next", response_class=HTMLResponse)
+    def partial_next(request: Request):
+        try:
+            s = _session()
+            try:
+                rows = _snapshot.next_runs(s)
+            finally:
+                s.close()
+            return templates.TemplateResponse(
+                request, "partial_next.html", {"upcoming": rows})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
+
+    # ── run detail ─────────────────────────────────────────────────────────
+    @app.get("/panel/runs/{run_id}", response_class=HTMLResponse)
+    def run_detail(request: Request, run_id: int):
+        s = _session()
+        try:
+            row = (
+                s.query(PolicyRun, CrawlPolicy.name, Cluster.name)
+                .join(CrawlPolicy, PolicyRun.policy_id == CrawlPolicy.id)
+                .outerjoin(Cluster, PolicyRun.cluster_id == Cluster.id)
+                .filter(PolicyRun.id == run_id)
+                .first()
+            )
+            if not row:
+                raise HTTPException(404, f"run {run_id} not found")
+            run, policy_name, cluster_name = row
+
+            plan = run.plan_json if isinstance(run.plan_json, dict) else {}
+            concepts = [
+                {"id": pc.get("concept_id"), "code": pc.get("code"),
+                 "sources": [rs.get("source") for rs in pc.get("ranked_sources") or []]}
+                for pc in plan.get("wanted_concepts") or []
+            ]
+            scope = plan.get("entity_scope") or {}
+            date_range = plan.get("date_range") or {}
+
+            # fetch_log carries no run key (design D5): approximate by the run's
+            # window filtered to its plan concepts + cluster, labeled as such.
+            fetch_summary: list[dict] = []
+            window_end = run.finished_at or dt.datetime.utcnow()
+            if run.started_at:
+                concept_ids = [c["id"] for c in concepts if c["id"] is not None]
+                fq = (
+                    s.query(FetchLog.status, func.count(FetchLog.id))
+                    .filter(FetchLog.timestamp >= run.started_at,
+                            FetchLog.timestamp <= window_end,
+                            FetchLog.cluster_id == run.cluster_id)
+                )
+                if concept_ids:
+                    fq = fq.filter(FetchLog.concept_id.in_(concept_ids))
+                fetch_summary = [
+                    {"status": status, "count": int(cnt)}
+                    for status, cnt in fq.group_by(FetchLog.status).all()
+                ]
+            return templates.TemplateResponse(
+                request, "run_detail.html",
+                {"run": run.toDict(), "policy_name": policy_name,
+                 "cluster_name": cluster_name,
+                 "plan": {"mode": plan.get("mode"),
+                          "concepts": concepts,
+                          "entity_type": scope.get("entity_type"),
+                          "entity_ids": scope.get("entity_ids"),
+                          "start": date_range.get("start"),
+                          "end": date_range.get("end")},
+                 "fetch_summary": fetch_summary,
+                 "fetch_window": [run.started_at.isoformat() if run.started_at else None,
+                                  run.finished_at.isoformat() if run.finished_at else "now"],
+                 "duration_min": (int(((run.finished_at or dt.datetime.utcnow())
+                                       - run.started_at).total_seconds() // 60)
+                                 if run.started_at else None)})
+        finally:
+            s.close()
+
+    # ── data coverage ──────────────────────────────────────────────────────
+    @app.get("/panel/data", response_class=HTMLResponse)
+    def data_coverage(request: Request, concept_id: int | None = None,
+                      entity_type: str = ""):
+        from fd_open_data_mcp.visibility.coverage import coverage_by_concept
+
+        s = _session()
+        try:
+            rows = coverage_by_concept(s, concept_id=concept_id,
+                                       entity_type=entity_type or None)
+            total_rows = sum(r["rows"] for r in rows)
+            return templates.TemplateResponse(
+                request, "data.html",
+                {"coverage": rows, "total_rows": total_rows,
+                 "n_concepts": len(rows),
+                 "concept_id": concept_id, "entity_type": entity_type})
+        finally:
+            s.close()
 
     @app.get("/panel/policies", response_class=HTMLResponse)
     def policy_list(request: Request):

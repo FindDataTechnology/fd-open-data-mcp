@@ -1,0 +1,43 @@
+{% extends "base.html" %}
+{% block title %}Home · Crawl Control Center{% endblock %}
+{% block content %}
+<h2>Now</h2>
+
+{% if scheduler_quiet %}
+<div class="banner warn">
+  ⚠ No run has started in the last {{ quiet_hours }}h
+  {% if last_run_started %}(last: {{ last_run_started }}){% else %}(no runs ever recorded){% endif %}
+  — the reconciler may be suspended or nothing is scheduled.
+</div>
+{% endif %}
+
+<div class="home-grid">
+  <section class="card">
+    <h3>Fleet</h3>
+    <div hx-get="/panel/partials/fleet" hx-trigger="load, every {{ poll_seconds }}s">
+      <p class="muted">loading…</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Running runs</h3>
+    <div hx-get="/panel/partials/running" hx-trigger="load, every {{ poll_seconds }}s">
+      <p class="muted">loading…</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Next up</h3>
+    <div hx-get="/panel/partials/next" hx-trigger="load, every {{ poll_seconds }}s">
+      <p class="muted">loading…</p>
+    </div>
+  </section>
+
+  <section class="card">
+    <h3>Recent finished</h3>
+    <div hx-get="/panel/partials/recent" hx-trigger="load, every {{ poll_seconds }}s">
+      <p class="muted">loading…</p>
+    </div>
+  </section>
+</div>
+{% endblock %}
