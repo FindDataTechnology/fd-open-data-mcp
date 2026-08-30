@@ -46,7 +46,21 @@ WAVE_POLICY_PREFIX = "covexp-"
 # launch_policy; enabled=False + never-due cron keeps the reconciler away.
 NEVER_DUE_CRON = "0 0 31 2 *"
 
-MAX_WAVE_POLICIES = int(os.environ.get("COVERAGE_MAX_WAVE_POLICIES", "2"))
+MAX_WAVE_POLICIES = int(os.environ.get("COVERAGE_MAX_WAVE_POLICIES", "6"))
+# Parallel active waves (each a distinct entity_type x frequency x state
+# group). The fleet has ~24 run slots across 3 clusters — serial waves used
+# ONE pod at a time, which is why expansion now runs groups concurrently,
+# bounded by the capacity check.
+MAX_ACTIVE_WAVES = int(os.environ.get("COVERAGE_MAX_ACTIVE_WAVES", "4"))
+# Groups with a paused wave are excluded from planning, but a pause in one
+# group (e.g. fund endpoints dead from CN egress) must not idle the whole
+# fleet — other groups keep launching. Past this many paused groups the whole
+# expansion stops (something fleet-wide, not one bad group).
+MAX_PAUSED_GROUPS = int(os.environ.get("COVERAGE_MAX_PAUSED_GROUPS", "3"))
+# Target policy-chunk size (fetch cells). Splitting to the TARGET (not just
+# the guardrail ceiling) fans a wave out into several parallel pods — a wave
+# of 40k cells becomes ~5 pods on different clusters instead of one.
+TARGET_CELLS = int(os.environ.get("COVERAGE_TARGET_CELLS", "8000"))
 PAUSE_FAILURE_FRACTION = float(os.environ.get("COVERAGE_PAUSE_FRACTION", "0.3"))
 # Pre-size to 90% of the guardrail: the reconciler re-estimates at launch, and
 # a wave policy the reconciler would refuse is a planning bug, not a runtime
@@ -162,14 +176,24 @@ def _plan_chunks(session: Session, rows: list[dict], entity_type: str,
         est = _estimate(concept_ids, entity_ids)
         if est == 0:
             return []
-        if est <= _SIZE_LIMIT:
+        # small enough (parallelism target) AND legal (guardrail): one chunk.
+        # min() keeps the invariant even if TARGET is misconfigured above the
+        # guardrail: a chunk is never emitted above the reconciler's limit.
+        if est <= min(TARGET_CELLS, _SIZE_LIMIT):
             return [{"concept_ids": concept_ids, "entity_ids": entity_ids,
                      "estimate": est}]
+        # more than one concept: bisect toward the target (more pods per wave)
         if len(concept_ids) > 1:
             mid = len(concept_ids) // 2
             return (_split(concept_ids[:mid], entity_ids)
                     + _split(concept_ids[mid:], entity_ids))
-        # single concept still too big -> chunk by entities
+        # single concept over target: keep whole if the guardrail allows —
+        # entity-splitting a healthy chunk buys little; splitting further only
+        # when the guardrail demands it (below)
+        if est <= _SIZE_LIMIT:
+            return [{"concept_ids": concept_ids, "entity_ids": entity_ids,
+                     "estimate": est}]
+        # single concept over the guardrail -> chunk by entities
         return _split_by_entities(concept_ids[0], entity_type, est)
 
     def _split_by_entities(concept_id: int, etype: str, est: int) -> list[dict]:
@@ -207,13 +231,18 @@ def _plan_chunks(session: Session, rows: list[dict], entity_type: str,
     return _split([r["concept_id"] for r in rows], None)
 
 
-def plan_next_wave(session: Session) -> CoverageWave | None:
+def plan_next_wave(session: Session,
+                   exclude_groups: set[tuple] | None = None) -> CoverageWave | None:
     """Derive the next wave from the live gap set; create it + its policies.
 
-    Returns the new wave row, or None when no gap remains. Idempotent against
-    covered concepts by construction (the gap set is recomputed from live
-    observations, so concepts that gained rows drop out automatically).
+    ``exclude_groups`` (entity_type, frequency, state) keys are skipped — the
+    caller passes paused groups and groups that already have an active wave.
+    Returns the new wave row, or None when no eligible gap remains.
+    Idempotent against covered concepts by construction (the gap set is
+    recomputed from live observations, so concepts that gained rows drop out
+    automatically).
     """
+    exclude_groups = exclude_groups or set()
     gaps = gap_set(session)
     if not gaps:
         return None
@@ -223,6 +252,8 @@ def plan_next_wave(session: Session) -> CoverageWave | None:
 
     ordered = sorted(groups, key=lambda k: _group_order(k, groups[k]))
     for key in ordered:
+        if key in exclude_groups:
+            continue
         rows = groups[key]
         entity_type, frequency, state = key
         if state == "stale":
@@ -376,23 +407,44 @@ def expand_once(session: Session, launcher=None,
         now = now.replace(tzinfo=dt.timezone.utc)
     launcher = launcher or _default_launcher()
 
-    paused = session.query(CoverageWave).filter_by(status="paused").first()
-    if paused is not None:
-        return {"status": "paused", "wave": paused.id,
-                "reason": paused.detail,
-                "hint": "coverage-expand --resume aborts the paused wave; "
-                        "the next tick plans a fresh one from the live gap set"}
+    # Pause is GROUP-SCOPED: a paused wave (e.g. fund endpoints dead from one
+    # egress) excludes its own (entity_type, frequency, state) group from
+    # planning, but other groups keep launching — one bad group must not idle
+    # the fleet. Past MAX_PAUSED_GROUPS paused groups the expansion stops
+    # entirely (fleet-wide cause, not one group).
+    paused_waves = session.query(CoverageWave).filter_by(status="paused").all()
+    if len(paused_waves) >= MAX_PAUSED_GROUPS:
+        return {"status": "paused", "waves": [w.id for w in paused_waves],
+                "reason": f"{len(paused_waves)} groups paused — fleet-wide cause",
+                "hint": "coverage-expand --resume aborts them"}
+    paused_groups = {(_group_key_of(w)) for w in paused_waves}
 
-    active = (session.query(CoverageWave)
-              .filter(CoverageWave.status.in_(_ACTIVE))
-              .order_by(CoverageWave.id).first())
-    if active is not None:
-        return _advance_wave(session, active, launcher, now)
+    actives = (session.query(CoverageWave)
+               .filter(CoverageWave.status.in_(_ACTIVE))
+               .order_by(CoverageWave.id).all())
+    busy_groups = {_group_key_of(w) for w in actives}
 
-    wave = plan_next_wave(session)
-    if wave is None:
-        return {"status": "no_gap", "detail": "gap set empty — coverage complete"}
-    return _advance_wave(session, wave, launcher, now)
+    out: dict = {"waves": [], "planned": []}
+    # 1. drive every active wave (launch due chunks, advance gates)
+    for wave in actives:
+        out["waves"].append(_advance_wave(session, wave, launcher, now))
+
+    # 2. fill remaining wave slots with NEW groups (cheap-first), launching
+    #    immediately — the capacity check inside _advance_wave bounds the fan-out
+    while len(actives) < MAX_ACTIVE_WAVES and capacity_headroom(session):
+        wave = plan_next_wave(session, exclude_groups=paused_groups | busy_groups)
+        if wave is None:
+            out["no_gap"] = "no eligible gap group left"
+            break
+        out["planned"].append(wave.id)
+        actives.append(wave)
+        out["waves"].append(_advance_wave(session, wave, launcher, now))
+        busy_groups.add(_group_key_of(wave))
+    return out
+
+
+def _group_key_of(wave: CoverageWave) -> tuple[str, str, str]:
+    return (wave.entity_type, wave.frequency_bucket, wave.coverage_state)
 
 
 def resume(session: Session) -> dict:

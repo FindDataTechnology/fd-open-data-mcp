@@ -64,6 +64,22 @@ def _seed(session, with_entities: bool = True, **manifest_kwargs) -> int:
             .filter_by(code="price.close", entity_type="stock").first().id)
 
 
+def _seed_group(session, entity_type: str, frequency: str, code: str) -> int:
+    """Register a second group's concept (entity_type x frequency bucket)."""
+    register_datasource(DatasourceManifest(
+        name=f"src-{code}", label=code,
+        functions=[FunctionSpec(
+            command=f"get_{code.replace('.', '_')}", frequency=frequency,
+            parameters=[],
+            columns=[ColumnSpec(name="val", type="float", frequency=frequency)],
+        )],
+        concepts=[ConceptHint(column="val", concept=code, entity_type=entity_type,
+                              unit="idx", frequency=frequency)],
+    ), session)
+    _seed_entities(session, f"src-{code}", entity_type=entity_type)
+    return session.query(Concept).filter_by(code=code).first().id
+
+
 def _obs(session, concept_id: int, date: str, entity_id: int = 1,
          granularity: str = "day") -> None:
     session.add(SemanticObservation(
@@ -191,6 +207,30 @@ def test_oversized_concept_set_splits_under_guardrail(session, monkeypatch):
         assert len(p.concept_ids) <= 3
 
 
+def test_chunks_split_to_target_for_parallelism(session, monkeypatch):
+    """Even a LEGAL-sized group splits into multiple ~TARGET-sized policies
+    so a wave fans out to several pods instead of one."""
+    cids = []
+    for i in range(6):
+        m = DatasourceManifest(
+            name=f"tsrc{i}", label=f"tsrc{i}",
+            functions=[FunctionSpec(
+                command=f"tget{i}", frequency="daily", parameters=[],
+                columns=[ColumnSpec(name="close", type="float", frequency="daily")],
+            )],
+            concepts=[ConceptHint(column="close", concept=f"price.t{i}",
+                                  entity_type="stock", unit="currency",
+                                  frequency="daily")],
+        )
+        register_datasource(m, session)
+        _seed_entities(session, f"tsrc{i}")
+        cids.append(session.query(Concept).filter_by(code=f"price.t{i}").first().id)
+    # ~1080 total cells (6 concepts x 2 entities x 90 days): target 400 -> >=3 chunks
+    monkeypatch.setattr(expander, "TARGET_CELLS", 400)
+    wave = expander.plan_next_wave(session)
+    assert wave is not None and len(wave.policy_ids) >= 3
+
+
 def test_snapshot_group_orders_before_per_date(session):
     snap_rows = [{"bulk_snapshot": True, "bulk_history": False},
                  {"bulk_snapshot": False, "bulk_history": False}]
@@ -241,7 +281,7 @@ def test_healthy_wave_completes_and_records_delta(session):
     assert wave is not None and wave.status == "verifying"
     # data landing is what lets the gate close the wave
     _obs(session, cid, dt.date.today().isoformat())
-    result = expander.expand_once(session, launcher=launcher)
+    result = expander.expand_once(session, launcher=launcher)["waves"][0]
     assert result["status"] == "done"
     assert result["rows_new"] == 10
     assert result["covered"] >= 1
@@ -250,22 +290,48 @@ def test_healthy_wave_completes_and_records_delta(session):
     assert wave.concepts_after >= 1
 
 
-def test_systemic_zero_yield_pauses_and_blocks(session, monkeypatch):
-    _seed(session)
+def test_systemic_zero_yield_pauses_only_its_group(session, monkeypatch):
+    """A paused wave excludes ITS group; a different group's wave still
+    launches — one bad group must not idle the fleet."""
+    _seed(session)  # stock/daily group
+    _seed_group(session, "country", "yearly", "gdp.total")  # country/yearly group
     launcher = _FakeLauncher()
     notified = []
     monkeypatch.setattr(expander, "_notify_pause",
                         lambda w, e: notified.append((w.id, e)))
-    wave = _run_wave_to_verifying(session, launcher, close_as="zero_yield",
-                                  rows_new=0)
-    assert wave is not None and wave.status == "verifying"
-    result = expander.expand_once(session, launcher=launcher)
-    assert result["status"] == "paused"
-    assert notified, "pause must push a notification"
-    # paused blocks all further launches: the next tick plans nothing
-    blocked = expander.expand_once(session, launcher=launcher)
-    assert blocked["status"] == "paused"
-    assert len(launcher.launched) == 1  # nothing new was launched while paused
+    monkeypatch.setattr(expander, "MAX_ACTIVE_WAVES", 2)
+    from fd_open_data_mcp.models import Cluster
+    session.add(Cluster(name="t-worker", api_server="https://k:6443",
+                        namespace="scraw", capacity=8, enabled=True))
+    session.commit()
+    # tick 1: both groups get waves; both launch one policy
+    expander.expand_once(session, launcher=launcher)
+    waves = session.query(CoverageWave).order_by(CoverageWave.id).all()
+    assert len(waves) == 2 and len(launcher.launched) == 2
+
+    # close wave 1's run as systemic failure; wave 2's run as success with rows
+    w1, w2 = waves
+    for run in session.query(PolicyRun).all():
+        if run.policy_id in (w1.policy_ids or []):
+            run.status, run.rows_new = "zero_yield", 0
+        else:
+            run.status, run.rows_new = "success", 10
+    session.commit()
+    # tick 2: both advance to verifying; tick 3: wave 1 pauses, wave 2 done
+    expander.expand_once(session, launcher=launcher)
+    expander.expand_once(session, launcher=launcher)
+
+    assert session.get(CoverageWave, w1.id).status == "paused"
+    assert notified
+    assert session.get(CoverageWave, w2.id).status == "done"
+    # and the paused group does not come back while paused
+    expander.expand_once(session, launcher=launcher)
+    dupes = session.query(CoverageWave).filter(
+        CoverageWave.entity_type == w1.entity_type,
+        CoverageWave.frequency_bucket == w1.frequency_bucket,
+        CoverageWave.coverage_state == w1.coverage_state,
+        CoverageWave.status.in_(("planned", "running", "verifying"))).all()
+    assert not dupes
 
 
 def test_pause_lets_inflight_runs_close_normally(session):
@@ -280,8 +346,11 @@ def test_pause_lets_inflight_runs_close_normally(session):
                              date_policy={"mode": "trailing", "days": 90},
                              status="paused", detail="test"))
     session.commit()
+    n_before = len(launcher.launched)
     result = expander.expand_once(session, launcher=launcher)
-    assert result["status"] == "paused"          # no new launches happen
+    # the paused group does not block the tick, and no NEW policy launches
+    # (the running wave has no unlaunched chunks left)
+    assert len(launcher.launched) == n_before
     runs = session.query(PolicyRun).all()
     assert all(r.status == "running" for r in runs)  # the open run is untouched
 
@@ -307,7 +376,7 @@ def test_guardrail_refusal_does_not_lose_wave(session):
     assert runs and runs[0].status == "failed"  # refusal recorded, per spec
     # next tick evaluates the failure and pauses (systemic zero-yield gate)
     result = expander.expand_once(session, launcher=_RefusingLauncher())
-    assert result["status"] == "paused"
+    assert result["waves"][0]["status"] == "paused"
 
 
 def test_resume_aborts_paused_and_replans(session):
@@ -322,7 +391,8 @@ def test_resume_aborts_paused_and_replans(session):
     assert session.get(CoverageWave, wave.id).status == "aborted"
     # next tick plans a FRESH wave; the still-missing concept is re-selected
     fresh = expander.expand_once(session, launcher=launcher)
-    assert fresh["wave"] != wave.id
+    new_ids = [w["wave"] for w in fresh["waves"]] + fresh["planned"]
+    assert new_ids and all(wid != wave.id for wid in new_ids)
 
 
 def test_counter_silence_does_not_pause_healthy_wave(session):
@@ -335,7 +405,7 @@ def test_counter_silence_does_not_pause_healthy_wave(session):
                                   rows_new=0)   # counters silent
     assert wave is not None and wave.status == "verifying"
     _obs(session, cid, dt.date.today().isoformat())  # data landed anyway
-    result = expander.expand_once(session, launcher=launcher)
+    result = expander.expand_once(session, launcher=launcher)["waves"][0]
     assert result["status"] == "done"
     assert result["rows_new"] >= 1            # observation-sourced evidence
     assert session.get(CoverageWave, wave.id).rows_new >= 1
@@ -346,7 +416,7 @@ def test_no_gap_means_no_wave(session):
     _obs(session, cid, dt.date.today().isoformat())   # covered + fresh
     assert expander.plan_next_wave(session) is None
     result = expander.expand_once(session, launcher=_FakeLauncher())
-    assert result["status"] == "no_gap"
+    assert result.get("no_gap") and not result["planned"]
 
 
 def test_expand_once_respects_capacity(session):
