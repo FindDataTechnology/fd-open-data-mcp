@@ -480,11 +480,13 @@ def _expand_locked(session: Session, launcher, now: dt.datetime) -> dict:
     # the fleet. Past MAX_PAUSED_GROUPS paused groups the expansion stops
     # entirely (fleet-wide cause, not one group).
     paused_waves = session.query(CoverageWave).filter_by(status="paused").all()
-    if len(paused_waves) >= MAX_PAUSED_GROUPS:
+    paused_groups = {_group_key_of(w) for w in paused_waves}
+    # count DISTINCT groups, not waves: two duplicate waves of one group
+    # (pre-lock race) must not read as "fleet-wide cause"
+    if len(paused_groups) >= MAX_PAUSED_GROUPS:
         return {"status": "paused", "waves": [w.id for w in paused_waves],
-                "reason": f"{len(paused_waves)} groups paused — fleet-wide cause",
+                "reason": f"{len(paused_groups)} distinct groups paused — fleet-wide cause",
                 "hint": "coverage-expand --resume aborts them"}
-    paused_groups = {(_group_key_of(w)) for w in paused_waves}
 
     actives = (session.query(CoverageWave)
                .filter(CoverageWave.status.in_(_ACTIVE))
