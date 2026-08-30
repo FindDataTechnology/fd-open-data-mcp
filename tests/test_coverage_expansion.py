@@ -325,6 +325,22 @@ def test_resume_aborts_paused_and_replans(session):
     assert fresh["wave"] != wave.id
 
 
+def test_counter_silence_does_not_pause_healthy_wave(session):
+    """Regression (found live on wave 2): a pod bug zeroed every run's
+    rows_new while 50k+ observations landed. The gate must accept the
+    observation table itself as yield evidence instead of pausing."""
+    cid = _seed(session)
+    launcher = _FakeLauncher()
+    wave = _run_wave_to_verifying(session, launcher, close_as="success",
+                                  rows_new=0)   # counters silent
+    assert wave is not None and wave.status == "verifying"
+    _obs(session, cid, dt.date.today().isoformat())  # data landed anyway
+    result = expander.expand_once(session, launcher=launcher)
+    assert result["status"] == "done"
+    assert result["rows_new"] >= 1            # observation-sourced evidence
+    assert session.get(CoverageWave, wave.id).rows_new >= 1
+
+
 def test_no_gap_means_no_wave(session):
     cid = _seed(session)
     _obs(session, cid, dt.date.today().isoformat())   # covered + fresh

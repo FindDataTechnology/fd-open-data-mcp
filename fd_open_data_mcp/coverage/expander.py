@@ -25,11 +25,13 @@ import logging
 import os
 import sys
 
+from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.coverage.inventory import coverage_inventory, gap_set
 from fd_open_data_mcp.models import (
     Cluster, CoverageWave, CrawlPolicy, EntitySourceIdentifier, PolicyRun,
+    SemanticObservation,
 )
 from fd_open_data_mcp.refresh.reconciler import (
     POLICY_MAX_FETCHES, _default_launcher, launch_policy,
@@ -326,7 +328,17 @@ def _advance_wave(session: Session, wave: CoverageWave,
                ("failed", "zero_yield", "refused")]
         rows_new = sum(r.rows_new or 0 for r in runs)
         frac_bad = len(bad) / len(runs) if runs else 1.0
-        systemic = (frac_bad >= PAUSE_FAILURE_FRACTION or rows_new == 0)
+        # Yield evidence is TWO-sourced (defense in depth): the run counters
+        # (which a pod bug can zero) AND the observation table itself — rows
+        # present for the wave's concepts count as yield even if the counter
+        # never reported. Found live on wave 2: a psycopg2 read-the-cursor bug
+        # zeroed every Scrapy run's rows_new while 53k rows landed.
+        obs_rows = (session.query(func.count())
+                    .filter(SemanticObservation.concept_id.in_(
+                        wave.concept_ids or [-1]))
+                    .scalar()) or 0
+        yield_evidence = rows_new > 0 or obs_rows > 0
+        systemic = (frac_bad >= PAUSE_FAILURE_FRACTION) or not yield_evidence
         if systemic:
             evidence = (f"{len(bad)}/{len(runs)} runs zero_yield/failed, "
                         f"rows_new={rows_new}")
@@ -341,12 +353,14 @@ def _advance_wave(session: Session, wave: CoverageWave,
             if r["concept_id"] in set(wave.concept_ids or [])
             and r["ever_crawled"])
         wave.status = "done"
-        wave.rows_new = rows_new
+        wave.rows_new = rows_new or obs_rows  # counter, else observation evidence
         wave.concepts_after = covered_now
-        wave.detail = (f"{len(runs)} runs, {len(bad)} bad, rows_new={rows_new}, "
+        wave.detail = (f"{len(runs)} runs, {len(bad)} bad, rows_new={rows_new} "
+                       f"(obs evidence {obs_rows}), "
                        f"covered {wave.concepts_before}->{covered_now}")
         session.commit()
-        return {"wave": wave.id, "status": "done", "rows_new": rows_new,
+        return {"wave": wave.id, "status": "done",
+                "rows_new": rows_new or obs_rows,
                 "covered": covered_now}
 
     return {"wave": wave.id, "status": wave.status}
