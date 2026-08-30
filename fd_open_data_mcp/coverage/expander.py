@@ -340,7 +340,8 @@ def _advance_wave(session: Session, wave: CoverageWave,
         if len(terminal) >= 2 and len(bad) == len(terminal):
             obs_rows = (session.query(func.count())
                         .filter(SemanticObservation.concept_id.in_(
-                            wave.concept_ids or [-1]))
+                            wave.concept_ids or [-1]),
+                            SemanticObservation.fetched_at > wave.created_at)
                         .scalar()) or 0
             if obs_rows == 0:
                 evidence = (f"early pause: {len(bad)}/{len(terminal)} terminal "
@@ -388,7 +389,8 @@ def _advance_wave(session: Session, wave: CoverageWave,
         # zeroed every Scrapy run's rows_new while 53k rows landed.
         obs_rows = (session.query(func.count())
                     .filter(SemanticObservation.concept_id.in_(
-                        wave.concept_ids or [-1]))
+                        wave.concept_ids or [-1]),
+                        SemanticObservation.fetched_at > wave.created_at)
                     .scalar()) or 0
         yield_evidence = rows_new > 0 or obs_rows > 0
         systemic = (frac_bad >= PAUSE_FAILURE_FRACTION) or not yield_evidence

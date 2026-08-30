@@ -473,6 +473,14 @@ def test_early_pause_stops_remaining_chunks(session, monkeypatch):
     for pid in pids[:2]:
         session.add(PolicyRun(policy_id=pid, status="zero_yield",
                               rows_new=0, started_at=dt.datetime.now(dt.timezone.utc)))
+    # lifetime obs rows exist (pre-wave, fetched_at BEFORE the wave) but
+    # NOTHING landed since the wave was created — evidence must be
+    # wave-scoped, not lifetime
+    session.add(SemanticObservation(
+        concept_id=1, entity_type="stock", entity_id=1, date="2020-01-01",
+        granularity="day", value="1.0", source_used="test-src",
+        fetched_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(days=3650),
+    ))
     session.commit()
 
     result = expander.expand_once(session, launcher=_FakeLauncher())
