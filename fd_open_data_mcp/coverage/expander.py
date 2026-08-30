@@ -398,6 +398,37 @@ def _advance_wave(session: Session, wave: CoverageWave,
 
 
 # ─── the tick ────────────────────────────────────────────────────────────────
+_PLANNING_LOCK = "coverage_expander_tick"
+
+
+def _try_planning_lock(session: Session) -> bool:
+    """Session-level advisory try-lock: only ONE expander process may
+    plan/drive at a time. A manual tick job raced a CronJob tick on
+    2026-08-30 and both planned the same group (waves 4+5, duplicate work)
+    — ``concurrencyPolicy: Forbid`` only guards cron-vs-cron. Non-PG
+    backends (unit tests) have no advisory locks: proceed unlocked."""
+    try:
+        from sqlalchemy import text
+        got = session.connection().execute(
+            text("SELECT pg_try_advisory_lock(hashtext(:k))"),
+            {"k": _PLANNING_LOCK},
+        ).scalar()
+        return bool(got)
+    except Exception:  # noqa: BLE001
+        return True
+
+
+def _release_planning_lock(session: Session) -> None:
+    try:
+        from sqlalchemy import text
+        session.connection().execute(
+            text("SELECT pg_advisory_unlock(hashtext(:k))"),
+            {"k": _PLANNING_LOCK},
+        ).scalar()
+    except Exception:  # noqa: BLE001
+        pass
+
+
 def expand_once(session: Session, launcher=None,
                 now: dt.datetime | None = None) -> dict:
     """One expander tick. Never raises past its own bookkeeping (a broken tick
@@ -406,6 +437,18 @@ def expand_once(session: Session, launcher=None,
     if now.tzinfo is None:
         now = now.replace(tzinfo=dt.timezone.utc)
     launcher = launcher or _default_launcher()
+
+    if not _try_planning_lock(session):
+        return {"status": "skipped",
+                "reason": "another expander tick holds the planning lock"}
+    try:
+        return _expand_locked(session, launcher, now)
+    finally:
+        _release_planning_lock(session)
+
+
+def _expand_locked(session: Session, launcher, now: dt.datetime) -> dict:
+    """The tick body, invoked under the planning lock."""
 
     # Pause is GROUP-SCOPED: a paused wave (e.g. fund endpoints dead from one
     # egress) excludes its own (entity_type, frequency, state) group from
