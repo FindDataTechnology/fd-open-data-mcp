@@ -497,6 +497,85 @@ class PolicyRun(Base):
         }
 
 
+class DataCensus(Base):
+    """Latest per-store observation census (add-shard-aware-coverage).
+
+    One row per observation store: the local master table plus each shard
+    foreign server. Written ONLY by an explicit census refresh (panel action
+    or CLI); pages read these rows and never collect. Shard figures come
+    from catalog/stats probes over dblink (approximate_row_count + chunk
+    catalog) — never fact-table scans (runbook OOM landmine).
+    """
+    __tablename__ = "data_census"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    store = Column(String(64), unique=True, nullable=False, index=True)
+    kind = Column(String(16), nullable=False)          # local | shard
+    approx_rows = Column(Integer, nullable=True)       # exact for local, ≈ for shards
+    exact = Column(Boolean, nullable=False, default=False)
+    total_size_bytes = Column(Integer, nullable=True)
+    chunks = Column(Integer, nullable=True)            # Timescale chunks (shards)
+    time_range_end = Column(String(64), nullable=True) # chunk-catalog max(range_end)
+    error = Column(String, nullable=True)              # probe failure (e.g. no dblink)
+    sampled_at = Column(DateTime, nullable=False, default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "store": self.store, "kind": self.kind,
+            "approx_rows": self.approx_rows, "exact": self.exact,
+            "total_size_bytes": self.total_size_bytes, "chunks": self.chunks,
+            "time_range_end": self.time_range_end, "error": self.error,
+            "sampled_at": self.sampled_at.isoformat() if self.sampled_at else None,
+        }
+
+
+class CoverageWave(Base):
+    """Crawl-coverage expansion wave bookkeeping (expand-crawl-coverage).
+
+    One row per planned backfill wave: a (entity_type, frequency,
+    coverage_state) slice of the gap set, materialized as one or more
+    DISABLED backfill ``crawl_policies`` (``policy_ids``) launched through
+    ``launch_policy`` (the policy_trigger_now path). Wave policies are
+    created with ``enabled=False`` so the reconciler's cron path never fires
+    them — expansion launches are always one-shot and explicit.
+
+    Status flow: planned -> running -> verifying -> done | paused. ``paused``
+    blocks all further wave launches until an operator resumes (spec
+    crawl-coverage-expansion: wave gating on verified yield).
+    """
+    __tablename__ = "coverage_waves"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_type = Column(String(32), nullable=False, index=True)
+    frequency_bucket = Column(String(32), nullable=False)   # concept.frequency value
+    coverage_state = Column(String(16), nullable=False)     # never | stale
+    concept_ids = Column(JSONB, nullable=False)             # wave scope (may shrink on re-plan)
+    date_policy = Column(JSONB, nullable=False)
+    mode = Column(String(16), nullable=False, default="per_date")
+    status = Column(String(16), nullable=False, default="planned", index=True)
+    policy_ids = Column(JSONB, nullable=True)               # crawl_policies created for this wave
+    rows_new = Column(Integer, nullable=True)               # aggregated at verification
+    concepts_before = Column(Integer, nullable=True)        # covered count at wave creation
+    concepts_after = Column(Integer, nullable=True)         # covered count at closure
+    detail = Column(String, nullable=True)                 # pause reason / gate evidence
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "entity_type": self.entity_type,
+            "frequency_bucket": self.frequency_bucket,
+            "coverage_state": self.coverage_state,
+            "concept_ids": self.concept_ids, "date_policy": self.date_policy,
+            "mode": self.mode, "status": self.status,
+            "policy_ids": self.policy_ids, "rows_new": self.rows_new,
+            "concepts_before": self.concepts_before, "concepts_after": self.concepts_after,
+            "detail": self.detail,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
 # --- multi-cluster registry (add-multi-cluster-master-db) --------------------
 # The master control plane dispatches crawl plans to a dynamic fleet of worker
 # clusters (cloud servers). Adding a server = insert a row + mount its kubeconfig

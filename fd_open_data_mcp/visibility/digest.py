@@ -50,7 +50,7 @@ def _tz_offset(tz: ZoneInfo) -> str:
     return f"UTC{off[:3]}:{off[3:]}" if off else "UTC"
 
 
-def format_digest(snap: dict, tz: ZoneInfo) -> tuple[str, str]:
+def format_digest(snap: dict, tz: ZoneInfo, coverage: dict | None = None) -> tuple[str, str]:
     """Render the snapshot into a (title, body) WeChat message."""
     gen = snap.get("generated_at", "")[:10] or dt.datetime.now(tz).date().isoformat()
     title = f"📊 SCRAW DAILY · {gen}"
@@ -118,6 +118,30 @@ def format_digest(snap: dict, tz: ZoneInfo) -> tuple[str, str]:
             ent_s = f"plan error: {item['error'][:40]}"
         lines.append(f"  {hm}  {item['policy']:<22} → {ds}   {ent_s}")
 
+    # --- COVERAGE PROGRESS (expand-crawl-coverage) ---
+    # Same read-only inventory as `coverage_report`; renders the baseline even
+    # when expansion never ran (spec crawl-visibility: digest without expansion
+    # still renders).
+    if coverage is not None:
+        lines.append("")
+        cov = coverage.get("summary", {})
+        covered, routable = cov.get("covered", 0), cov.get("routable", 0)
+        pct = f" ({covered / routable * 100:.1f}%)" if routable else ""
+        wave = coverage.get("wave") or {}
+        wave_s = ""
+        if wave:
+            wave_s = (f" · wave w{wave.get('id')} {wave.get('status')} "
+                      f"{wave.get('entity_type')}/{wave.get('frequency_bucket')}"
+                      f"/{wave.get('coverage_state')}")
+            if wave.get("rows_new") is not None:
+                wave_s += f" +{wave['rows_new']} rows"
+        lines.append(f"COVER — {covered}/{routable} routable covered{pct}{wave_s}")
+        per_type = cov.get("per_entity_type", {})
+        type_bits = [f"{et} {a['covered']}/{a['routable']}"
+                     for et, a in list(per_type.items())[:6]]
+        if type_bits:
+            lines.append("  " + " · ".join(type_bits))
+
     return title, "\n".join(lines)
 
 
@@ -129,13 +153,36 @@ def digest_once(session=None) -> dict:
     try:
         tz = ZoneInfo(_DIGEST_TZ)
         snap = snapshot.build_snapshot(session)
-        title, body = format_digest(snap, tz)
+        coverage = _coverage_section(session)
+        title, body = format_digest(snap, tz, coverage)
         get_notifier().send(title, body, level="info")
         snap["message"] = {"title": title, "body": body}
         return snap
     finally:
         if own_session:
             session.close()
+
+
+def _coverage_section(session) -> dict | None:
+    """The digest's coverage-progress inputs, best-effort: the shared gap
+    inventory summary plus the active/most-recent wave. A coverage failure
+    degrades to omitting the section (the digest itself must not fail)."""
+    try:
+        from fd_open_data_mcp.coverage.inventory import coverage_summary
+        from fd_open_data_mcp.models import CoverageWave
+
+        out = {"summary": coverage_summary(session)}
+        wave = (session.query(CoverageWave)
+                .filter(CoverageWave.status.in_(("planned", "running", "verifying")))
+                .order_by(CoverageWave.id.desc()).first())
+        if wave is None:
+            wave = (session.query(CoverageWave)
+                    .order_by(CoverageWave.id.desc()).first())
+        out["wave"] = wave.toDict() if wave else None
+        return out
+    except Exception:  # noqa: BLE001
+        logger.warning("coverage section skipped", exc_info=True)
+        return None
 
 
 def main() -> None:

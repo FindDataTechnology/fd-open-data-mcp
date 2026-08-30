@@ -42,6 +42,13 @@ from fd_open_data_mcp.visibility_tools import register_visibility_tools
 
 register_visibility_tools(mcp)
 
+# Attach the coverage-expansion tools (expand-crawl-coverage): read-only
+# `coverage_report` gap inventory, shared with the `coverage` CLI and the
+# digest's coverage section.
+from fd_open_data_mcp.coverage_tools import register_coverage_tools
+
+register_coverage_tools(mcp)
+
 
 def _session():
     return get_database().get_session()

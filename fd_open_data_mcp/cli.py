@@ -148,6 +148,27 @@ def panel_cmd(host, port):
     uvicorn.run(app, host=host, port=port)
 
 
+@cli.command("census")
+def census_cmd():
+    """Refresh the per-store data census (add-shard-aware-coverage).
+
+    Local master: exact count + catalog size. Shards: catalog/stats probes
+    over dblink (approximate rows, chunk count, time-range end) — never a
+    fact-table scan. Requires the dblink extension on the master.
+    """
+    import json
+
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.visibility.census import refresh_census
+
+    s = get_database().get_session()
+    try:
+        out = refresh_census(s)
+    finally:
+        s.close()
+    click.echo(json.dumps(out, ensure_ascii=False, indent=1))
+
+
 @cli.command("import-catalog")
 @click.argument("provider", required=False)
 def import_catalog_cmd(provider):
@@ -600,6 +621,64 @@ def crawl_status_cmd():
     s = get_database().get_session()
     try:
         _echo(snapshot.build_snapshot(s))
+    finally:
+        s.close()
+
+
+# ─── crawl coverage expansion (expand-crawl-coverage) ────────────────────────
+@cli.command("coverage")
+@click.option("--entity-type", default=None, help="Filter to one entity type.")
+@click.option("--detail", is_flag=True, default=False,
+              help="List per-concept rows (default: aggregated summary only).")
+@click.option("--gap-only", is_flag=True, default=False,
+              help="With --detail: list only never-crawled/stale concepts.")
+def coverage_cmd(entity_type, detail, gap_only):
+    """Coverage gap inventory: covered vs routable concepts (read-only).
+
+    Same query as the ``coverage_report`` MCP tool and the digest's coverage
+    section: per (concept x entity_type) routability, ever-crawled, watermark,
+    and staleness vs the concept's frequency.
+    """
+    from fd_open_data_mcp.coverage.inventory import (
+        coverage_inventory, coverage_summary,
+    )
+    from fd_open_data_mcp.db import get_database
+
+    s = get_database().get_session()
+    try:
+        summary = coverage_summary(s)
+        if not detail:
+            _echo(summary)
+            return
+        rows = coverage_inventory(s, entity_type=entity_type)
+        if gap_only:
+            rows = [r for r in rows if not r["ever_crawled"] or r["stale"]]
+        _echo({"summary": summary, "concepts": rows})
+    finally:
+        s.close()
+
+
+@cli.command("coverage-expand")
+@click.option("--resume", is_flag=True, default=False,
+              help="Abort paused waves so the next tick plans a fresh wave "
+                   "from the live gap set (operator resume).")
+def coverage_expand_cmd(resume):
+    """Run one coverage-expansion tick (the CronJob entrypoint).
+
+    Drives the active wave (launch due policy chunks, advance the gate), or
+    plans the next wave from the live gap inventory. Waves launch through
+    launch_policy — the same single-flight/plan-size-guardrail path as
+    policy_trigger_now.
+    """
+    from fd_open_data_mcp.coverage import expander
+    from fd_open_data_mcp.db import get_database
+
+    s = get_database().get_session()
+    try:
+        if resume:
+            _echo(expander.resume(s))
+        else:
+            _echo(expander.expand_once(s))
     finally:
         s.close()
 
