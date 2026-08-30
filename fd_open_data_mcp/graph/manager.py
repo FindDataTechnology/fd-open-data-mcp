@@ -56,11 +56,13 @@ class EntityGraphManager:
         """
         current_time = time.time()
 
-        # Check if cache is valid
+        # Check if cache is valid. A _graph with no _last_load was injected
+        # (tests / programmatic seeding), not loaded from the DB — honor it
+        # as-is; only DB loads expire against the TTL.
         if (not force_reload and
             self._graph is not None and
-            self._last_load is not None and
-            current_time - self._last_load < self.cache_ttl):
+            (self._last_load is None or
+             current_time - self._last_load < self.cache_ttl)):
             return self._graph
 
         # Load graph from database

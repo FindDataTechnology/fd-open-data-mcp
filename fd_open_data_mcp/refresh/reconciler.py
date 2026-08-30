@@ -938,7 +938,41 @@ def reconcile_once(
         summary[{"launched": "launched", "skipped": "skipped",
                  "refused": "refused"}[status]].append(result)
 
+    # 3. census upkeep (add-census-auto-refresh): refresh the per-store data
+    # census when the newest sample is stale. Last step of the tick and
+    # best-effort — a census problem must never break crawling.
+    _refresh_census_if_stale(session)
+
     return summary
+
+
+# shared with the panel's staleness marker (add-shard-aware-coverage D3)
+CENSUS_STALE_HOURS = 24
+
+
+def _refresh_census_if_stale(session: Session) -> bool:
+    """Refresh the data census when stale/absent. Returns True if refreshed.
+
+    Best-effort by contract (spec: census failure never breaks the tick):
+    anything raised here (missing table on an unmigrated DB, no dblink, dead
+    shard) degrades to a warning line.
+    """
+    try:
+        from fd_open_data_mcp.models import DataCensus
+        from fd_open_data_mcp.visibility import census as census_mod
+
+        latest = session.query(func.max(DataCensus.sampled_at)).scalar()
+        if latest is not None:
+            age_h = (dt.datetime.utcnow() - latest).total_seconds() / 3600
+            if age_h < CENSUS_STALE_HOURS:
+                return False
+        census_mod.refresh_census(session)
+        logger.info("census refreshed (was %s)",
+                    "stale" if latest is not None else "absent")
+        return True
+    except Exception as e:  # noqa: BLE001
+        logger.warning("census refresh skipped: %s", e)
+        return False
 
 
 def _default_launcher() -> Launcher:

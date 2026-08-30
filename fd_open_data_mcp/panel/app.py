@@ -34,6 +34,8 @@ DATE_POLICY_MODES = ["since_last", "trailing", "explicit"]
 # liveness banner threshold (design: a suspended scheduler must be visible).
 POLL_SECONDS = 15
 RECONCILER_QUIET_HOURS = 24
+# census rows older than this show a staleness marker (add-shard-aware-coverage)
+CENSUS_STALE_HOURS = 24
 
 
 def _session():
@@ -287,6 +289,25 @@ def create_app() -> FastAPI:
             s.close()
 
     # ── data coverage ──────────────────────────────────────────────────────
+    def _census_rows(s) -> list[dict]:
+        """Stored census rows + staleness flags; never collects (design D3)."""
+        from fd_open_data_mcp.visibility.census import latest_census
+
+        out = []
+        now = dt.datetime.utcnow()
+        for r in latest_census(s):
+            sampled = r.get("sampled_at")
+            age_h = None
+            if sampled:
+                t = dt.datetime.fromisoformat(sampled)
+                if t.tzinfo is not None:
+                    t = t.replace(tzinfo=None)
+                age_h = (now - t).total_seconds() / 3600
+            r["age_hours"] = round(age_h, 1) if age_h is not None else None
+            r["stale"] = age_h is None or age_h > CENSUS_STALE_HOURS
+            out.append(r)
+        return out
+
     @app.get("/panel/data", response_class=HTMLResponse)
     def data_coverage(request: Request, concept_id: int | None = None,
                       entity_type: str = ""):
@@ -297,13 +318,27 @@ def create_app() -> FastAPI:
             rows = coverage_by_concept(s, concept_id=concept_id,
                                        entity_type=entity_type or None)
             total_rows = sum(r["rows"] for r in rows)
+            census_rows = _census_rows(s)
             return templates.TemplateResponse(
                 request, "data.html",
                 {"coverage": rows, "total_rows": total_rows,
                  "n_concepts": len(rows),
+                 "census": census_rows,
+                 "census_total": sum(r.get("approx_rows") or 0 for r in census_rows),
                  "concept_id": concept_id, "entity_type": entity_type})
         finally:
             s.close()
+
+    @app.post("/panel/data/census/refresh")
+    def data_census_refresh():
+        from fd_open_data_mcp.visibility.census import refresh_census
+
+        s = _session()
+        try:
+            refresh_census(s)
+        finally:
+            s.close()
+        return RedirectResponse("/panel/data", status_code=303)
 
     @app.get("/panel/policies", response_class=HTMLResponse)
     def policy_list(request: Request):

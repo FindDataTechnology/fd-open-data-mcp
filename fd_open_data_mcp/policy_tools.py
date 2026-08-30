@@ -309,23 +309,30 @@ def register_policy_tools(mcp: FastMCP) -> None:
     def data_stats(
         concept_id: int | None = None,
         entity_type: str | None = None,
-    ) -> list[dict]:
-        """Per-concept observation coverage from ``semantic_observations``.
+    ) -> dict:
+        """Per-concept observation coverage + per-store data census.
 
-        Answers "how much data do we have and how fresh is it": row count,
-        latest observation date, distinct sources used, and most recent fetch
-        per concept, ordered by row count descending. Read-only; the same
-        aggregation powers the panel's ``/panel/data`` page.
+        Answers "how much data do we have and how fresh is it": per concept —
+        row count, latest observation date, distinct sources, most recent
+        fetch (local master table); plus a ``stores`` section from the latest
+        data census (local master exact + each shard's catalog-based
+        estimate, chunk count, data time-range end). Read-only: census rows
+        are READ, never collected (refresh via the panel action or the
+        ``census`` CLI). The same data powers the panel's ``/panel/data`` page.
 
         Args:
-            concept_id: Restrict to one concept.
-            entity_type: Restrict to one entity type (stock/fund/country/...).
+            concept_id: Restrict the per-concept listing to one concept.
+            entity_type: Restrict the per-concept listing to one entity type.
         """
         from fd_open_data_mcp.visibility.coverage import coverage_by_concept
+        from fd_open_data_mcp.visibility.census import latest_census
 
         s = _session()
         try:
-            return coverage_by_concept(s, concept_id=concept_id,
-                                       entity_type=entity_type)
+            return {
+                "concepts": coverage_by_concept(s, concept_id=concept_id,
+                                                entity_type=entity_type),
+                "stores": latest_census(s),
+            }
         finally:
             s.close()

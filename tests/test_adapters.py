@@ -25,7 +25,7 @@ class _DummyAdapter:
     def build_params(self, fn, identifier, date, binding):
         return {"symbol": identifier, "the_date": date, "indicator": binding.column.name}
 
-    def extract_value(self, result, column_name, date):
+    def extract_value(self, result, column_name, date, identifier=None):
         # deliberate non-legacy extraction: read by position, not date-index
         if isinstance(result, pd.DataFrame) and len(result) > 0:
             return ("adapter", result.iloc[0, 0], column_name, date)
@@ -52,6 +52,19 @@ def _make_function(session, command="get_hist", source_name="test-src"):
     session.flush()
     session.commit()
     return fn, col
+
+
+@pytest.fixture(autouse=True)
+def _restore_builtin_adapters():
+    """Re-register the built-in adapters after every test.
+
+    Several tests here ``_REGISTRY.clear()`` to assert from a blank slate, and
+    the last clear used to leak into other test files (e.g. test_read_range
+    fell back to legacy param-building with no start_date). ``register_all()``
+    is the documented way to re-populate (idempotent overwrite).
+    """
+    yield
+    ak_mod.register_all()
 
 
 def test_registry_register_and_lookup():

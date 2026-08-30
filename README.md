@@ -221,11 +221,15 @@ python -m fd_open_data_mcp.refresh.reconciler
 | `/panel` | Observability home: fleet health, running runs with live attempted/new counters (htmx polling, 15 s), recent finished runs with yield classification, next-up schedule, stale/suspended-scheduler banner |
 | `/panel/policies` | Target management: list, enable/disable, editor with fetch estimate |
 | `/panel/runs`, `/panel/runs/{id}` | Run list + drill-down: compiled plan, yield vs plan cells, job ref, window-approximated fetch outcomes |
-| `/panel/data` | Data coverage: per-concept rows / latest date / sources / last fetch over `semantic_observations` |
+| `/panel/data` | Data coverage: per-concept rows / latest date / sources / last fetch over `semantic_observations`, plus a per-store census (local master exact + each shard's catalog estimate, chunk count, data time-range end) with a refresh action |
 
 The same reads exist as MCP tools: `crawl_status` (snapshot incl. `next_runs`)
-and `data_stats` (per-concept coverage) — panel and tools share one query
-layer (`visibility/snapshot.py`, `visibility/coverage.py`).
+and `data_stats` (per-concept coverage + stores census) — panel and tools share
+one query layer (`visibility/snapshot.py`, `visibility/coverage.py`,
+`visibility/census.py`). The shard census is collected only by explicit
+refresh (`POST /panel/data/census/refresh` or `fd-open-data-mcp census`) using
+catalog-only probes over `dblink` (run `CREATE EXTENSION dblink` on the master
+once); it never scans shard fact tables (runbook OOM constraint).
 
 **Policy example** (via panel, or MCP `policy_create`):
 

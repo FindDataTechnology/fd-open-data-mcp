@@ -51,15 +51,22 @@ def test_run_edgar_identity_unset(monkeypatch):
     assert "EDGAR_IDENTITY" in str(ei.value)
 
 
-def test_seed_edgar_us_stock(monkeypatch, session):
-    """US stocks get an edgar identifier (= ticker); non-US stocks do not."""
-    from fd_open_data_mcp.entities import resolver, taxonomy
+def test_seed_edgar_us_stock(session):
+    """US stocks get an edgar identifier (= ticker); non-US stocks do not.
 
-    monkeypatch.setattr(taxonomy, "list_entities", lambda et, db=None: (
-        [{"id": 1, "code": "AAPL", "market": "US", "exchange": "NASDAQ"},
-         {"id": 2, "code": "600519", "market": "CN", "exchange": "SSE"}]
-        if et == "stock" else []
-    ))
+    seed_stock_identifiers reads the ontology ``entities`` table (spec
+    stock-source-identity) — seed Entity rows instead of mocking taxonomy.
+    """
+    from fd_open_data_mcp.entities import resolver
+    from fd_open_data_mcp.models import Entity
+
+    session.add_all([
+        Entity(id=1, entity_type="stock", code="AAPL", name_en="Apple",
+               metadata_json={"market": "US", "exchange": "NASDAQ"}),
+        Entity(id=2, entity_type="stock", code="600519", name_zh="贵州茅台",
+               metadata_json={"market": "CN", "exchange": "SSE"}),
+    ])
+    session.commit()
     r = resolver.seed_stock_identifiers(session)
     assert r["edgar"] == 1
     assert resolver.resolve_identifier(session, "stock", 1, "edgar") == "AAPL"

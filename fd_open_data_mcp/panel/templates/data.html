@@ -2,7 +2,31 @@
 {% block title %}Data coverage · Crawl Control Center{% endblock %}
 {% block content %}
 <h2>Data coverage</h2>
-<p class="muted">{{ n_concepts }} concepts with observations · {{ total_rows }} total rows in semantic_observations</p>
+<p class="muted">{{ n_concepts }} concepts with observations · {{ total_rows }} local rows ·
+   {% if census %}{{ "{:,}".format(census_total) }} across all stores{% else %}census not yet sampled{% endif %}</p>
+
+{% if census %}
+<h3>Stores <span class="muted" style="font-size:.8rem">(latest census)</span></h3>
+<form method="post" action="/panel/data/census/refresh">
+  <button class="btn" type="submit">Refresh census</button>
+</form>
+<table>
+  <tr><th>Store</th><th>Kind</th><th>Rows</th><th>Size</th><th>Chunks</th><th>Data through</th><th>Sampled</th></tr>
+  {% for c in census %}
+  <tr>
+    <td>{{ c.store }}</td>
+    <td class="muted">{{ c.kind }}</td>
+    <td>{% if c.error %}<span class="badge failed" title="{{ c.error }}">error</span>
+        {% elif c.approx_rows is none %}—
+        {% else %}{% if not c.exact %}≈{% endif %}{{ "{:,}".format(c.approx_rows) }}{% endif %}</td>
+    <td class="muted">{% if c.total_size_bytes %}{{ (c.total_size_bytes / 1073741824) | round(1) }} GB{% else %}—{% endif %}</td>
+    <td class="muted">{{ c.chunks or '—' }}</td>
+    <td>{{ c.time_range_end or '—' }}</td>
+    <td class="muted">{% if c.stale %}<span class="badge refused">stale</span> {% endif %}{{ c.age_hours if c.age_hours is not none else '—' }}h ago</td>
+  </tr>
+  {% endfor %}
+</table>
+{% endif %}
 
 <form method="get" action="/panel/data">
   <div class="pill-row">

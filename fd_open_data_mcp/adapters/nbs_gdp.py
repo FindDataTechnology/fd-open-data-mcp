@@ -57,27 +57,41 @@ def _fetch_gdp_quarterly(params: dict) -> pd.DataFrame:
 
 
 def _fetch_gdp_quarterly_akshare(start_year: int) -> pd.DataFrame:
-    """Fallback to akshare for GDP data."""
+    """Fallback to akshare for GDP data.
+
+    akshare renamed the NBS accessors over time: ``gdp_yearly`` (removed) →
+    ``macro_china_gdp`` (quarterly, columns 季度 / 国内生产总值-绝对值 in 亿元;
+    also carries cumulative 第1-2季度 rows that must be dropped). Support both
+    so the fallback works across installed versions.
+    """
     try:
         import akshare as ak
-        
-        df = ak.gdp_yearly()
-        df = df[df['年份'].astype(str).astype(int) >= start_year]
-        
-        df['period'] = df['年份'].astype(str) + '-Q4'
-        df['value'] = df['国内生产总值(亿元)']
-        df['indicator_code'] = 'A0201'
-        df['indicator_name'] = '国内生产总值 (GDP)'
-        df['indicator_type'] = 'gdp_quarterly'
+
+        if hasattr(ak, "macro_china_gdp"):
+            df = ak.macro_china_gdp()
+            q = df["季度"].astype(str).str.extract(r"^(?P<year>\d{4})年第(?P<q>\d)季度$")
+            df = df.loc[q.dropna().index]
+            df["period"] = q["year"] + "Q" + q["q"]
+            df["value"] = pd.to_numeric(df["国内生产总值-绝对值"], errors="coerce")
+        else:  # legacy akshare (before the macro_* rename)
+            df = ak.gdp_yearly()
+            df = df[df["年份"].astype(int) >= start_year]
+            df["period"] = df["年份"].astype(str) + "-Q4"
+            df["value"] = pd.to_numeric(df["国内生产总值(亿元)"], errors="coerce")
+
+        df = df[df["period"].str.slice(0, 4).astype(int) >= start_year]
+        df["indicator_code"] = 'A0201'
+        df["indicator_name"] = '国内生产总值 (GDP)'
+        df["indicator_type"] = 'gdp_quarterly'
         df['unit'] = '亿元'
         df['source'] = 'akshare_fallback'
         df['fetched_at'] = datetime.now(timezone.utc).isoformat()
-        
-        return df[['period', 'value', 'indicator_code', 'indicator_name', 
+
+        return df[['period', 'value', 'indicator_code', 'indicator_name',
                    'indicator_type', 'unit', 'source', 'fetched_at']]
-        
+
     except ImportError:
-        raise FetchError("akshare not installed, cannot fetch GDP data", 
+        raise FetchError("akshare not installed, cannot fetch GDP data",
                        source='nbs-gdp', command='get_gdp_quarterly')
     except Exception as e:
         raise FetchError(f"GDP fetch failed: {e}", source='nbs-gdp', command='get_gdp_quarterly')

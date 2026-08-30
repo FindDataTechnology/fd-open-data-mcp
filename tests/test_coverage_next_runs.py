@@ -180,12 +180,15 @@ def test_data_stats_tool_registered_and_matches_coverage(session):
 
     payload = _unwrap(asyncio.run(mcp.call_tool("data_stats", {})))
     direct = coverage_by_concept(session)
-    assert [r["rows"] for r in payload] == [r["rows"] for r in direct]
-    assert payload[0]["latest_date"] == "2026-08-27"
+    assert [r["rows"] for r in payload["concepts"]] == [r["rows"] for r in direct]
+    assert payload["concepts"][0]["latest_date"] == "2026-08-27"
+    # stores section present (read-only: no census rows -> empty list)
+    assert payload["stores"] == []
 
     fpayload = _unwrap(asyncio.run(mcp.call_tool(
         "data_stats", {"entity_type": "country"})))
-    assert len(fpayload) == 1 and fpayload[0]["code"] == "gdp.nominal"
+    assert len(fpayload["concepts"]) == 1
+    assert fpayload["concepts"][0]["code"] == "gdp.nominal"
 
 
 def test_crawl_status_tool_includes_next_runs(session, monkeypatch):
