@@ -443,3 +443,42 @@ def test_expand_once_respects_capacity(session):
     expander.expand_once(session, launcher=counting)
     # headroom = max(capacity,1)=1, open_runs=1 -> no launch this tick
     assert counting.n == 0
+
+
+def test_early_pause_stops_remaining_chunks(session, monkeypatch):
+    """With 2 terminal all-bad runs and zero obs evidence, the wave pauses
+    BEFORE launching its remaining chunks (stops the dead-endpoint burn)."""
+    _seed(session)
+    notified = []
+    monkeypatch.setattr(expander, "_notify_pause",
+                        lambda w, e: notified.append((w.id, e)))
+    # hand-build a wave with 3 policies; 2 already terminal-bad, 1 unlaunched
+    pids = []
+    for i in range(3):
+        p = CrawlPolicy(name=f"covexp-w99-p{i + 1}", enabled=False,
+                        concept_ids=[1], entity_type="stock",
+                        date_policy={"mode": "trailing", "days": 90},
+                        frequency="daily", mode="per_date",
+                        cron_expr="0 0 31 2 *", timezone="UTC")
+        session.add(p)
+        session.flush()
+        pids.append(p.id)
+    w = CoverageWave(entity_type="stock", frequency_bucket="daily",
+                     coverage_state="never", concept_ids=[1],
+                     date_policy={"mode": "trailing", "days": 90},
+                     status="running", policy_ids=pids,
+                     concepts_before=0)
+    session.add(w)
+    session.flush()
+    for pid in pids[:2]:
+        session.add(PolicyRun(policy_id=pid, status="zero_yield",
+                              rows_new=0, started_at=dt.datetime.now(dt.timezone.utc)))
+    session.commit()
+
+    result = expander.expand_once(session, launcher=_FakeLauncher())
+    wrow = session.get(CoverageWave, w.id)
+    assert wrow.status == "paused"
+    assert notified
+    launched = [r for r in session.query(PolicyRun).all()
+                if r.policy_id == pids[2]]
+    assert not launched  # the remaining chunk was never launched

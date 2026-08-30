@@ -329,6 +329,28 @@ def _advance_wave(session: Session, wave: CoverageWave,
         launched = {r.policy_id for r in runs}
         unlaunched = [pid for pid in (wave.policy_ids or [])
                       if pid not in launched]
+        # EARLY pause: if ≥2 runs already terminated ALL bad and the
+        # observation table shows zero evidence for the wave's concepts, the
+        # rest of the wave would only burn the fleet on the same dead
+        # endpoints — pause now instead of after every chunk drains
+        # (found live: 12-chunk waves relaunched for hours at 99% errors).
+        terminal = [r for r in runs if r.status != "running"]
+        bad = [r for r in terminal
+               if r.status in ("failed", "zero_yield", "refused", "aborted")]
+        if len(terminal) >= 2 and len(bad) == len(terminal):
+            obs_rows = (session.query(func.count())
+                        .filter(SemanticObservation.concept_id.in_(
+                            wave.concept_ids or [-1]))
+                        .scalar()) or 0
+            if obs_rows == 0:
+                evidence = (f"early pause: {len(bad)}/{len(terminal)} terminal "
+                            f"runs all bad, obs evidence 0")
+                wave.status = "paused"
+                wave.detail = evidence
+                session.commit()
+                _notify_pause(wave, evidence)
+                logger.warning("wave %d %s", wave.id, evidence)
+                return {"wave": wave.id, "status": "paused", "reason": evidence}
         # launch more of the wave while concurrency allows and checks pass
         while (unlaunched and len(open_runs) < MAX_WAVE_POLICIES
                and capacity_headroom(session) and db_size_ok(session)):
