@@ -365,9 +365,17 @@ def _advance_wave(session: Session, wave: CoverageWave,
                 open_runs.append("launched")
         session.commit()
         runs = _wave_runs(session, wave)
-        if all(r.status != "running" for r in runs) and runs:
-            # all launched policies terminal -> evidence collection begins;
-            # `verifying` holds for one tick so a late pod flush still lands
+        launched_now = {r.policy_id for r in runs}
+        pending = [pid for pid in (wave.policy_ids or [])
+                   if pid not in launched_now]
+        # verifying only when EVERY policy carries a run: with capacity full
+        # the launch loop legitimately stalls at 2/242 launched, and a bare
+        # all-terminal check pushed the wave to verifying (then paused) with
+        # 240 chunks never tried (found live on wave 16)
+        if (runs and not pending
+                and all(r.status != "running" for r in runs)):
+            # evidence collection begins; `verifying` holds for one tick so a
+            # late pod flush still lands
             wave.status = "verifying"
             wave.detail = f"verifying {len(runs)} terminal run(s)"
             session.commit()
@@ -393,7 +401,12 @@ def _advance_wave(session: Session, wave: CoverageWave,
                         SemanticObservation.fetched_at > wave.created_at)
                     .scalar()) or 0
         yield_evidence = rows_new > 0 or obs_rows > 0
-        systemic = (frac_bad >= PAUSE_FAILURE_FRACTION) or not yield_evidence
+        # pause needs BOTH a bad run fraction AND zero yield: akshare-class
+        # endpoints fail most per-request probes yet still land thousands of
+        # rows — pausing those waves starves expansion (found live: waves
+        # 14/15/16 paused holding 8k / 41k / 1.7k rows)
+        systemic = (frac_bad >= PAUSE_FAILURE_FRACTION
+                    and not yield_evidence)
         if systemic:
             evidence = (f"{len(bad)}/{len(runs)} runs zero_yield/failed, "
                         f"rows_new={rows_new}")

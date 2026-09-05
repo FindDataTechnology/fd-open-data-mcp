@@ -104,10 +104,11 @@ def test_inventory_reports_never_crawled_gap(session):
 def test_inventory_is_read_only_and_current(session):
     cid = _seed(session)
     coverage_inventory(session)
-    _obs(session, cid, "2026-08-30")
+    today = dt.date.today().isoformat()
+    _obs(session, cid, today)
     row = next(r for r in coverage_inventory(session) if r["concept_id"] == cid)
     assert row["ever_crawled"] is True
-    assert row["watermark"] == "2026-08-30"
+    assert row["watermark"] == today
     # covered + fresh concept leaves the gap set (resumability primitive)
     assert all(r["concept_id"] != cid for r in gap_set(session))
 
@@ -417,6 +418,60 @@ def test_no_gap_means_no_wave(session):
     assert expander.plan_next_wave(session) is None
     result = expander.expand_once(session, launcher=_FakeLauncher())
     assert result.get("no_gap") and not result["planned"]
+
+
+def test_partial_launch_does_not_reach_verifying(session, monkeypatch):
+    """Capacity-full ticks stall the launch loop with chunks unlaunched; the
+    wave must stay `running` until every chunk carries a run — a bare
+    all-terminal check pushed wave 16 to verifying (then paused) at 2/242
+    launched (found live 2026-09-01)."""
+    pids = []
+    for i in range(2):
+        p = CrawlPolicy(name=f"covexp-w98-p{i + 1}", enabled=False,
+                        concept_ids=[1], entity_type="stock",
+                        date_policy={"mode": "trailing", "days": 90},
+                        frequency="daily", mode="per_date",
+                        cron_expr="0 0 31 2 *", timezone="UTC")
+        session.add(p)
+        session.flush()
+        pids.append(p.id)
+    w = CoverageWave(entity_type="stock", frequency_bucket="daily",
+                     coverage_state="never", concept_ids=[1],
+                     date_policy={"mode": "trailing", "days": 90},
+                     status="running", policy_ids=pids, concepts_before=0)
+    session.add(w)
+    session.flush()
+    session.add(PolicyRun(policy_id=pids[0], status="zero_yield",
+                          rows_new=0,
+                          started_at=dt.datetime.now(dt.timezone.utc)))
+    session.commit()
+
+    monkeypatch.setattr(expander, "capacity_headroom", lambda s: False)
+    result = expander.expand_once(session, launcher=_FakeLauncher())
+    res = next(x for x in result["waves"] if x["wave"] == w.id)
+    assert res["status"] == "running"          # the bug made this "verifying"
+    assert session.get(CoverageWave, w.id).status == "running"
+
+    monkeypatch.setattr(expander, "capacity_headroom", lambda s: True)
+    expander.expand_once(session, launcher=_FakeLauncher())
+    # the pending chunk launched once capacity returned
+    assert any(r.policy_id == pids[1]
+               for r in session.query(PolicyRun).all())
+
+
+def test_yield_evidence_blocks_pause_despite_bad_fraction(session):
+    """Endpoints failing most probes still land rows: a zero_yield-marked run
+    whose counter carried rows must complete the wave, not pause it (found
+    live: waves 14/15/16 paused holding 8k / 41k / 1.7k rows)."""
+    cid = _seed(session)
+    launcher = _FakeLauncher()
+    wave = _run_wave_to_verifying(session, launcher, close_as="zero_yield",
+                                  rows_new=40932)
+    assert wave is not None and wave.status == "verifying"
+    result = expander.expand_once(session, launcher=launcher)["waves"][0]
+    assert result["status"] == "done"
+    assert result["rows_new"] == 40932
+    assert session.get(CoverageWave, wave.id).status == "done"
 
 
 def test_expand_once_respects_capacity(session):
