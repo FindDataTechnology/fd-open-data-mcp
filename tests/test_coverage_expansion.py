@@ -459,6 +459,51 @@ def test_partial_launch_does_not_reach_verifying(session, monkeypatch):
                for r in session.query(PolicyRun).all())
 
 
+def test_launch_refusal_does_not_pause_wave(session):
+    """A cluster-side refusal (no eligible worker cluster) is not a fetch
+    attempt: the chunk reads as unlaunched and retries when capacity frees
+    instead of feeding the early-pause gate (found live: wave 27 paused on
+    15 launch refusals while america was merely full)."""
+    pids = []
+    for i in range(2):
+        p = CrawlPolicy(name=f"covexp-w97-p{i + 1}", enabled=False,
+                        concept_ids=[1], entity_type="stock",
+                        date_policy={"mode": "trailing", "days": 90},
+                        frequency="daily", mode="per_date",
+                        cron_expr="0 0 31 2 *", timezone="UTC")
+        session.add(p)
+        session.flush()
+        pids.append(p.id)
+    w = CoverageWave(entity_type="stock", frequency_bucket="daily",
+                     coverage_state="never", concept_ids=[1],
+                     date_policy={"mode": "trailing", "days": 90},
+                     status="running", policy_ids=pids, concepts_before=0)
+    session.add(w)
+    from fd_open_data_mcp.models import Cluster
+    session.add(Cluster(name="t-worker", api_server="https://k:6443",
+                        namespace="scraw", capacity=4, enabled=True))
+    session.commit()
+
+    class _NoCluster:
+        def launch(self, plan, policy):
+            raise RuntimeError("no eligible worker cluster for plan "
+                               "(check clusters table: tags/capacity)")
+        def poll(self, job_ref):
+            return "unknown"
+
+    for _ in range(2):  # two full ticks of refusals
+        result = expander.expand_once(session, launcher=_NoCluster())
+        res = next(x for x in result["waves"] if x["wave"] == w.id)
+        assert res["status"] == "running"   # the bug made this "paused"
+    assert session.get(CoverageWave, w.id).status == "running"
+
+    good = _FakeLauncher()
+    expander.expand_once(session, launcher=good)
+    # both chunks launch once a cluster is eligible again
+    assert len(good.launched) == 2
+    assert session.get(CoverageWave, w.id).status == "running"
+
+
 def test_yield_evidence_blocks_pause_despite_bad_fraction(session):
     """Endpoints failing most probes still land rows: a zero_yield-marked run
     whose counter carried rows must complete the wave, not pause it (found

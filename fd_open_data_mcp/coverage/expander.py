@@ -306,14 +306,26 @@ def plan_next_wave(session: Session,
 
 # ─── gate: drive / advance the active wave ───────────────────────────────────
 def _wave_runs(session: Session, wave: CoverageWave) -> list[PolicyRun]:
-    """Latest run per wave policy (a policy may have retried runs)."""
+    """Latest run per wave policy (a policy may have retried runs).
+
+    Launch-refusal rows (``launch failed: no eligible worker cluster``) are
+    skipped: they record a cluster-side refusal, not a fetch attempt, so
+    counting them as terminal runs starved waves into false early-pauses
+    (found live: wave 27 paused on 15 launch refusals while america was
+    merely full). A refused policy reads as unlaunched and retries next
+    tick when capacity frees. Other launcher failures (e.g. a broken
+    broker) stay visible — those SHOULD pause the wave.
+    """
     runs: dict[int, PolicyRun] = {}
     for pid in (wave.policy_ids or []):
         latest = (session.query(PolicyRun)
                   .filter_by(policy_id=pid)
                   .order_by(PolicyRun.id.desc()).first())
-        if latest is not None:
-            runs[pid] = latest
+        if latest is None:
+            continue
+        if "no eligible worker cluster" in (latest.detail or ""):
+            continue
+        runs[pid] = latest
     return list(runs.values())
 
 
@@ -363,6 +375,13 @@ def _advance_wave(session: Session, wave: CoverageWave,
                         result.get("status"))
             if result.get("status") in ("launched",):
                 open_runs.append("launched")
+            elif (result.get("status") == "refused"
+                  and "no eligible worker cluster" in (result.get("reason") or "")):
+                # cluster-side refusal: no cluster can host ANY chunk this
+                # tick (capacity/tags/circuits). Trying the remaining chunks
+                # only re-compiles plans to fail identically — stop and wait
+                # for the next tick (found live: wave 27 burned 15 chunks).
+                break
         session.commit()
         runs = _wave_runs(session, wave)
         launched_now = {r.policy_id for r in runs}
