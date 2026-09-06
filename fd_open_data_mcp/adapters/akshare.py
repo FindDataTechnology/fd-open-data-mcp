@@ -730,6 +730,22 @@ class FundManagerEmAdapter(_FundRankFrameAdapter):
         return super().extract_value(result, column_name, date, identifier=identifier)
 
 
+class FundEtfSpotEmAdapter(_FundRankFrameAdapter):
+    """``ak.fund_etf_spot_em`` - 东财 ETF spot snapshot (no params).
+
+    Signature: ``()`` - one paginated call (~16 upstream requests, slow) returns
+    the full ETF cross-section (~1.6k rows): 代码 / 最新价 / 成交量 / 成交额 /
+    总市值 / 流通市值 ... Row-picked by ``代码`` == identifier. Found live
+    2026-09-07: concept 238's 成交额 binding crashed EVERY fetch with
+    ``unexpected keyword argument`` because the legacy no-adapter fallback
+    passed ``symbol``/``date`` kwargs the function does not accept — hence this
+    adapter. Also marked ``bulk_snapshot`` in the catalog: one call covers all
+    entities, so the snapshot-first planner collapses the fan-out.
+    """
+
+    _KEY_COL = "代码"
+
+
 # --- bulk-snapshot cross-sections (fix-silent-zero-yield-crawls D6) ---------------
 # One call returns the FULL entity cross-section for one date, on hosts verified
 # reachable from the crawl cluster (datacenter.eastmoney.com / fund.eastmoney.com
@@ -801,6 +817,7 @@ def register_all() -> None:
     register("akshare", "stock_cash_flow_sheet_by_report_em", StockCashFlowSheetAdapter())
     # fund adapters (add-fund-crawl-control-center, task 3.3)
     register("akshare", "fund_open_fund_info_em", FundOpenFundInfoEmAdapter())
+    register("akshare", "fund_etf_spot_em", FundEtfSpotEmAdapter())
     register("akshare", "fund_etf_hist_em", FundEtfHistEmAdapter())
     register("akshare", "fund_lof_hist_em", FundLofHistEmAdapter())
     register("akshare", "fund_etf_hist_sina", FundEtfHistSinaAdapter())
