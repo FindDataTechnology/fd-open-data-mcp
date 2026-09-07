@@ -441,6 +441,11 @@ class MultiClusterLauncher:
              "value": "http://$(K8S_NODE_IP):8080"},
             {"name": "PYTHONUNBUFFERED", "value": "1"},
         ]
+        # Provider credentials flow from the control plane's own env into every
+        # job (datacommons requires DC_API_KEY; add other *_API_KEY vars here).
+        dc_key = os.environ.get("DC_API_KEY")
+        if dc_key:
+            env.append({"name": "DC_API_KEY", "value": dc_key})
         return env
 
     @staticmethod
