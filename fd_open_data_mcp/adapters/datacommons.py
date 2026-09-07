@@ -85,11 +85,30 @@ class DataCommonsAdapter:
         if not variable:
             raise FetchError("datacommons binding has no column name (variable DCID)",
                              source="datacommons", command=fn.command)
+        d = self._dc_date(date)
         return {
             "variable_dcids": [variable],
             "entity_dcids": [identifier],
-            "date": date or "LATEST",
+            "date": d or "LATEST",
         }
+
+    @staticmethod
+    def _dc_date(date: str) -> str:
+        """Normalize a canonical ``YYYY-MM-DD`` date to DC's observation form.
+
+        DC yearly variables are dated ``"YYYY"`` and monthly ones ``"YYYY-MM"``
+        — querying with the planner's canonical ``1996-12-31`` returns ZERO
+        observations (found live 2026-09-07: fetches HTTP-200'd but extracted
+        nothing). Year-end canonicals map to the year, month-start canonicals
+        to the month; anything else passes through unchanged.
+        """
+        if not date or date in ("LATEST",) or len(date) != 10:
+            return date
+        if date.endswith("12-31"):
+            return date[:4]
+        if date.endswith("-01"):
+            return date[:7]
+        return date
 
     def build_range_params(
         self, fn: Any, identifier: str, start: str, end: str, binding: Optional[Any] = None,
