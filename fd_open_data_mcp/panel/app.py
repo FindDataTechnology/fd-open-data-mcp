@@ -1,5 +1,5 @@
 """Panel routes: observability home + partials, run detail, data coverage,
-policy list + toggles, editor with estimate preview, runs view.
+policy list + toggles, editor with estimate preview, runs view, proxy ops.
 
 Served standalone (``uvicorn fd_open_data_mcp.panel.app:app`` / CLI ``panel``)
 or mounted under /panel via ``mcp.http_app().mount``. All routes hit the same
@@ -8,7 +8,9 @@ or mounted under /panel via ``mcp.http_app().mount``. All routes hit the same
 from __future__ import annotations
 
 import datetime as dt
+import json
 import os
+import urllib.request
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request
@@ -19,7 +21,8 @@ from sqlalchemy import func
 
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.models import (
-    Cluster, Concept, CrawlPolicy, FetchLog, PolicyRun,
+    BanRule, Cluster, Concept, CrawlPolicy, FetchLog, PolicyRun, Proxy,
+    SourceProxyHealth, SourceRateLimit,
 )
 from fd_open_data_mcp.visibility import snapshot as _snapshot
 
@@ -36,6 +39,23 @@ POLL_SECONDS = 15
 RECONCILER_QUIET_HOURS = 24
 # census rows older than this show a staleness marker (add-shard-aware-coverage)
 CENSUS_STALE_HOURS = 24
+
+# panel-ops-console 6.x: frequency-template proposals. The cron proposals and
+# the daily trailing-1d date policy are input aids only — the saved artifact is
+# an ordinary policy row (design D7).
+_TEMPLATE_CRON = {
+    "daily": "0 6 * * *", "weekly": "0 6 * * 1", "monthly": "0 6 1 * *",
+    "quarterly": "0 6 1 1,4,7,10 *", "yearly": "0 6 1 1 *",
+}
+
+
+def _template_concepts(s, frequency: str) -> list[Concept]:
+    """Hygiene-filtered concept pre-selection for a frequency template:
+    enabled concept cadence = the concept's own frequency; deprecated and
+    unverified concepts are excluded (spec crawl-control-center)."""
+    return (s.query(Concept)
+            .filter_by(frequency=frequency, deprecated=False, verified=True)
+            .order_by(Concept.code).all())
 
 
 def _session():
@@ -97,6 +117,57 @@ def _parse_date_policy(
     if mode == "explicit":
         return {"mode": "explicit", "start": start or None, "end": end or None}
     return {"mode": "since_last"}
+
+
+# ── proxy operations (panel-ops-console) ─────────────────────────────────────
+def _mask_auth(auth: str | None) -> str:
+    """Mask a proxy credential for ANY panel rendering — the full value must
+    never appear in a panel response body (spec crawl-control-center)."""
+    if not auth:
+        return "—"
+    head = auth.split(":", 1)[0][:2]
+    return f"{head}•••••"
+
+
+def _proxy_control_ready() -> bool:
+    """Management actions need the proxy-control API; without it the proxy
+    pages degrade to read-only (design D1, ships-dark philosophy)."""
+    return bool(os.environ.get("PROXY_CONTROL_URL"))
+
+
+def _proxy_control(method: str, path: str, payload: dict | None = None) -> dict:
+    """POST/PUT a management action to the proxy-control API.
+
+    Raises RuntimeError on any transport/API failure; callers turn that into a
+    redirect-with-error rather than a 500."""
+    base = os.environ.get("PROXY_CONTROL_URL", "").rstrip("/")
+    if not base:
+        raise RuntimeError("PROXY_CONTROL_URL is not configured")
+    body = json.dumps(payload or {}).encode()
+    headers = {"Content-Type": "application/json"}
+    mgmt_token = os.environ.get("PROXY_CONTROL_TOKEN")
+    if mgmt_token:
+        headers["X-Management-Token"] = mgmt_token
+    req = urllib.request.Request(f"{base}{path}", data=body, method=method,
+                                 headers=headers)
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return json.load(r)
+    except Exception as e:  # noqa: BLE001 - normalized for the panel UX
+        raise RuntimeError(f"proxy-control {method} {path} failed: {e}") from e
+
+
+def _proxy_redirect(msg: str = "", err: str = "") -> RedirectResponse:
+    from urllib.parse import quote
+    q = f"?msg={quote(msg)}" if msg else (f"?err={quote(err)}" if err else "")
+    return RedirectResponse(f"/panel/proxy{q}", status_code=303)
+
+
+def _run_launcher():
+    """The reconciler's default launcher, resolved lazily (run cancel needs
+    its delete path; module-level so tests can stub it)."""
+    from fd_open_data_mcp.refresh.reconciler import _default_launcher
+    return _default_launcher()
 
 
 def _policy_from_form(form) -> dict:
@@ -223,6 +294,21 @@ def create_app() -> FastAPI:
                 s.close()
             return templates.TemplateResponse(
                 request, "partial_next.html", {"upcoming": rows})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
+
+    @app.get("/panel/partials/missed", response_class=HTMLResponse)
+    def partial_missed(request: Request):
+        """Missed-run board (panel-ops-console): enabled policies whose latest
+        expected fire passed the grace interval with no successful run."""
+        try:
+            s = _session()
+            try:
+                rows = _snapshot.missed_runs(s)
+            finally:
+                s.close()
+            return templates.TemplateResponse(
+                request, "partial_missed.html", {"missed": rows})
         except Exception as e:  # noqa: BLE001
             return _unavailable(e)
 
@@ -365,7 +451,8 @@ def create_app() -> FastAPI:
             rendered = []
             for r in runs_rows:
                 d = {"id": r.id, "policy": policies.get(r.policy_id, f"#{r.policy_id}"),
-                     "policy_id": r.policy_id, "status": r.status, "job_ref": r.job_ref,
+                     "policy_id": r.policy_id, "origin": r.origin,
+                     "status": r.status, "job_ref": r.job_ref,
                      "started_at": r.started_at.isoformat() if r.started_at else None,
                      "finished_at": r.finished_at.isoformat() if r.finished_at else None,
                      "detail": r.detail}
@@ -376,6 +463,46 @@ def create_app() -> FastAPI:
                 {"runs": rendered, "status": status, "policies": policies})
         finally:
             s.close()
+
+    # ── run control (panel-ops-console) ─────────────────────────────────────
+    @app.post("/panel/runs/{run_id}/cancel")
+    def run_cancel(run_id: int):
+        """Cancel an open run: CAS row close + best-effort Job deletion."""
+        from fd_open_data_mcp.refresh.runs import cancel_run
+
+        s = _session()
+        try:
+            out = cancel_run(s, run_id, actor="panel",
+                             launcher=_run_launcher())
+        finally:
+            s.close()
+        if out["status"] == "cancelled":
+            return RedirectResponse("/panel/runs", status_code=303)
+        if out["status"] == "not_found":
+            raise HTTPException(404, f"run {run_id} not found")
+        raise HTTPException(409, f"run {run_id} already finished "
+                                 f"({out.get('current_status')}); nothing cancelled")
+
+    @app.post("/panel/clusters/{cluster_id}/capacity")
+    async def cluster_capacity(cluster_id: int, request: Request):
+        """Edit a cluster's max-concurrent-open-runs; effective next tick."""
+        form = await request.form()
+        try:
+            value = int(form.get("capacity", ""))
+        except (TypeError, ValueError):
+            raise HTTPException(400, "capacity must be an integer")
+        if value < 0:
+            raise HTTPException(400, "capacity must be >= 0")
+        s = _session()
+        try:
+            c = s.get(Cluster, cluster_id)
+            if c is None:
+                raise HTTPException(404, f"cluster {cluster_id} not found")
+            c.capacity = value
+            s.commit()
+        finally:
+            s.close()
+        return RedirectResponse("/panel", status_code=303)
 
     # ── editor ─────────────────────────────────────────────────────────────
     def _editor_context(s, policy: CrawlPolicy | None):
@@ -391,10 +518,35 @@ def create_app() -> FastAPI:
         }
 
     @app.get("/panel/policies/new", response_class=HTMLResponse)
-    def policy_new(request: Request):
+    def policy_new(request: Request, msg: str = "", err: str = ""):
         s = _session()
         try:
-            return templates.TemplateResponse(request, "policy_edit.html", _editor_context(s, None))
+            ctx = _editor_context(s, None)
+            ctx.update(msg=msg, err=err)
+            return templates.TemplateResponse(request, "policy_edit.html", ctx)
+        finally:
+            s.close()
+
+    @app.get("/panel/policies/template", response_class=HTMLResponse)
+    def policy_template(request: Request, frequency: str = "daily"):
+        """Frequency-driven policy template (panel-ops-console, design D7):
+        pre-selects the hygiene-filtered concepts of that frequency and
+        proposes the matching cron + date policy. Input aid only — the saved
+        artifact is an ordinary policy row."""
+        s = _session()
+        try:
+            concepts = _template_concepts(s, frequency)
+            pseudo = {
+                "frequency": frequency, "mode": "per_date", "enabled": True,
+                "cron_expr": _TEMPLATE_CRON.get(frequency, "0 6 * * *"),
+                "date_policy": ({"mode": "trailing", "days": 1}
+                                if frequency == "daily" else {"mode": "since_last"}),
+            }
+            ctx = _editor_context(s, None)
+            ctx.update(policy=pseudo, is_template=True,
+                       template_frequency=frequency,
+                       selected={c.id for c in concepts})
+            return templates.TemplateResponse(request, "policy_edit.html", ctx)
         finally:
             s.close()
 
@@ -462,26 +614,32 @@ def create_app() -> FastAPI:
         return RedirectResponse(f"/panel/runs?policy_id={policy_id}", status_code=303)
 
     # ── estimate preview (htmx partial) ────────────────────────────────────
+    def _compile_plan(s, payload: dict):
+        """Compile a payload (as produced by _policy_from_form) into a plan —
+        shared by the estimate preview and the ad-hoc launch."""
+        from fd_open_data_mcp.crawl.plan import EntityScope
+        from fd_open_data_mcp.crawl.planner import plan_crawl
+        from fd_open_data_mcp.refresh.reconciler import build_date_range
+
+        class _P:  # transient policy-like for build_date_range
+            date_policy = payload["date_policy"]
+            frequency = payload["frequency"]
+        dr, since_last = build_date_range(_P(), dt.date.today())
+        return plan_crawl(
+            s, payload["concept_ids"],
+            EntityScope(entity_type=payload["entity_type"], entity_ids=payload["entity_ids"]),
+            dr, since_last=since_last, source_filter=payload["source_filter"],
+            mode=payload["mode"])
+
     @app.post("/panel/estimate", response_class=HTMLResponse)
     async def estimate(request: Request):
         payload = _policy_from_form(await request.form())
         s = _session()
         try:
-            from fd_open_data_mcp.crawl.plan import EntityScope
-            from fd_open_data_mcp.crawl.planner import plan_crawl
             from fd_open_data_mcp.refresh.reconciler import (
-                POLICY_MAX_FETCHES, build_date_range, estimate_fetches)
+                POLICY_MAX_FETCHES, estimate_fetches)
 
-            class _P:  # transient policy-like for build_date_range
-                date_policy = payload["date_policy"]
-                frequency = payload["frequency"]
-            import datetime as _dt
-            dr, since_last = build_date_range(_P(), _dt.date.today())
-            plan = plan_crawl(
-                s, payload["concept_ids"],
-                EntityScope(entity_type=payload["entity_type"], entity_ids=payload["entity_ids"]),
-                dr, since_last=since_last, source_filter=payload["source_filter"],
-                mode=payload["mode"])
+            plan = _compile_plan(s, payload)
             est = estimate_fetches(s, plan)
             return templates.TemplateResponse(
                 request, "estimate.html", {
@@ -493,6 +651,135 @@ def create_app() -> FastAPI:
             return HTMLResponse(f"<span style='color:#c0392b'>estimate failed: {e}</span>")
         finally:
             s.close()
+
+    # ── ad-hoc one-off crawl (panel-ops-console) ─────────────────────────────
+    @app.post("/panel/crawl/adhoc")
+    async def crawl_adhoc(request: Request):
+        """Run a plan draft once, without creating a policy (design D3)."""
+        from urllib.parse import quote
+
+        from fd_open_data_mcp.refresh.runs import launch_adhoc
+
+        payload = _policy_from_form(await request.form())
+        s = _session()
+        try:
+            plan = _compile_plan(s, payload)
+            result = launch_adhoc(s, plan, _run_launcher())
+        except Exception as e:  # noqa: BLE001 - bad form input: show, don't 500
+            return RedirectResponse(f"/panel/policies/new?err={quote(str(e))}",
+                                    status_code=303)
+        finally:
+            s.close()
+        if result["status"] == "launched":
+            return RedirectResponse("/panel/runs?status=running", status_code=303)
+        return RedirectResponse(
+            f"/panel/policies/new?err={quote(result['reason'])}", status_code=303)
+
+    # ── proxy operations (panel-ops-console) ─────────────────────────────────
+    @app.get("/panel/proxy", response_class=HTMLResponse)
+    def proxy_page(request: Request, msg: str = "", err: str = ""):
+        s = _session()
+        try:
+            proxies = s.query(Proxy).order_by(Proxy.provider, Proxy.id).all()
+            providers: dict[str, dict] = {}
+            for p in proxies:
+                bucket = providers.setdefault(p.provider or "(unowned)", {
+                    "name": p.provider or "(unowned)", "active": 0, "retired": 0})
+                bucket["retired" if p.status == "retired" else "active"] += 1
+            limits = s.query(SourceRateLimit).order_by(SourceRateLimit.source).all()
+            rules = (s.query(BanRule)
+                     .order_by(BanRule.source, BanRule.priority.desc()).limit(200).all())
+            return templates.TemplateResponse(request, "proxy.html", {
+                "msg": msg, "err": err,
+                "mgmt_ready": _proxy_control_ready(),
+                "providers": sorted(providers.values(), key=lambda b: b["name"]),
+                "proxies": [
+                    {"id": p.id, "scheme": p.scheme, "ip": p.ip, "port": p.port,
+                     "auth_masked": _mask_auth(p.auth), "status": p.status,
+                     "label": p.label, "provider": p.provider or "(unowned)"}
+                    for p in proxies],
+                "rate_limits": [
+                    {"source": r.source, "max_qps": r.max_qps,
+                     "max_concurrent": r.max_concurrent,
+                     "throttled": (r.max_qps or 0) > 0}
+                    for r in limits],
+                "ban_rules": [
+                    {"source": r.source, "rule_type": r.rule_type,
+                     "pattern": r.pattern[:60], "classification": r.classification,
+                     "enabled": r.enabled}
+                    for r in rules],
+            })
+        finally:
+            s.close()
+
+    @app.get("/panel/partials/proxy", response_class=HTMLResponse)
+    def partial_proxy(request: Request):
+        """Polled circuit-health matrix: per-(source, proxy) state from the
+        shared cold table (near-realtime — hot state lives in proxy-redis)."""
+        try:
+            s = _session()
+            try:
+                rows = (s.query(SourceProxyHealth)
+                        .order_by(SourceProxyHealth.source, SourceProxyHealth.proxy_id)
+                        .limit(500).all())
+            finally:
+                s.close()
+            return templates.TemplateResponse(
+                request, "partial_proxy.html", {"circuits": [h.toDict() for h in rows]})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
+
+    @app.post("/panel/proxy/import")
+    async def proxy_import(request: Request):
+        form = await request.form()
+        try:
+            out = _proxy_control("POST", "/management/proxies/import", {
+                "provider": form.get("provider") or "paid-static",
+                "text": form.get("text", ""),
+            })
+        except RuntimeError as e:
+            return _proxy_redirect(err=str(e))
+        return _proxy_redirect(msg=(
+            f"imported {out.get('imported', 0)}, skipped {out.get('skipped', 0)}"
+            + (f", updated {out['updated']}" if out.get("updated") else "")))
+
+    @app.post("/panel/proxy/circuits/reset")
+    async def proxy_circuit_reset(request: Request):
+        form = await request.form()
+        try:
+            _proxy_control("POST", "/management/circuits/reset", {
+                "source": form.get("source"), "proxy_id": int(form.get("proxy_id", 0)),
+                "actor": form.get("actor") or "panel"})
+        except (RuntimeError, TypeError, ValueError) as e:
+            return _proxy_redirect(err=str(e))
+        return _proxy_redirect(msg=f"circuit {form.get('source')}/{form.get('proxy_id')} -> HALF_OPEN")
+
+    @app.post("/panel/proxy/rate-limits/{source}")
+    async def proxy_rate_limit(source: str, request: Request):
+        form = await request.form()
+        raw_qps = (form.get("max_qps") or "").strip()
+        try:
+            max_qps = float(raw_qps) if raw_qps else 0.0  # blank = no throttling
+            _proxy_control("PUT", f"/management/rate-limits/{source}", {
+                "max_qps": max_qps,
+                "max_concurrent": int(form.get("max_concurrent") or 4)})
+        except (RuntimeError, TypeError, ValueError) as e:
+            return _proxy_redirect(err=str(e))
+        return _proxy_redirect(msg=f"rate limit for {source} saved")
+
+    # NOTE: the dynamic {proxy_id} route goes LAST so the literal paths above
+    # are never shadowed by a partial int-converter match.
+    @app.post("/panel/proxy/{proxy_id}/status")
+    async def proxy_set_status(proxy_id: int, request: Request):
+        form = await request.form()
+        try:
+            out = _proxy_control("POST", f"/management/proxies/{proxy_id}/status", {
+                "status": form.get("status"), "actor": form.get("actor") or "panel"})
+        except RuntimeError as e:
+            return _proxy_redirect(err=str(e))
+        if out.get("status") == "not_found":
+            return _proxy_redirect(err=f"proxy {proxy_id} not found")
+        return _proxy_redirect(msg=f"proxy {proxy_id} -> {out.get('proxy_status')}")
 
     return app
 

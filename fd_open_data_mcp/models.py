@@ -463,8 +463,11 @@ class PolicyRun(Base):
     __tablename__ = "policy_runs"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    policy_id = Column(Integer, ForeignKey("crawl_policies.id", ondelete="CASCADE"), nullable=False, index=True)
-    status = Column(String(32), nullable=False, default="running")  # running / success / failed / refused
+    # panel-ops-console: nullable for ad-hoc (origin='adhoc') runs launched
+    # without a persistent policy row; policy runs keep a non-null policy_id.
+    policy_id = Column(Integer, ForeignKey("crawl_policies.id", ondelete="CASCADE"), nullable=True, index=True)
+    origin = Column(String(16), nullable=False, default="policy")  # policy / adhoc
+    status = Column(String(32), nullable=False, default="running")  # running / success / failed / refused / cancelled
     plan_json = Column(JSONB, nullable=True)               # the compiled CrawlPlan
     job_ref = Column(String(255), nullable=True)           # "{cluster_name}/{job}" or scrapyd jobid
     cluster_id = Column(Integer, ForeignKey("clusters.id", ondelete="SET NULL"),
@@ -479,13 +482,15 @@ class PolicyRun(Base):
     plan_cells = Column(Integer, nullable=True)
     rows_attempted = Column(Integer, nullable=True)
     rows_new = Column(Integer, nullable=True)
+    cancelled_by = Column(String(128), nullable=True)  # actor identity when status='cancelled'
 
     policy = relationship("CrawlPolicy", back_populates="runs")
     cluster = relationship("Cluster")
 
     def toDict(self) -> dict:
         return {
-            "id": self.id, "policy_id": self.policy_id, "status": self.status,
+            "id": self.id, "policy_id": self.policy_id, "origin": self.origin,
+            "status": self.status,
             "plan_json": self.plan_json, "job_ref": self.job_ref,
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
@@ -494,6 +499,7 @@ class PolicyRun(Base):
             "plan_cells": self.plan_cells,
             "rows_attempted": self.rows_attempted,
             "rows_new": self.rows_new,
+            "cancelled_by": self.cancelled_by,
         }
 
 
@@ -636,6 +642,11 @@ class Proxy(Base):
     label = Column(String(64), nullable=True)
     cluster_id = Column(Integer, ForeignKey("clusters.id", ondelete="SET NULL"),
                          nullable=True, index=True)         # per-cluster direct egress (None = shared/legacy)
+    # panel-ops-console: mirror the provider columns fd-proxy-service migration
+    # 001 added to the same physical table (the crawler never writes them; the
+    # panel proxy page groups rows by owner).
+    provider = Column(String(64), nullable=True)   # owning provider (gost-own, paid-static, …)
+    provider_meta = Column(JSONB, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     retired_at = Column(DateTime, nullable=True)
 

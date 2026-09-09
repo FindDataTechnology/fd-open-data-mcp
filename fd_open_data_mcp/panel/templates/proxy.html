@@ -1,0 +1,128 @@
+{% extends "base.html" %}
+{% block title %}Proxy · Crawl Control Center{% endblock %}
+{% block content %}
+<h2>Proxy / Egress</h2>
+
+{% if msg %}<div class="banner" style="background:#dcfce7;color:#166534;border:1px solid #bbf7d0">{{ msg }}</div>{% endif %}
+{% if err %}<div class="banner warn">✗ {{ err }}</div>{% endif %}
+
+{% if not mgmt_ready %}
+<div class="banner warn">
+  Management actions are disabled — <code>PROXY_CONTROL_URL</code> is not set in the
+  panel environment. This page is read-only; egress observability below still reflects
+  the shared master DB.
+</div>
+{% endif %}
+
+<section class="card" style="margin-bottom:1rem">
+  <h3>Egress health (per source × proxy)</h3>
+  <div hx-get="/panel/partials/proxy" hx-trigger="load, every {{ poll_seconds }}s">
+    <p class="muted">loading…</p>
+  </div>
+  <p class="muted">Cold-table snapshot (near-realtime); hot state lives in proxy-redis.</p>
+</section>
+
+<div class="home-grid">
+  <section class="card">
+    <h3>Providers</h3>
+    <table>
+      <tr><th>Provider</th><th>Active</th><th>Retired</th></tr>
+      {% for pr in providers %}
+      <tr><td>{{ pr.name }}</td><td>{{ pr.active }}</td><td>{{ pr.retired }}</td></tr>
+      {% else %}
+      <tr><td colspan="3" class="muted">No provider-owned proxy rows.</td></tr>
+      {% endfor %}
+    </table>
+  </section>
+
+  <section class="card">
+    <h3>Import static endpoints</h3>
+    <form method="post" action="/panel/proxy/import">
+      <label>Provider name</label>
+      <input type="text" name="provider" value="paid-static">
+      <label>Endpoints — one per line: <code>ip|port|user|pass</code></label>
+      <textarea name="text" rows="5" style="width:100%;font-family:monospace"
+                placeholder="122.0.0.1|8080|user|pass" {% if not mgmt_ready %}disabled{% endif %}></textarea>
+      <p><button class="btn" type="submit" {% if not mgmt_ready %}disabled{% endif %}>Import</button></p>
+    </form>
+  </section>
+</div>
+
+<div class="home-grid">
+  <section class="card">
+    <h3>Addresses</h3>
+    <table>
+      <tr><th>ID</th><th>Provider</th><th>Endpoint</th><th>Auth</th><th>Status</th><th></th></tr>
+      {% for p in proxies %}
+      <tr>
+        <td>{{ p.id }}</td>
+        <td>{{ p.provider }}</td>
+        <td><code>{{ p.scheme }}://{{ p.ip }}:{{ p.port }}</code></td>
+        <td class="muted">{{ p.auth_masked }}</td>
+        <td><span class="badge {% if p.status == 'active' %}success{% else %}failed{% endif %}">{{ p.status }}</span></td>
+        <td>
+          {% if mgmt_ready %}
+          <form method="post" action="/panel/proxy/{{ p.id }}/status" style="display:inline">
+            <input type="hidden" name="status" value="{{ 'retired' if p.status == 'active' else 'active' }}">
+            <button class="link" type="submit">{{ 'Retire' if p.status == 'active' else 'Reactivate' }}</button>
+          </form>
+          {% endif %}
+        </td>
+      </tr>
+      {% else %}
+      <tr><td colspan="6" class="muted">No proxy rows.</td></tr>
+      {% endfor %}
+    </table>
+  </section>
+
+  <section class="card">
+    <h3>Per-source rate limits</h3>
+    <table>
+      <tr><th>Source</th><th>Max QPS</th><th>Conc.</th><th></th></tr>
+      {% for r in rate_limits %}
+      <tr>
+        <form method="post" action="/panel/proxy/rate-limits/{{ r.source }}">
+        <td>{{ r.source }}{% if not r.throttled %} <span class="muted">(off)</span>{% endif %}</td>
+        <td><input type="number" step="0.1" name="max_qps" value="{{ r.max_qps }}"
+                   style="width:5rem" {% if not mgmt_ready %}disabled{% endif %}></td>
+        <td><input type="number" name="max_concurrent" value="{{ r.max_concurrent }}"
+                   style="width:4rem" {% if not mgmt_ready %}disabled{% endif %}></td>
+        <td><button class="link" type="submit" {% if not mgmt_ready %}disabled{% endif %}>Save</button></td>
+        </form>
+      </tr>
+      {% else %}
+      <tr><td colspan="4" class="muted">No rate limits configured (default 1 QPS applies).</td></tr>
+      {% endfor %}
+    </table>
+
+    <h3 style="margin-top:1rem">Force circuit reset</h3>
+    <form method="post" action="/panel/proxy/circuits/reset">
+      <div class="row2">
+        <span><label>Source</label><input type="text" name="source" placeholder="eastmoney" {% if not mgmt_ready %}disabled{% endif %}></span>
+        <span><label>Proxy ID</label><input type="number" name="proxy_id" {% if not mgmt_ready %}disabled{% endif %}></span>
+      </div>
+      <label>Operator (optional)</label>
+      <input type="text" name="actor" placeholder="your name">
+      <p><button class="btn" type="submit" {% if not mgmt_ready %}disabled{% endif %}>Reset to HALF_OPEN</button></p>
+      <p class="muted">Forces OPEN → HALF_OPEN bypassing cooldown; a real ban re-opens automatically.</p>
+    </form>
+  </section>
+</div>
+
+<section class="card">
+  <h3>Ban rules (read-only)</h3>
+  <table>
+    <tr><th>Source</th><th>Type</th><th>Pattern</th><th>Class</th><th>Enabled</th></tr>
+    {% for r in ban_rules %}
+    <tr>
+      <td>{{ r.source }}</td><td>{{ r.rule_type }}</td>
+      <td><code>{{ r.pattern }}</code></td>
+      <td><span class="badge {% if r.classification == 'ban' or r.classification == 'blocked' %}failed{% endif %}">{{ r.classification }}</span></td>
+      <td>{{ '✓' if r.enabled else '✗' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">No ban rules registered.</td></tr>
+    {% endfor %}
+  </table>
+</section>
+{% endblock %}

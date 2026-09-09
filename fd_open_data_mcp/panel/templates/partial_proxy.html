@@ -1,0 +1,17 @@
+<table>
+  <tr><th>Source</th><th>Proxy</th><th>State</th><th>Fail streak</th><th>Cycles</th><th>Permanent</th><th>Cooldown</th><th>Last success</th></tr>
+  {% for c in circuits %}
+  <tr>
+    <td>{{ c.source }}</td>
+    <td>#{{ c.proxy_id }}</td>
+    <td><span class="badge {% if c.state == 'open' %}failed{% elif c.state == 'half_open' %}refused{% else %}success{% endif %}">{{ c.state }}</span></td>
+    <td>{{ c.fail_streak }}</td>
+    <td>{{ c.open_cycles }}</td>
+    <td>{% if c.permanent %}<span class="badge failed">permanent</span>{% else %}—{% endif %}</td>
+    <td class="muted">{{ c.cooldown_until or '—' }}</td>
+    <td class="muted">{{ c.last_success_at or '—' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="8" class="muted">No circuit state recorded yet.</td></tr>
+  {% endfor %}
+</table>

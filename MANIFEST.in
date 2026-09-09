@@ -1,2 +1,4 @@
 include .env.example
 recursive-include fd_open_data_mcp/catalog/seeds *.json
+recursive-include fd_open_data_mcp/panel/templates *.html
+recursive-include fd_open_data_mcp/panel/static *

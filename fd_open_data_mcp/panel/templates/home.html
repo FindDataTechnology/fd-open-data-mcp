@@ -40,4 +40,11 @@
     </div>
   </section>
 </div>
+
+<section class="card" style="margin-top:1rem">
+  <h3>Missed runs</h3>
+  <div hx-get="/panel/partials/missed" hx-trigger="load, every {{ poll_seconds }}s">
+    <p class="muted">loading…</p>
+  </div>
+</section>
 {% endblock %}

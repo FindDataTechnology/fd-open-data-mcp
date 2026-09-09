@@ -5,7 +5,7 @@
   <div class="pill-row">
     <select name="status" onchange="this.form.submit()">
       <option value="" {{ 'selected' if not status }}>all statuses</option>
-      {% for s in ['running','success','failed'] %}
+      {% for s in ['running','success','failed','cancelled'] %}
       <option value="{{ s }}" {{ 'selected' if status == s }}>{{ s }}</option>
       {% endfor %}
     </select>
@@ -23,8 +23,8 @@
   {% for r in runs %}
   <tr>
     <td>{{ r.id }}</td>
-    <td><a href="/panel/policies/{{ r.policy_id }}">{{ r.policy }}</a></td>
-    <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
+    <td>{% if r.origin == 'adhoc' %}<span class="muted">ad-hoc</span>{% else %}<a href="/panel/policies/{{ r.policy_id }}">{{ r.policy }}</a>{% endif %}</td>
+    <td><span class="badge {{ r.status }}">{{ r.status }}</span>{% if r.status == 'running' %}<form method="post" action="/panel/runs/{{ r.id }}/cancel" style="display:inline" onsubmit="return confirm('Cancel run {{ r.id }}? The executor Job is deleted.')"><button class="link" type="submit">cancel</button></form>{% endif %}</td>
     <td>{{ r.estimate }}</td>
     <td class="muted">{{ r.job_ref or '—' }}</td>
     <td class="muted">{{ r.started_at or '—' }}</td>

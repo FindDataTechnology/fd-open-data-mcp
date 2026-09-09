@@ -109,23 +109,63 @@ def _plan_datasources(plan_json: dict | None) -> list[str]:
 
 
 # --- fleet health ------------------------------------------------------------
+def _job_status(cluster: Cluster, job_ref: str) -> str:
+    """Live executor-Job status for an OPEN run (panel-ops-console 4.3):
+    'running' | 'success' | 'failed' | 'unknown'. Best-effort — an unreachable
+    cluster API or a legacy scrapyd ref degrades to 'unknown'."""
+    if not job_ref or "/" not in job_ref:
+        return "unknown"
+    try:
+        from fd_open_data_mcp.refresh.reconciler import ClusterK8sClient
+
+        st = ClusterK8sClient(cluster).job_status(job_ref.split("/", 1)[1])
+        return st if st in ("running", "success", "failed") else "unknown"
+    except Exception:  # noqa: BLE001 - probe must never break the fleet view
+        return "unknown"
+
+
 def fleet_health(session: Session) -> list[dict]:
-    """Each ``clusters`` row + open-run count vs capacity + API reachability."""
+    """Each ``clusters`` row + open-run count vs capacity + API reachability +
+    a per-cluster egress summary (panel-ops-console): sources whose circuit is
+    OPEN/permanent on the cluster's own direct-egress proxy. Open runs are
+    additionally bucketed by LIVE executor-Job state so a crashed Job is
+    visible while its run row is still open."""
+    from fd_open_data_mcp.models import Proxy, SourceProxyHealth
+
     clusters = session.query(Cluster).order_by(Cluster.id).all()
     out = []
     for c in clusters:
-        open_runs = (
-            session.query(func.count(PolicyRun.id))
+        open_runs_rows = (
+            session.query(PolicyRun.job_ref)
             .filter_by(cluster_id=c.id, status="running")
-            .scalar()
-        ) or 0
+            .all()
+        )
+        open_runs = len(open_runs_rows)
         reachable = _probe_cluster(c) if c.enabled else None
+        # live Job buckets for the cluster's open runs (best-effort probes)
+        job_states = {"running": 0, "success": 0, "failed": 0, "unknown": 0}
+        for (ref,) in open_runs_rows:
+            job_states[_job_status(c, ref)] += 1
+        # egress summary: the cluster's own `direct` proxy row mirrors
+        # pick_cluster's lookup; a source is "banned" when state=open or permanent
+        direct = session.query(Proxy).filter_by(scheme="direct", cluster_id=c.id).first()
+        egress_banned: list[str] = []
+        if direct is not None:
+            cond = (SourceProxyHealth.proxy_id == direct.id) & (
+                (SourceProxyHealth.state == "open")
+                | (SourceProxyHealth.permanent.is_(True)))
+            rows = session.query(SourceProxyHealth.source).filter(cond).all()
+            egress_banned = sorted({r[0] for r in rows})
         out.append({
             "id": c.id, "name": c.name, "enabled": c.enabled,
             "namespace": c.namespace, "capacity": c.capacity,
             "open_runs": open_runs, "reachable": reachable,
             "tags": c.tags or [],
             "api_server": c.api_server,
+            "job_states": job_states,
+            "egress_known": direct is not None,
+            "egress_banned": egress_banned[:5],
+            "egress_banned_count": len(egress_banned),
         })
     return out
 
@@ -354,6 +394,79 @@ def next_runs(session: Session, now: dt.datetime | None = None) -> list[dict]:
             "minutes_until": int((fire_utc - now).total_seconds() // 60),
         })
     out.sort(key=lambda x: x["next_fire"])
+    return out
+
+
+def missed_runs(
+    session: Session, now: dt.datetime | None = None, grace_min: int | None = None,
+) -> list[dict]:
+    """Enabled policies whose oldest uncovered fire passed more than a grace
+    interval ago without a run recording a (non-failed) outcome
+    (panel-ops-console).
+
+    Uses the same cron/timezone base (``last_run_at``/``created_at``, policy
+    tz) as ``next_runs``/``_cron_due``, so the red flag and the schedule agree.
+    The flagged fire is the FIRST fire after the base — the oldest fire a run
+    could have covered; using the latest fire instead would let every new fire
+    reset the clock and a nightly policy would never flag. Default grace =
+    max(2× schedule interval, 30 min) from that fire's cadence. Reasons are
+    heuristic labels: an open run started before the fire → "blocked by
+    single-flight"; a failed run with a "refused:" detail → "plan refused";
+    any other failed run → "launch failed"; otherwise "never launched".
+    Display-only — no automatic re-launch.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    out: list[dict] = []
+    for p in session.query(CrawlPolicy).filter_by(enabled=True).all():
+        try:
+            ptz = _policy_tz(p)
+            base = _as_aware_utc(p.last_run_at) or _as_aware_utc(p.created_at)
+            if base is None:
+                continue  # never-run and never-scheduled: nothing owed yet
+            fire_local = croniter(p.cron_expr, base.astimezone(ptz)).get_next(dt.datetime)
+            fire_utc = fire_local.astimezone(dt.timezone.utc)
+            if fire_utc > now:
+                continue  # the next fire is still in the future: nothing owed
+            # per-policy grace from this cron's cadence: gap to the next fire
+            nxt = croniter(p.cron_expr, fire_local).get_next(dt.datetime)
+            interval_min = (nxt - fire_local).total_seconds() / 60
+            grace = grace_min if grace_min is not None else max(2 * interval_min, 30)
+            if (now - fire_utc).total_seconds() / 60 <= grace:
+                continue  # inside the grace window
+            fire_naive = fire_utc.replace(tzinfo=None)  # naive-UTC column contract
+            runs_after = (session.query(PolicyRun)
+                          .filter(PolicyRun.policy_id == p.id,
+                                  PolicyRun.started_at >= fire_naive)
+                          .order_by(PolicyRun.started_at.desc())
+                          .all())
+            # the flag clears once a run records a (non-failed) outcome; a
+            # refused/failed attempt keeps the flag up with its reason
+            if any(r.status != "failed" for r in runs_after):
+                continue
+            reason = "never launched"
+            if runs_after:
+                refused = any((r.detail or "").startswith("refused:")
+                              for r in runs_after)
+                reason = "plan refused" if refused else "launch failed"
+            elif (session.query(PolicyRun)
+                  .filter(PolicyRun.policy_id == p.id,
+                          PolicyRun.started_at < fire_naive,
+                          PolicyRun.status == "running")
+                  .first()) is not None:
+                reason = "blocked by single-flight"
+            out.append({
+                "policy_id": p.id, "policy": p.name,
+                "missed_fire": fire_utc.isoformat(),
+                "missed_fire_local": fire_local.isoformat(),
+                "timezone": p.timezone or "UTC",
+                "grace_min": int(grace),
+                "minutes_late": int((now - fire_utc).total_seconds() // 60),
+                "reason": reason,
+            })
+        except Exception as e:  # noqa: BLE001 - a bad cron must not break the board
+            logger.warning("missed_runs: policy %s skipped: %s", p.name, e)
+            continue
+    out.sort(key=lambda x: x["missed_fire"])
     return out
 
 

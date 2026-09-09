@@ -1,0 +1,13 @@
+<table>
+  <tr><th>Policy</th><th>Missed fire</th><th>Late by</th><th>Reason</th></tr>
+  {% for m in missed %}
+  <tr>
+    <td><a href="/panel/policies/{{ m.policy_id }}">{{ m.policy }}</a></td>
+    <td class="muted">{{ m.missed_fire_local or m.missed_fire }} ({{ m.timezone }})</td>
+    <td><span class="badge failed">{{ m.minutes_late }}m</span></td>
+    <td>{{ m.reason }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">No missed runs. ✓</td></tr>
+  {% endfor %}
+</table>

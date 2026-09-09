@@ -1,7 +1,14 @@
 {% extends "base.html" %}
-{% block title %}{{ 'Edit' if policy else 'New' }} policy{% endblock %}
+{% block title %}{{ 'Template' if is_template else ('Edit' if policy else 'New') }} policy{% endblock %}
 {% block content %}
-<h2>{{ 'Edit policy' if policy else 'New policy' }}</h2>
+<h2>{{ 'Template: ' ~ template_frequency ~ ' policy' if is_template else ('Edit policy' if policy else 'New policy') }}</h2>
+{% if is_template %}
+<p class="muted">Pre-selected the verified {{ template_frequency }} concepts and proposed the matching
+schedule below — adjust anything before saving; the result is an ordinary policy.</p>
+{% endif %}
+
+{% if msg %}<div class="banner" style="background:#dcfce7;color:#166534;border:1px solid #bbf7d0">{{ msg }}</div>{% endif %}
+{% if err %}<div class="banner warn">✗ {{ err }}</div>{% endif %}
 <form id="pf" method="post" action="/panel/policies/save">
   {% if policy %}<input type="hidden" name="policy_id" value="{{ policy.id }}">{% endif %}
 
@@ -74,6 +81,8 @@
 
   <div class="pill-row">
     <button type="submit" class="btn" style="background:var(--accent);color:#fff;padding:.5rem 1.2rem;border-radius:6px">Save</button>
+    <button type="submit" class="btn" formaction="/panel/crawl/adhoc"
+            title="Run this plan once without saving a policy — same fetch ceiling applies">Run once (no policy)</button>
     <a href="/panel/policies">Cancel</a>
     <div id="estimate" hx-post="/panel/estimate" hx-include="#pf" hx-trigger="change from:#pf"
          hx-target="this" hx-swap="outerHTML">estimate: —</div>

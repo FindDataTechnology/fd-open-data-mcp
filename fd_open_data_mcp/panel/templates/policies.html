@@ -1,6 +1,12 @@
 {% extends "base.html" %}
 {% block content %}
 <h2>Policies</h2>
+<p class="pill-row">
+  <span class="muted">New from frequency template:</span>
+  {% for f in ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'] %}
+  <a class="btn" href="/panel/policies/template?frequency={{ f }}">{{ f }}</a>
+  {% endfor %}
+</p>
 <table>
   <tr><th>ID</th><th>Name</th><th>Entity</th><th>Concepts</th><th>Mode</th><th>Freq</th><th>Cron ({{ 'tz' }})</th><th>Last run</th><th>Enabled</th><th></th></tr>
   {% for p in policies %}

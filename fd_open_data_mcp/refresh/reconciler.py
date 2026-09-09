@@ -45,6 +45,11 @@ logger = logging.getLogger(__name__)
 POLICY_MAX_FETCHES = int(os.environ.get("POLICY_MAX_FETCHES", "50000"))
 
 _OPEN = "running"  # policy_runs.status value for an open run
+# panel-ops-console: terminal status set by runs.cancel_run via a CAS update.
+# A cancelled row is never probed again (the completion probe only scans _OPEN
+# rows), never satisfies single-flight (_open_run scans _OPEN), and never
+# counts toward cluster capacity (pick_cluster counts _OPEN).
+CANCELLED = "cancelled"
 
 
 # ─── launcher abstraction (D5) ───────────────────────────────────────────────
@@ -62,6 +67,15 @@ class Launcher(Protocol):
 
     def poll(self, job_ref: str) -> str:
         """Return 'running' | 'success' | 'failed' | 'unknown' for a job reference."""
+        ...
+
+    def delete(self, job_ref: str) -> bool:
+        """Best-effort stop of a launched job (panel-ops-console run cancel).
+
+        Returns True when a running executor was actually torn down; False when
+        the job was already gone/finished. Raises only on transport failures
+        the caller may choose to ignore — the run row's CAS'd status stays the
+        source of truth either way (design D2)."""
         ...
 
 
@@ -117,6 +131,14 @@ class ScrapydLauncher:
                 # scrapyd exposes no per-job outcome; a finished job is a success
                 return "success"
         return "unknown"
+
+    def delete(self, job_ref: str) -> bool:
+        data = urllib.parse.urlencode({"project": self.project, "job": job_ref}).encode()
+        with urllib.request.urlopen(f"{self.url}/cancel.json", data, timeout=30) as r:
+            result = json.load(r)
+        # scrapyd reports status "ok" when it cancelled; "error" means the job
+        # was not running (already finished) — the row status stays the truth
+        return result.get("status") == "ok"
 
 
 class K8sJobLauncher:
@@ -269,6 +291,20 @@ class K8sJobLauncher:
             return "running"
         return "unknown"
 
+    def delete(self, job_ref: str) -> bool:
+        if self._in_cluster():
+            try:
+                self._k8s_api(
+                    "DELETE", f"/apis/batch/v1/namespaces/{self.namespace}/jobs/{job_ref}")
+                return True
+            except urllib.error.HTTPError as e:
+                if e.code == 404:  # job already gone (finished / TTL-collected)
+                    return False
+                raise
+        self._kubectl("delete", "job", job_ref, "-n", self.namespace,
+                      "--ignore-not-found=true")
+        return True
+
 
 # ─── multi-cluster dispatch (add-multi-cluster-master-db) ────────────────────
 # A fleet of worker clusters (cloud servers) share one master Postgres + Redis.
@@ -330,6 +366,17 @@ class ClusterK8sClient:
         if st.get("active"):
             return "running"
         return "unknown"
+
+    def delete_job(self, name: str) -> bool:
+        """DELETE the Job; False when it is already gone (404)."""
+        ns = self.cluster.namespace
+        try:
+            self._api("DELETE", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}")
+            return True
+        except urllib.error.HTTPError as e:
+            if e.code == 404:
+                return False
+            raise
 
 
 
@@ -625,6 +672,19 @@ class MultiClusterLauncher:
         except Exception:  # noqa: BLE001 - api unreachable / job gone
             return "unknown"
 
+    def delete(self, job_ref: str) -> bool:
+        if "/" not in job_ref:
+            return False  # legacy scrapyd ref: no cluster routing, nothing to delete here
+        cluster_name, job_name = job_ref.split("/", 1)
+        session = self._session()
+        try:
+            cluster = session.query(Cluster).filter_by(name=cluster_name).first()
+        finally:
+            session.close()
+        if cluster is None:
+            return False  # cluster row gone: the Job is unreachable, treat as gone
+        return ClusterK8sClient(cluster).delete_job(job_name)
+
 
 # ─── date-range builder (5.2) ────────────────────────────────────────────────
 def build_date_range(policy: CrawlPolicy, today: dt.date) -> tuple[DateRange, bool]:
@@ -909,6 +969,8 @@ def reconcile_once(
     # 0. completion probe: close open runs whose executor job ended (D5 step 5).
     # A succeeded job is classified by its recorded yield (D3) — never plain
     # "success": exit code 0 says the process ran, not that data landed.
+    # Cancelled runs are terminal by the CAS in runs.cancel_run and are NOT
+    # _OPEN, so this scan never resurrects or re-probes them.
     for run in session.query(PolicyRun).filter_by(status=_OPEN).all():
         if not run.job_ref:
             continue
