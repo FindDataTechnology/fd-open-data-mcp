@@ -1,0 +1,29 @@
+# fd-open-data-mcp torch image — slim variant + sentence-transformers with the
+# embedding model baked in. The k8s deployment sets HF_HUB_OFFLINE=1, so the
+# model must be downloaded at build time, as the runtime user (uid 1000) so
+# the default HF cache path resolves at runtime.
+# Built by .github/workflows/docker-publish.yml (torch job) ->
+# <HARBOR_HOST>/finddata/fd-open-data-mcp:torch
+FROM python:3.12-slim
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1
+
+WORKDIR /build
+COPY . .
+
+# CPU-only torch wheel (~200MB vs ~2.5GB CUDA default on PyPI).
+RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch && \
+    pip install --no-cache-dir . sentence-transformers
+
+RUN useradd --create-home --uid 1000 appuser
+USER appuser
+
+# CN-side build: huggingface.co is unreachable from domestic hosts.
+ENV HF_ENDPOINT=https://hf-mirror.com
+RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+
+ENV HF_HOME=/home/appuser/.cache/huggingface
+EXPOSE 8899
+ENTRYPOINT ["fd-open-data-mcp", "serve", "--transport", "http", "--host", "0.0.0.0", "--port", "8899"]
