@@ -21,18 +21,19 @@ from fd_open_data_mcp import db as dbmod
 from fd_open_data_mcp.server import mcp
 
 
-# Use the same model as the embedding script
-MODEL_PATH = "/Users/chengsishi/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-MODEL_NAME = "all-MiniLM-L6-v2"
+# Resolve by model name (never a machine-specific cache path): the runtime
+# image bakes the model into the default HF cache under HF_HUB_OFFLINE=1, and
+# dev machines resolve it from their own cache. Env override for exotic setups.
+import os
 
-# Lazy singleton: load the model once per process, not per ai_search call.
+MODEL_NAME = os.environ.get("FD_MCP_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
 _MODEL: Optional[SentenceTransformer] = None
 
 
 def _get_model() -> SentenceTransformer:
     global _MODEL
     if _MODEL is None:
-        _MODEL = SentenceTransformer(MODEL_PATH)
+        _MODEL = SentenceTransformer(MODEL_NAME)
     return _MODEL
 
 
