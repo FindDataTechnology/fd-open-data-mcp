@@ -13,9 +13,11 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /build
 COPY . .
 
-# CPU-only torch wheel (~200MB vs ~2.5GB CUDA default on PyPI).
-RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu torch && \
-    pip install --no-cache-dir . sentence-transformers
+# CPU-only torch wheel ferried into the build context (download.pytorch.org
+# is unreachable at usable speed from domestic networks); remaining deps via
+# the Aliyun PyPI mirror.
+RUN pip install --no-cache-dir wheels/torch-*.whl && \
+    pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ . sentence-transformers
 
 RUN useradd --create-home --uid 1000 appuser
 USER appuser
