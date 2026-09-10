@@ -5,6 +5,11 @@ on:
     branches: [main]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      torch:
+        description: "Also build the torch variant (:torch, embeddings-enabled)"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -58,5 +63,51 @@ jobs:
         with:
           context: .
           file: ./Dockerfile
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+
+  build-and-push-torch:
+    # Fat variant: slim deps + sentence-transformers + baked MiniLM model.
+    # On-demand only (~10 min, ~1.5GB image).
+    if: github.event_name == 'workflow_dispatch' && inputs.torch
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure Docker daemon for insecure Harbor registry
+        run: |
+          echo "{\"insecure-registries\": [\"${{ secrets.HARBOR_HOST }}\"]}" | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          sleep 3
+
+      - name: Login to Harbor
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ secrets.HARBOR_HOST }}
+          username: ${{ secrets.HARBOR_USER }}
+          password: ${{ secrets.HARBOR_PASS }}
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-config-inline: |
+            [registry."${{ secrets.HARBOR_HOST }}"]
+              http = true
+
+      - name: Compute image tags
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.HARBOR_HOST }}/finddata/${{ env.IMAGE_NAME }}
+          flavor: latest=false
+          tags: |
+            type=raw,value=torch
+            type=sha,format=short,prefix=torch-
+
+      - name: Build and push torch image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile.torch
           push: true
           tags: ${{ steps.meta.outputs.tags }}
