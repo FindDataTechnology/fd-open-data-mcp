@@ -20,6 +20,8 @@ RUN pip install --no-cache-dir --index-url https://download.pytorch.org/whl/cpu 
 RUN useradd --create-home --uid 1000 appuser
 USER appuser
 
+# CN-side build: huggingface.co is unreachable from domestic hosts.
+ENV HF_ENDPOINT=https://hf-mirror.com
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 ENV HF_HOME=/home/appuser/.cache/huggingface
