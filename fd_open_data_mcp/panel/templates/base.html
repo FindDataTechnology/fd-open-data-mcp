@@ -52,6 +52,7 @@
     <a href="/panel/proxy">Proxy</a>
     <a href="/panel/data">Data</a>
     <a href="/panel/policies/new">+ New</a>
+    <span style="margin-left:auto" hx-get="/panel/auth/whoami" hx-trigger="load" hx-swap="innerHTML"></span>
   </nav>
   <main>{% block content %}{% endblock %}</main>
 </body>

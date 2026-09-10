@@ -196,21 +196,99 @@ def create_app() -> FastAPI:
     app.mount("/panel/static", StaticFiles(directory=str(HERE / "static")),
               name="panel_static")
 
-    # PANEL_TOKEN gate (design D7): header, ?token=, or cookie
+    # ── auth gate (panel-logto-auth, design D3) ────────────────────────────
+    # Precedence: PANEL_TOKEN (programmatic) → OIDC session cookie → redirect
+    # to Logto login (when LOGTO_* configured) → legacy 401. The auth routes
+    # themselves and static assets are always public.
     token = os.environ.get("PANEL_TOKEN")
+    from fd_open_data_mcp.panel import auth as _auth
 
     @app.middleware("http")
     async def gate(request: Request, call_next):
-        if not token:
+        cfg = _auth.logto_config()
+        path = request.url.path
+        if path.startswith("/panel/auth/") or path.startswith("/panel/static"):
             return await call_next(request)
-        q = request.query_params.get("token")
-        if q == token:
-            resp = await call_next(request)
-            resp.set_cookie("panel_token", token)
-            return resp
-        if request.headers.get("X-Panel-Token") == token or request.cookies.get("panel_token") == token:
-            return await call_next(request)
-        return HTMLResponse("<h1>401 - set PANEL_TOKEN / ?token=</h1>", status_code=401)
+        if token:
+            q = request.query_params.get("token")
+            if q == token:
+                resp = await call_next(request)
+                resp.set_cookie("panel_token", token)
+                return resp
+            if (request.headers.get("X-Panel-Token") == token
+                    or request.cookies.get("panel_token") == token):
+                return await call_next(request)
+        session = _auth.read_session(request.cookies.get(_auth.SESSION_COOKIE))
+        if session is not None:
+            allowed = _auth.allow_list()
+            if allowed is None or session["sub"] in allowed:
+                request.state.panel_user = session
+                return await call_next(request)
+            return HTMLResponse("<h1>403 - user not in PANEL_USER_IDS</h1>",
+                                status_code=403)
+        if cfg is not None:
+            return RedirectResponse("/panel/auth/login", status_code=302)
+        if token is not None:
+            return HTMLResponse("<h1>401 - set PANEL_TOKEN / ?token=</h1>",
+                                status_code=401)
+        return await call_next(request)  # no gate configured — open panel
+
+    # ── OIDC routes (panel-logto-auth) ─────────────────────────────────────
+    @app.get("/panel/auth/login")
+    def auth_login():
+        cfg = _auth.logto_config()
+        if cfg is None:
+            return HTMLResponse("<h1>401 - Logto not configured</h1>", status_code=401)
+        state, cookie_value = _auth.make_state()
+        resp = RedirectResponse(_auth.authorize_url(cfg, state), status_code=302)
+        resp.set_cookie(_auth.STATE_COOKIE, cookie_value, httponly=True,
+                        samesite="lax", max_age=600)
+        return resp
+
+    @app.get("/panel/auth/callback")
+    def auth_callback(request: Request, code: str = "", state: str = "",
+                      error: str = "", error_description: str = ""):
+        cfg = _auth.logto_config()
+        if cfg is None:
+            return HTMLResponse("<h1>401 - Logto not configured</h1>", status_code=401)
+        if error:
+            return HTMLResponse(
+                f"<h1>login failed</h1><p>{error}: {error_description}</p>",
+                status_code=401)
+        if not _auth.check_state(request.cookies.get(_auth.STATE_COOKIE), state):
+            return HTMLResponse("<h1>401 - bad state</h1>", status_code=401)
+        try:
+            claims = _auth.id_token_claims(cfg, _auth.exchange_code(cfg, code))
+        except Exception as e:  # noqa: BLE001 - provider/network errors
+            return HTMLResponse(f"<h1>login failed</h1><p>{e}</p>", status_code=401)
+        allowed = _auth.allow_list()
+        if allowed is not None and claims.get("sub") not in allowed:
+            return HTMLResponse("<h1>403 - user not in PANEL_USER_IDS</h1>",
+                                status_code=403)
+        resp = RedirectResponse("/panel", status_code=302)
+        resp.set_cookie(_auth.SESSION_COOKIE,
+                        _auth.make_session_value(claims.get("sub", ""),
+                                                 claims.get("name", "")),
+                        httponly=True, samesite="lax",
+                        max_age=_auth.SESSION_HOURS * 3600)
+        resp.delete_cookie(_auth.STATE_COOKIE)
+        return resp
+
+    @app.get("/panel/auth/logout")
+    def auth_logout():
+        resp = RedirectResponse("/panel", status_code=302)
+        resp.delete_cookie(_auth.SESSION_COOKIE)
+        return resp
+
+    @app.get("/panel/auth/whoami", response_class=HTMLResponse)
+    def auth_whoami(request: Request):
+        session = getattr(request.state, "panel_user", None) or _auth.read_session(
+            request.cookies.get(_auth.SESSION_COOKIE))
+        if session is None:
+            return HTMLResponse("")
+        return HTMLResponse(
+            f'<span class="muted">{session["name"]}</span> '
+            f'<a href="/panel/auth/logout" class="btn">logout</a>')
 
     # ── pages ──────────────────────────────────────────────────────────────
     @app.get("/", response_class=HTMLResponse)

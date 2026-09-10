@@ -66,6 +66,8 @@ def test_panel_token_gate(session, monkeypatch):
     assert gated.get("/panel/policies").status_code == 401
     assert gated.get("/panel/policies", params={"token": "sekret"}).status_code == 200
     assert gated.get("/panel/policies", headers={"X-Panel-Token": "sekret"}).status_code == 200
+    monkeypatch.undo()
+    reload(appmod)
 
 
 # ── observability home + partials (add-panel-crawl-observability) ─────────────
@@ -220,3 +222,5 @@ def test_token_gate_covers_partials(session, monkeypatch):
     assert gated.get("/panel/data").status_code == 401
     assert gated.get("/panel/partials/running",
                      headers={"X-Panel-Token": "sekret"}).status_code == 200
+    monkeypatch.undo()
+    reload(appmod)

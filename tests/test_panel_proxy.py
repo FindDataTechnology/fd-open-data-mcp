@@ -106,6 +106,8 @@ def test_token_gate_covers_proxy_routes(session, monkeypatch):
     assert gated.get("/panel/proxy").status_code == 401
     assert gated.get("/panel/partials/proxy").status_code == 401
     assert gated.get("/panel/proxy", params={"token": "sekret"}).status_code == 200
+    monkeypatch.undo()
+    reload(appmod)  # don't leak the gated app to later runtime imports
 
 
 # ─── 3.3 fleet partial egress column ─────────────────────────────────────────
