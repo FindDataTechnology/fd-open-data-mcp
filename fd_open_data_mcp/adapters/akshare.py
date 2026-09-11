@@ -746,6 +746,19 @@ class FundEtfSpotEmAdapter(_FundRankFrameAdapter):
     _KEY_COL = "代码"
 
 
+class StockInfoBjNameCodeAdapter(_FundRankFrameAdapter):
+    """``ak.stock_info_bj_name_code`` - 北交所股票列表 snapshot (no params).
+
+    Signature: ``()`` - returns the full BJ exchange stock list (~250 rows).
+    Found live 2026-09-11: 108k fetches, 0 ok — the legacy fallback passed
+    symbol/date kwargs this function doesn't accept, and without a
+    bulk_snapshot flag the planner fanned it out per-entity per-day.
+    """
+
+    _KEY_COL = "证券代码"
+    _ALIASES = {"代码": "证券代码", "名称": "证券简称"}
+
+
 # --- bulk-snapshot cross-sections (fix-silent-zero-yield-crawls D6) ---------------
 # One call returns the FULL entity cross-section for one date, on hosts verified
 # reachable from the crawl cluster (datacenter.eastmoney.com / fund.eastmoney.com
@@ -818,6 +831,7 @@ def register_all() -> None:
     # fund adapters (add-fund-crawl-control-center, task 3.3)
     register("akshare", "fund_open_fund_info_em", FundOpenFundInfoEmAdapter())
     register("akshare", "fund_etf_spot_em", FundEtfSpotEmAdapter())
+    register("akshare", "stock_info_bj_name_code", StockInfoBjNameCodeAdapter())
     register("akshare", "fund_etf_hist_em", FundEtfHistEmAdapter())
     register("akshare", "fund_lof_hist_em", FundLofHistEmAdapter())
     register("akshare", "fund_etf_hist_sina", FundEtfHistSinaAdapter())
