@@ -66,6 +66,8 @@ def test_panel_token_gate(session, monkeypatch):
     assert gated.get("/panel/policies").status_code == 401
     assert gated.get("/panel/policies", params={"token": "sekret"}).status_code == 200
     assert gated.get("/panel/policies", headers={"X-Panel-Token": "sekret"}).status_code == 200
+    # rebuild the module-level app with the env reverted: later test files that
+    # import the app at runtime must not inherit this gated instance
     monkeypatch.undo()
     reload(appmod)
 
@@ -207,7 +209,7 @@ def test_data_page_and_filters(session):
 
     r = client.get("/panel/data")
     assert r.status_code == 200
-    assert "GDP" in r.text and "1 total rows" in r.text
+    assert "GDP" in r.text and "1 local rows" in r.text
     r = client.get("/panel/data", params={"entity_type": "stock"})
     assert "No observations match" in r.text
 

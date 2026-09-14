@@ -1,0 +1,354 @@
+{
+  "generated_at": "2026-09-11T16:08:14+00:00",
+  "repo": "fd-open-data-mcp",
+  "entries": [
+    {
+      "action": "archive",
+      "category": "empty_dirs",
+      "repo": "fd-open-data-mcp",
+      "original_path": "{{pkgetc}}",
+      "archived_to": "archive/triage-cleanup-20260912/{{pkgetc}}",
+      "git_tracked": false,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "litter_files",
+      "repo": "fd-open-data-mcp",
+      "original_path": "RELEASE_SUMMARY.md",
+      "archived_to": "archive/triage-cleanup-20260912/RELEASE_SUMMARY.md",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "litter_files",
+      "repo": "fd-open-data-mcp",
+      "original_path": "SETUP_SUMMARY.md",
+      "archived_to": "archive/triage-cleanup-20260912/SETUP_SUMMARY.md",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/agriculture.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/agriculture.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/amac-fund.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/amac-fund.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/amac_fund.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/amac_fund.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/chemicals.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/chemicals.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/cisa-industry.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/cisa-industry.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/cisa_industry.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/cisa_industry.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/cme_agricultural.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/cme_agricultural.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/cnreport.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/cnreport.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/dce_agricultural.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/dce_agricultural.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/electronics.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/electronics.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/fin_platforms.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/fin_platforms.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/flowers_kifc.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/flowers_kifc.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/nbs-gdp.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/nbs-gdp.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/nonferrous.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/nonferrous.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/sac_securities.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/sac_securities.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/shfe_futures.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/shfe_futures.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/steel-assoc.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/steel-assoc.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "archive",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/wbgapi.py",
+      "archived_to": "archive/triage-cleanup-20260912/fd_open_data_mcp/adapters/wbgapi.py",
+      "git_tracked": true,
+      "winner": null
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "cnreport",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "nbs_gdp",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "cisa_industry",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "amac_fund",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "shfe_futures",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "dce_agricultural",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "cme_agricultural",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "chemicals",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "electronics",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "nonferrous",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "flowers_kifc",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "fin_platforms",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "sac_securities",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "restore",
+      "category": "l4_units",
+      "repo": "fd-open-data-mcp",
+      "original_path": "fd_open_data_mcp/adapters/wbgapi.py",
+      "reason": "audit misclassification: param-mapping registrar (referenced by adapters/__init__), not a fetch adapter"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "cnreport",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "cisa_industry",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "amac_fund",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "shfe_futures",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "dce_agricultural",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "cme_agricultural",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "chemicals",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "electronics",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "nonferrous",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "flowers_kifc",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "fin_platforms",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    },
+    {
+      "action": "remove_runner_branch",
+      "module": "sac_securities",
+      "file": "fd_open_data_mcp/fetch/runner.py",
+      "category": "reference_safety"
+    }
+  ],
+  "backlog_snapshot": "cleanup_backlog.snapshot.json",
+  "runs": 3
+}

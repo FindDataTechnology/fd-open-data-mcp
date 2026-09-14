@@ -1,58 +1,58 @@
 {% extends "base.html" %}
-{% block title %}Proxy · Crawl Control Center{% endblock %}
+{% from "_macros.html" import th %}
+{% block title %}代理 Proxy · 爬虫控制台{% endblock %}
 {% block content %}
-<h2>Proxy / Egress</h2>
+<h2>代理与出口 <span class="en">Proxy / Egress</span></h2>
 
-{% if msg %}<div class="banner" style="background:#dcfce7;color:#166534;border:1px solid #bbf7d0">{{ msg }}</div>{% endif %}
+{% if msg %}<div class="banner ok">{{ msg }}</div>{% endif %}
 {% if err %}<div class="banner warn">✗ {{ err }}</div>{% endif %}
 
 {% if not mgmt_ready %}
 <div class="banner warn">
-  Management actions are disabled — <code>PROXY_CONTROL_URL</code> is not set in the
-  panel environment. This page is read-only; egress observability below still reflects
-  the shared master DB.
+  管理操作已禁用 Management actions are disabled — 面板环境未设置 <code>PROXY_CONTROL_URL</code>。
+  本页面为只读 This page is read-only；下方的出口可观测性仍来自共享主库 egress observability below still reflects the shared master DB.
 </div>
 {% endif %}
 
-<section class="card" style="margin-bottom:1rem">
-  <h3>Egress health (per source × proxy)</h3>
+<section class="card">
+  <h3>出口健康（每 数据源 × 代理）<span class="en"> Egress health (per source × proxy)</span></h3>
   <div hx-get="/panel/partials/proxy" hx-trigger="load, every {{ poll_seconds }}s">
-    <p class="muted">loading…</p>
+    <p class="muted">加载中 loading…</p>
   </div>
-  <p class="muted">Cold-table snapshot (near-realtime); hot state lives in proxy-redis.</p>
+  <p class="muted">冷表快照（近实时）Cold-table snapshot (near-realtime)；热状态在 proxy-redis hot state lives in proxy-redis.</p>
 </section>
 
 <div class="home-grid">
   <section class="card">
-    <h3>Providers</h3>
+    <h3>提供商 <span class="en">Providers</span></h3>
     <table>
-      <tr><th>Provider</th><th>Active</th><th>Retired</th></tr>
+      <tr>{{ th('提供商', 'Provider') }}{{ th('活跃', 'Active') }}{{ th('退役', 'Retired') }}</tr>
       {% for pr in providers %}
       <tr><td>{{ pr.name }}</td><td>{{ pr.active }}</td><td>{{ pr.retired }}</td></tr>
       {% else %}
-      <tr><td colspan="3" class="muted">No provider-owned proxy rows.</td></tr>
+      <tr><td colspan="3" class="muted">没有提供商所有的代理行 No provider-owned proxy rows.</td></tr>
       {% endfor %}
     </table>
   </section>
 
   <section class="card">
-    <h3>Import static endpoints</h3>
+    <h3>导入静态端点 <span class="en">Import static endpoints</span></h3>
     <form method="post" action="/panel/proxy/import">
-      <label>Provider name</label>
+      <label>提供商名称 Provider name</label>
       <input type="text" name="provider" value="paid-static">
-      <label>Endpoints — one per line: <code>ip|port|user|pass</code></label>
-      <textarea name="text" rows="5" style="width:100%;font-family:monospace"
+      <label>端点列表，每行一个 Endpoints — one per line: <code>ip|port|user|pass</code></label>
+      <textarea name="text" rows="5" class="mono-block"
                 placeholder="122.0.0.1|8080|user|pass" {% if not mgmt_ready %}disabled{% endif %}></textarea>
-      <p><button class="btn" type="submit" {% if not mgmt_ready %}disabled{% endif %}>Import</button></p>
+      <p><button class="btn" type="submit" {% if not mgmt_ready %}disabled{% endif %}>导入 Import</button></p>
     </form>
   </section>
 </div>
 
 <div class="home-grid">
   <section class="card">
-    <h3>Addresses</h3>
+    <h3>地址 <span class="en">Addresses</span></h3>
     <table>
-      <tr><th>ID</th><th>Provider</th><th>Endpoint</th><th>Auth</th><th>Status</th><th></th></tr>
+      <tr>{{ th('ID') }}{{ th('提供商', 'Provider') }}{{ th('端点', 'Endpoint') }}{{ th('凭证', 'Auth') }}{{ th('状态', 'Status') }}<th></th></tr>
       {% for p in proxies %}
       <tr>
         <td>{{ p.id }}</td>
@@ -62,57 +62,57 @@
         <td><span class="badge {% if p.status == 'active' %}success{% else %}failed{% endif %}">{{ p.status }}</span></td>
         <td>
           {% if mgmt_ready %}
-          <form method="post" action="/panel/proxy/{{ p.id }}/status" style="display:inline">
+          <form class="inline-form" method="post" action="/panel/proxy/{{ p.id }}/status">
             <input type="hidden" name="status" value="{{ 'retired' if p.status == 'active' else 'active' }}">
-            <button class="link" type="submit">{{ 'Retire' if p.status == 'active' else 'Reactivate' }}</button>
+            <button class="link" type="submit">{{ '退役 Retire' if p.status == 'active' else '重新启用 Reactivate' }}</button>
           </form>
           {% endif %}
         </td>
       </tr>
       {% else %}
-      <tr><td colspan="6" class="muted">No proxy rows.</td></tr>
+      <tr><td colspan="6" class="muted">没有代理行 No proxy rows.</td></tr>
       {% endfor %}
     </table>
   </section>
 
   <section class="card">
-    <h3>Per-source rate limits</h3>
+    <h3>每源限速 <span class="en">Per-source rate limits</span></h3>
     <table>
-      <tr><th>Source</th><th>Max QPS</th><th>Conc.</th><th></th></tr>
+      <tr>{{ th('数据源', 'Source') }}{{ th('最大 QPS', 'Max QPS') }}{{ th('并发', 'Conc.') }}<th></th></tr>
       {% for r in rate_limits %}
       <tr>
-        <form method="post" action="/panel/proxy/rate-limits/{{ r.source }}">
-        <td>{{ r.source }}{% if not r.throttled %} <span class="muted">(off)</span>{% endif %}</td>
+        <form class="inline-form" method="post" action="/panel/proxy/rate-limits/{{ r.source }}">
+        <td>{{ r.source }}{% if not r.throttled %} <span class="muted">（关 off）</span>{% endif %}</td>
         <td><input type="number" step="0.1" name="max_qps" value="{{ r.max_qps }}"
-                   style="width:5rem" {% if not mgmt_ready %}disabled{% endif %}></td>
+                   class="num-sm" {% if not mgmt_ready %}disabled{% endif %}></td>
         <td><input type="number" name="max_concurrent" value="{{ r.max_concurrent }}"
-                   style="width:4rem" {% if not mgmt_ready %}disabled{% endif %}></td>
-        <td><button class="link" type="submit" {% if not mgmt_ready %}disabled{% endif %}>Save</button></td>
+                   class="num-xs" {% if not mgmt_ready %}disabled{% endif %}></td>
+        <td><button class="link" type="submit" {% if not mgmt_ready %}disabled{% endif %}>保存 Save</button></td>
         </form>
       </tr>
       {% else %}
-      <tr><td colspan="4" class="muted">No rate limits configured (default 1 QPS applies).</td></tr>
+      <tr><td colspan="4" class="muted">未配置限速（默认 1 QPS）No rate limits configured (default 1 QPS applies).</td></tr>
       {% endfor %}
     </table>
 
-    <h3 style="margin-top:1rem">Force circuit reset</h3>
+    <h3 class="mt">强制熔断重置 <span class="en">Force circuit reset</span></h3>
     <form method="post" action="/panel/proxy/circuits/reset">
       <div class="row2">
-        <span><label>Source</label><input type="text" name="source" placeholder="eastmoney" {% if not mgmt_ready %}disabled{% endif %}></span>
-        <span><label>Proxy ID</label><input type="number" name="proxy_id" {% if not mgmt_ready %}disabled{% endif %}></span>
+        <span><label>数据源 Source</label><input type="text" name="source" placeholder="eastmoney" {% if not mgmt_ready %}disabled{% endif %}></span>
+        <span><label>代理 ID Proxy ID</label><input type="number" name="proxy_id" {% if not mgmt_ready %}disabled{% endif %}></span>
       </div>
-      <label>Operator (optional)</label>
+      <label>操作员（可选）Operator (optional)</label>
       <input type="text" name="actor" placeholder="your name">
-      <p><button class="btn" type="submit" {% if not mgmt_ready %}disabled{% endif %}>Reset to HALF_OPEN</button></p>
-      <p class="muted">Forces OPEN → HALF_OPEN bypassing cooldown; a real ban re-opens automatically.</p>
+      <p><button class="btn" type="submit" {% if not mgmt_ready %}disabled{% endif %}>重置为 HALF_OPEN Reset to HALF_OPEN</button></p>
+      <p class="muted">强制 OPEN → HALF_OPEN，绕过冷却 Forces OPEN → HALF_OPEN bypassing cooldown；真实封禁会自动重新打开 a real ban re-opens automatically.</p>
     </form>
   </section>
 </div>
 
-<section class="card">
-  <h3>Ban rules (read-only)</h3>
+<section class="card mt">
+  <h3>封禁规则（只读）<span class="en"> Ban rules (read-only)</span></h3>
   <table>
-    <tr><th>Source</th><th>Type</th><th>Pattern</th><th>Class</th><th>Enabled</th></tr>
+    <tr>{{ th('数据源', 'Source') }}{{ th('类型', 'Type') }}{{ th('模式串', 'Pattern') }}{{ th('分类', 'Class') }}{{ th('启用', 'Enabled') }}</tr>
     {% for r in ban_rules %}
     <tr>
       <td>{{ r.source }}</td><td>{{ r.rule_type }}</td>
@@ -121,7 +121,7 @@
       <td>{{ '✓' if r.enabled else '✗' }}</td>
     </tr>
     {% else %}
-    <tr><td colspan="5" class="muted">No ban rules registered.</td></tr>
+    <tr><td colspan="5" class="muted">没有注册封禁规则 No ban rules registered.</td></tr>
     {% endfor %}
   </table>
 </section>

@@ -1,5 +1,6 @@
+{% from "_macros.html" import th %}
 <table>
-  <tr><th>Policy</th><th>Missed fire</th><th>Late by</th><th>Reason</th></tr>
+  <tr>{{ th('策略', 'Policy') }}{{ th('错过的触发', 'Missed fire') }}{{ th('晚了', 'Late by') }}{{ th('原因', 'Reason') }}</tr>
   {% for m in missed %}
   <tr>
     <td><a href="/panel/policies/{{ m.policy_id }}">{{ m.policy }}</a></td>
@@ -8,6 +9,6 @@
     <td>{{ m.reason }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="4" class="muted">No missed runs. ✓</td></tr>
+  <tr><td colspan="4" class="muted">没有错过的运行 No missed runs. ✓</td></tr>
   {% endfor %}
 </table>

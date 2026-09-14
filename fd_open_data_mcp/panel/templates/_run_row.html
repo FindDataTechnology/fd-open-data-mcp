@@ -1,0 +1,25 @@
+  <tr>
+    <td>{{ r.id }}</td>
+    <td>{% if r.origin == 'adhoc' %}<span class="muted">ad-hoc</span>{% else %}<a href="/panel/policies/{{ r.policy_id }}">{{ r.policy }}</a>{% endif %}</td>
+    <td><span class="badge {{ r.status }}">{{ r.status }}</span>
+      {% if r.status == 'running' %}
+      <span class="confirm">
+        <button type="button" class="link link-danger"
+                onclick="this.closest('.confirm').classList.add('armed')">取消 cancel</button>
+        <span class="confirm-arm">
+          <button type="button" class="link link-danger"
+                  hx-post="/panel/runs/{{ r.id }}/cancel"
+                  hx-target="closest tr" hx-swap="outerHTML">确认确认 cancel</button>
+          <button type="button" class="link"
+                  onclick="this.closest('.confirm').classList.remove('armed')">否 no</button>
+        </span>
+      </span>
+      <noscript><form class="inline-form" method="post" action="/panel/runs/{{ r.id }}/cancel"><button class="link" type="submit">取消 cancel</button></form></noscript>
+      {% endif %}
+    </td>
+    <td>{{ r.estimate }}</td>
+    <td class="muted">{{ r.job_ref or '—' }}</td>
+    <td class="muted">{{ r.started_at or '—' }}</td>
+    <td class="muted">{{ r.finished_at or '—' }}</td>
+    <td class="muted wrap" title="{{ r.detail or '' }}">{{ (r.detail or '')[:80] }}</td>
+  </tr>

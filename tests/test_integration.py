@@ -1,15 +1,30 @@
 """Integration test: full pipeline end-to-end with a mocked fetch runner."""
+from pathlib import Path
+
 import pandas as pd
+import pytest
 
 import fd_open_data_mcp.fetch.dispatch as dispatch_mod
 import fd_open_data_mcp.fetch.instrumentation as instr_mod
 from fd_open_data_mcp.catalog.importer import import_provider
+from fd_open_data_mcp.catalog.providers import PROVIDERS
 from fd_open_data_mcp.entities.resolver import add_identifier, seed_stock_identifiers
 from fd_open_data_mcp.fetch.dispatch import read
 from fd_open_data_mcp.models import Concept, Schedule, SemanticObservation
 from fd_open_data_mcp.refresh.scheduler import generate_schedules
 from fd_open_data_mcp.semantic.bindings import propose_bindings
-from fd_open_data_mcp.semantic.concepts import consume_indicator_defs
+from fd_open_data_mcp.semantic.concepts import (
+    consume_indicator_defs, default_entities_db,
+)
+
+# The pipeline consumes sibling-package registries (fd-akshare registry.db for
+# functions/columns, fd-entities-indicators for indicator_defs concepts); both
+# packages are retired from some workspace checkouts — skip rather than fail.
+pytestmark = pytest.mark.skipif(
+    not Path(PROVIDERS["akshare"]["registry_db"]()).exists()
+    or not Path(default_entities_db()).exists(),
+    reason="sibling registries (fd-akshare / fd-entities-indicators) not in this workspace",
+)
 
 
 def test_full_pipeline(session, monkeypatch):

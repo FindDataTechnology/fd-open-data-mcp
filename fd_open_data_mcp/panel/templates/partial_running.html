@@ -1,5 +1,6 @@
+{% from "_macros.html" import th, svg_progress %}
 <table>
-  <tr><th>Run</th><th>Policy</th><th>Where</th><th>Elapsed</th><th>Progress</th></tr>
+  <tr>{{ th('运行', 'Run') }}{{ th('策略', 'Policy') }}{{ th('位置', 'Where') }}{{ th('已用时', 'Elapsed') }}{{ th('进度', 'Progress') }}</tr>
   {% for r in runs %}
   <tr>
     <td><a href="/panel/runs/{{ r.id }}">#{{ r.id }}</a></td>
@@ -8,14 +9,17 @@
     <td class="muted">{{ r.elapsed_minutes }}m</td>
     <td>
       {% if r.rows_attempted is not none %}
-        {{ r.rows_attempted }}{{ ' / ' ~ r.plan_cells if r.plan_cells else '' }} attempted ·
-        <strong>{{ r.rows_new or 0 }} new</strong>
+        {% if r.plan_cells %}
+          {{ svg_progress(r.rows_attempted, r.plan_cells) }}
+        {% endif %}
+        {{ r.rows_attempted }}{{ ' / ' ~ r.plan_cells if r.plan_cells else '' }} 已试 att ·
+        <strong>{{ r.rows_new or 0 }} 新增 new</strong>
       {% else %}
-        <span class="muted">pod has not reported yield yet</span>
+        <span class="muted">尚未上报产出 pod has not reported yield yet</span>
       {% endif %}
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="5" class="muted">Nothing running.</td></tr>
+  <tr><td colspan="5" class="muted">暂无运行中的爬取 Nothing running.</td></tr>
   {% endfor %}
 </table>

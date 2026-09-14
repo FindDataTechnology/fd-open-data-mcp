@@ -6,6 +6,10 @@ on the first selectable one. Returns the chosen ``(proxy_id, Proxy)`` or
 ``None`` to signal source-level failure (every proxy banned/saturated) so the
 caller can fail over to the next source in the plan's ``ranked_sources`` chain.
 
+Circuits are keyed by *unit* (``pool.circuit_unit``): addresses behind one exit
+IP share a circuit, so the loop skips a unit's remaining addresses once it is
+known unselectable instead of re-checking each one.
+
 Ships-dark: when NO proxies are registered at all, returns a synthetic direct
 proxy (``proxy_id=None``) so behavior matches the pre-proxy baseline - the
 change activates only once a proxy (including ``scheme='direct'``) is
@@ -51,8 +55,13 @@ class ProxySelector:
         if not proxies:
             # ships-dark: no pool registered -> direct, no circuit, no rate limit
             return (None, _DIRECT)
+        dead_units: set[str] = set()
         for p in proxies:
-            if not circuit.is_selectable(source, p.id):
+            unit = pool.circuit_unit(p)
+            if unit in dead_units:
+                continue  # a sibling already proved this unit unselectable
+            if not circuit.is_selectable(source, unit):
+                dead_units.add(unit)
                 continue
             if not rate_limit.acquire(source, p.id, max_qps):
                 continue

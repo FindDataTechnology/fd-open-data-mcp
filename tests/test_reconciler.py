@@ -300,3 +300,64 @@ def test_k8s_launcher_poll_in_cluster(monkeypatch, status, expected):
     monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
                         lambda self, m, p, b=None: {"status": status})
     assert launcher.poll("crawl-policy-7-x") == expected
+
+
+# ── census auto-refresh hook (add-census-auto-refresh) ───────────────────────
+
+def test_reconcile_refreshes_absent_census(session, monkeypatch):
+    """No census rows -> the tick refreshes (with a disabled policy set)."""
+    from unittest.mock import patch
+    from fd_open_data_mcp.refresh import reconciler
+    from fd_open_data_mcp.visibility import census as census_mod
+
+    p = _policy(session, _register(session), enabled=False)
+    calls = []
+    with patch.object(census_mod, "refresh_census", lambda s: calls.append(s)):
+        reconciler.reconcile_once(session, _FakeLauncher(), now=NOW)
+    assert len(calls) == 1
+
+
+def test_reconcile_refreshes_stale_census(session, monkeypatch):
+    import datetime as dt
+    from unittest.mock import patch
+    from fd_open_data_mcp.models import DataCensus
+    from fd_open_data_mcp.refresh import reconciler
+    from fd_open_data_mcp.visibility import census as census_mod
+
+    session.add(DataCensus(store="gz_master", kind="local", exact=True,
+                           sampled_at=dt.datetime.utcnow() - dt.timedelta(hours=48)))
+    session.commit()
+    calls = []
+    with patch.object(census_mod, "refresh_census", lambda s: calls.append(s)):
+        reconciler.reconcile_once(session, _FakeLauncher(), now=NOW)
+    assert len(calls) == 1
+
+
+def test_reconcile_skips_fresh_census(session, monkeypatch):
+    import datetime as dt
+    from unittest.mock import patch
+    from fd_open_data_mcp.models import DataCensus
+    from fd_open_data_mcp.refresh import reconciler
+    from fd_open_data_mcp.visibility import census as census_mod
+
+    session.add(DataCensus(store="gz_master", kind="local", exact=True,
+                           sampled_at=dt.datetime.utcnow()))
+    session.commit()
+    calls = []
+    with patch.object(census_mod, "refresh_census", lambda s: calls.append(s)):
+        reconciler.reconcile_once(session, _FakeLauncher(), now=NOW)
+    assert calls == []
+
+
+def test_census_failure_does_not_abort_tick(session, monkeypatch):
+    """A broken census (e.g. unmigrated DB) leaves the tick's launches intact."""
+    from unittest.mock import patch
+    from fd_open_data_mcp.refresh import reconciler
+    from fd_open_data_mcp.visibility import census as census_mod
+
+    def boom(_s):
+        raise RuntimeError("no such table data_census")
+
+    with patch.object(census_mod, "refresh_census", boom):
+        summary = reconciler.reconcile_once(session, _FakeLauncher(), now=NOW)
+    assert "launched" in summary  # tick completed normally

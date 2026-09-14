@@ -1,38 +1,8 @@
 {% extends "base.html" %}
+{% block title %}运行 Runs · 爬虫控制台{% endblock %}
 {% block content %}
-<h2>Runs</h2>
-<form method="get" action="/panel/runs">
-  <div class="pill-row">
-    <select name="status" onchange="this.form.submit()">
-      <option value="" {{ 'selected' if not status }}>all statuses</option>
-      {% for s in ['running','success','failed','cancelled'] %}
-      <option value="{{ s }}" {{ 'selected' if status == s }}>{{ s }}</option>
-      {% endfor %}
-    </select>
-    <select name="policy_id" onchange="this.form.submit()">
-      <option value="">all policies</option>
-      {% for pid, pname in policies.items() %}
-      <option value="{{ pid }}" {{ 'selected' if request.query_params.get('policy_id')|int == pid }}>{{ pname }}</option>
-      {% endfor %}
-    </select>
-    <noscript><button type="submit">Filter</button></noscript>
-  </div>
-</form>
-<table>
-  <tr><th>ID</th><th>Policy</th><th>Status</th><th>Est. fetches</th><th>Job</th><th>Started</th><th>Finished</th><th>Detail</th></tr>
-  {% for r in runs %}
-  <tr>
-    <td>{{ r.id }}</td>
-    <td>{% if r.origin == 'adhoc' %}<span class="muted">ad-hoc</span>{% else %}<a href="/panel/policies/{{ r.policy_id }}">{{ r.policy }}</a>{% endif %}</td>
-    <td><span class="badge {{ r.status }}">{{ r.status }}</span>{% if r.status == 'running' %}<form method="post" action="/panel/runs/{{ r.id }}/cancel" style="display:inline" onsubmit="return confirm('Cancel run {{ r.id }}? The executor Job is deleted.')"><button class="link" type="submit">cancel</button></form>{% endif %}</td>
-    <td>{{ r.estimate }}</td>
-    <td class="muted">{{ r.job_ref or '—' }}</td>
-    <td class="muted">{{ r.started_at or '—' }}</td>
-    <td class="muted">{{ r.finished_at or '—' }}</td>
-    <td class="muted" title="{{ r.detail or '' }}">{{ (r.detail or '')[:80] }}</td>
-  </tr>
-  {% else %}
-  <tr><td colspan="8" class="muted">No runs.</td></tr>
-  {% endfor %}
-</table>
+<h2>运行 <span class="en">Runs</span></h2>
+<div id="runs-results">
+  {% include "partial_runs_results.html" %}
+</div>
 {% endblock %}

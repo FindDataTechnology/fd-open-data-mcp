@@ -1,59 +1,46 @@
 <!doctype html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}Crawl Control Center{% endblock %}</title>
-  <script src="/panel/static/htmx.min.js"></script>
-  <style>
-    :root { --accent:#2563eb; --muted:#6b7280; --bg:#f8fafc; }
-    * { box-sizing:border-box; }
-    body { font-family:system-ui,-apple-system,sans-serif; margin:0; background:var(--bg); color:#1e293b; }
-    nav { background:#0f172a; color:#fff; padding:.6rem 1rem; display:flex; gap:1.2rem; align-items:center; }
-    nav a { color:#cbd5e1; text-decoration:none; font-size:.95rem; }
-    nav a:hover { color:#fff; }
-    main { max-width:1100px; margin:1.5rem auto; padding:0 1rem; }
-    table { width:100%; border-collapse:collapse; background:#fff; box-shadow:0 1px 3px rgba(0,0,0,.08); }
-    th,td { text-align:left; padding:.5rem .7rem; border-bottom:1px solid #e2e8f0; font-size:.9rem; }
-    th { background:#f1f5f9; }
-    a.btn,button.btn,button.link { color:var(--accent); text-decoration:none; cursor:pointer; background:none; border:none; font-size:.9rem; padding:0; }
-    .badge { display:inline-block; padding:.1rem .5rem; border-radius:999px; font-size:.75rem; }
-    .running{background:#dbeafe;color:#1d4ed8} .success{background:#dcfce7;color:#166534}
-    .failed{background:#fee2e2;color:#991b1b} .refused{background:#fef3c7;color:#92400e}
-    .zero_yield{background:#ffedd5;color:#9a3412} .no_op{background:#e2e8f0;color:#334155}
-    .redundant{background:#ede9fe;color:#5b21b6} .cancelled{background:#f1f5f9;color:#475569;border:1px dashed #94a3b8}
-    form fieldset { border:1px solid #e2e8f0; border-radius:8px; padding:1rem; margin-bottom:1rem; background:#fff; }
-    form legend { font-weight:600; padding:0 .4rem; }
-    label { display:block; margin:.5rem 0 .2rem; font-size:.85rem; color:#475569; }
-    input[type=text],input[type=date],input[type=number],select { width:100%; padding:.45rem .6rem; border:1px solid #cbd5e1; border-radius:6px; font-size:.9rem; }
-    .row { display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem; }
-    .row2 { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
-    .concepts { max-height:300px; overflow:auto; border:1px solid #e2e8f0; border-radius:6px; padding:.5rem; background:#fff; }
-    .concepts fieldset { border:none; padding:.2rem 0 .4rem; }
-    .concepts legend { font-weight:600; font-size:.85rem; color:#334155; }
-    .concepts label { font-size:.85rem; }
-    #estimate { margin-top:.6rem; font-size:.9rem; }
-    .muted { color:var(--muted); font-size:.85rem; }
-    .grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; }
-    .pill-row { display:flex; gap:1.5rem; align-items:center; }
-    .home-grid { display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem; }
-    .card { background:#fff; border:1px solid #e2e8f0; border-radius:8px; padding:.8rem 1rem; box-shadow:0 1px 3px rgba(0,0,0,.06); overflow:auto; }
-    .card h3 { margin:.2rem 0 .6rem; font-size:1rem; }
-    .banner { padding:.6rem .9rem; border-radius:8px; margin:.8rem 0; font-size:.9rem; }
-    .banner.warn { background:#fef3c7; color:#92400e; border:1px solid #fde68a; }
-  </style>
+  <title>{% block title %}爬虫控制台 Crawl Control Center{% endblock %}</title>
+  {#- apply the stored theme before first paint (design D2); no-JS clients
+      fall back to prefers-color-scheme tokens in app.css -#}
+  <script>(function(){try{var t=localStorage.getItem("panel-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}})();</script>
+  <link rel="stylesheet" href="/panel/static/app.css">
+  <link rel="icon" href="data:,">
+  <script src="/panel/static/htmx.min.js" defer></script>
+  <script src="/panel/static/app.js" defer></script>
 </head>
 <body>
-  <nav>
-    <strong>fd Crawl Control</strong>
-    <a href="/panel">Home</a>
-    <a href="/panel/policies">Policies</a>
-    <a href="/panel/runs">Runs</a>
-    <a href="/panel/proxy">Proxy</a>
-    <a href="/panel/data">Data</a>
-    <a href="/panel/policies/new">+ New</a>
-    <span style="margin-left:auto" hx-get="/panel/auth/whoami" hx-trigger="load" hx-swap="innerHTML"></span>
-  </nav>
-  <main>{% block content %}{% endblock %}</main>
+  <svg xmlns="http://www.w3.org/2000/svg" hidden>
+    <symbol id="i-home" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
+    <symbol id="i-policies" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></symbol>
+    <symbol id="i-runs" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l6-3.5z"/></symbol>
+    <symbol id="i-proxy" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/></symbol>
+    <symbol id="i-data" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
+  </svg>
+
+  <div class="shell">
+    <aside class="sidenav">
+      <div class="brand">fd 爬虫控制台<span class="en">CRAWL CONTROL</span></div>
+      {% set path = request.url.path %}
+      <nav>
+        <a class="nav-link {{ 'active' if path == '/panel' }}" href="/panel"><svg><use href="#i-home"/></svg>总览 <span class="en">Home</span></a>
+        <a class="nav-link {{ 'active' if path.startswith('/panel/policies') }}" href="/panel/policies"><svg><use href="#i-policies"/></svg>策略 <span class="en">Policies</span></a>
+        <a class="nav-link {{ 'active' if path.startswith('/panel/runs') }}" href="/panel/runs"><svg><use href="#i-runs"/></svg>运行 <span class="en">Runs</span></a>
+        <a class="nav-link {{ 'active' if path.startswith('/panel/proxy') }}" href="/panel/proxy"><svg><use href="#i-proxy"/></svg>代理 <span class="en">Proxy</span></a>
+        <a class="nav-link {{ 'active' if path.startswith('/panel/data') }}" href="/panel/data"><svg><use href="#i-data"/></svg>数据 <span class="en">Data</span></a>
+      </nav>
+      <div class="sidenav-foot">
+        <a class="nav-new" href="/panel/policies/new">＋ 新建策略 <span class="en">New</span></a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="切换主题 Toggle theme">☾</button>
+        <span class="whoami" hx-get="/panel/auth/whoami" hx-trigger="load" hx-swap="innerHTML"></span>
+      </div>
+    </aside>
+    <main class="content">{% block content %}{% endblock %}</main>
+  </div>
+
+  <div id="toast-region" class="toast-region" aria-live="polite"></div>
 </body>
 </html>

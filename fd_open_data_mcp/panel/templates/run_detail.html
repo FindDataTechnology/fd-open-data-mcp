@@ -1,10 +1,12 @@
 {% extends "base.html" %}
-{% block title %}Run #{{ run.id }} · Crawl Control Center{% endblock %}
+{% from "_macros.html" import th, lbl %}
+{% block title %}运行 Run #{{ run.id }} · 爬虫控制台{% endblock %}
 {% block content %}
-<h2>Run #{{ run.id }} — {{ policy_name }}</h2>
+<h2>运行 Run #{{ run.id }} — {{ policy_name }}</h2>
 
+<div class="table-wrap">
 <table>
-  <tr><th>Status</th><th>Job</th><th>Cluster</th><th>Started</th><th>Finished</th><th>Duration</th></tr>
+  <tr>{{ th('状态', 'Status') }}{{ th('任务', 'Job') }}{{ th('集群', 'Cluster') }}{{ th('开始', 'Started') }}{{ th('结束', 'Finished') }}{{ th('时长', 'Duration') }}</tr>
   <tr>
     <td><span class="badge {{ run.status }}">{{ run.status }}</span></td>
     <td class="muted">{{ run.job_ref or '—' }}</td>
@@ -14,45 +16,66 @@
     <td class="muted">{{ duration_min ~ 'm' if duration_min is not none else '—' }}</td>
   </tr>
 </table>
+</div>
 
-<h3>Yield</h3>
+<h3>产出 <span class="en">Yield</span></h3>
+<div class="table-wrap">
 <table>
-  <tr><th>Plan cells</th><th>Rows attempted</th><th>Rows new</th></tr>
+  <tr>{{ th('计划格子', 'Plan cells') }}{{ th('尝试试行数', 'Rows attempted') }}{{ th('新增行数', 'Rows new') }}</tr>
   <tr>
     <td>{{ run.plan_cells if run.plan_cells is not none else '—' }}</td>
     <td>{{ run.rows_attempted if run.rows_attempted is not none else '—' }}</td>
     <td>{{ run.rows_new if run.rows_new is not none else '—' }}</td>
   </tr>
 </table>
+</div>
 {% if run.detail %}<p class="muted">{{ run.detail }}</p>{% endif %}
 
-<h3>Plan</h3>
+<h3>计划 <span class="en">Plan</span></h3>
+<div class="table-wrap">
 <table>
-  <tr><th>Mode</th><th>Entity scope</th><th>Dates</th></tr>
+  <tr>{{ th('模式', 'Mode') }}{{ th('实体范围', 'Entity scope') }}{{ th('日期', 'Dates') }}</tr>
   <tr>
     <td>{{ plan.mode or '—' }}</td>
-    <td class="muted">{{ plan.entity_type }}{% if plan.entity_ids %} ({{ plan.entity_ids | length }} explicit){% else %} (all){% endif %}</td>
+    <td class="muted">{{ plan.entity_type }}{% if plan.entity_ids %} ({{ plan.entity_ids | length }} 显式 explicit){% else %} (全部 all){% endif %}</td>
     <td class="muted">{{ plan.start or '?' }} → {{ plan.end or '?' }}</td>
   </tr>
 </table>
+</div>
+<div class="table-wrap">
 <table>
-  <tr><th>Concept</th><th>Ranked sources</th></tr>
+  <tr>{{ th('概念', 'Concept') }}{{ th('排序后的源', 'Ranked sources') }}</tr>
   {% for c in plan.concepts %}
   <tr><td>{{ c.code or c.id }}</td><td class="muted">{{ c.sources | join(' → ') or '—' }}</td></tr>
   {% else %}
-  <tr><td colspan="2" class="muted">No compiled plan on this run.</td></tr>
+  <tr><td colspan="2" class="muted">该运行没有编译计划 No compiled plan on this run.</td></tr>
   {% endfor %}
 </table>
+</div>
 
-<h3>Fetches during run window</h3>
-<p class="muted">Approximation: fetch_log rows between {{ fetch_window[0] or '?' }} and {{ fetch_window[1] }},
+<h3>运行窗口内的抓取 <span class="en">Fetches during run window</span></h3>
+<p class="muted">近似值 Approximation: fetch_log 在 {{ fetch_window[0] or '?' }} 到 {{ fetch_window[1] }} 之间的行，
+过滤到本次运行计划的概念{% if cluster_name %}和集群{% endif %} — 相互重叠的运行可能重复计数。
 filtered to this run's plan concepts{% if cluster_name %} and cluster{% endif %} — overlapping runs may double-count.</p>
+{% block fetch_viz %}
+{% from "_macros.html" import svg_timeline %}
+{% if fetch_timeline %}
+<div class="card">
+  {{ svg_timeline(fetch_timeline) }}
+  <p class="muted">{% for f in fetch_summary %}{{ f.status }} {{ f.count }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
+  <div class="legend"><span><span class="swatch sw-fresh"></span>ok 成功</span><span><span class="swatch sw-stale"></span>err 错误</span></div>
+</div>
+{% else %}
+<div class="table-wrap">
 <table>
-  <tr><th>Status</th><th>Count</th></tr>
+  <tr>{{ th('状态', 'Status') }}{{ th('数量', 'Count') }}</tr>
   {% for f in fetch_summary %}
   <tr><td>{{ f.status }}</td><td>{{ f.count }}</td></tr>
   {% else %}
-  <tr><td colspan="2" class="muted">No fetches recorded in the window.</td></tr>
+  <tr><td colspan="2" class="muted">窗口内没有抓取记录 No fetches recorded in the window.</td></tr>
   {% endfor %}
 </table>
+</div>
+{% endif %}
+{% endblock %}
 {% endblock %}

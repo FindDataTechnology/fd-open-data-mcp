@@ -417,6 +417,7 @@ def pick_cluster(session: Session, plan: CrawlPlan | None, policy: CrawlPolicy |
     policy's source_filter; if that's NULL (all sources), any tagged cluster is
     eligible."""
     from fd_open_data_mcp.proxy.circuit import is_selectable
+    from fd_open_data_mcp.proxy.pool import circuit_unit
 
     if plan is not None:
         sources = {rs.source for pc in plan.wanted_concepts for rs in pc.ranked_sources}
@@ -439,7 +440,7 @@ def pick_cluster(session: Session, plan: CrawlPlan | None, policy: CrawlPolicy |
         direct = (session.query(Proxy)
                   .filter_by(scheme="direct", cluster_id=c.id).first())
         if direct is not None and direct.id is not None:
-            if not all(is_selectable(src, direct.id) for src in sources):
+            if not all(is_selectable(src, circuit_unit(direct)) for src in sources):
                 continue  # this cluster's egress is banned for a required source
         eligible.append((c, open_runs))
     if not eligible:

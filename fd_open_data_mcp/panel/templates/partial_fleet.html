@@ -1,36 +1,8 @@
+{% from "_macros.html" import th %}
 <table>
-  <tr><th>Cluster</th><th>Open/Cap</th><th>Jobs (live)</th><th>Reachable</th><th>Egress</th><th>Tags</th></tr>
-  {% for f in fleet %}
-  <tr>
-    <td>{{ f.name }}{% if not f.enabled %} <span class="muted">(disabled)</span>{% endif %}</td>
-    <td>
-      <form method="post" action="/panel/clusters/{{ f.id }}/capacity" style="display:inline">
-        <input type="number" name="capacity" value="{{ f.capacity }}" min="0"
-               style="width:3.5rem" title="max concurrent open runs — effective next tick">
-        <button class="link" type="submit" title="save capacity">↧</button>
-      </form>
-      <span class="muted">open {{ f.open_runs }}</span>
-      {% if f.open_runs > f.capacity %}<span class="badge refused">over</span>{% endif %}
-    </td>
-    <td>
-      {% if f.open_runs == 0 %}<span class="muted">idle</span>{% else %}
-        {% if f.job_states.running %}<span class="badge running">{{ f.job_states.running }} running</span>{% endif %}
-        {% if f.job_states.failed %}<span class="badge failed">{{ f.job_states.failed }} crashed</span>{% endif %}
-        {% if f.job_states.success %}<span class="badge success">{{ f.job_states.success }} done*</span>{% endif %}
-        {% if f.job_states.unknown %}<span class="badge no_op">{{ f.job_states.unknown }} ?</span>{% endif %}
-      {% endif %}
-    </td>
-    <td>{% if f.reachable is none %}<span class="muted">—</span>
-        {% elif f.reachable %}<span class="badge success">up</span>
-        {% else %}<span class="badge failed">unreachable</span>{% endif %}</td>
-    <td>{% if not f.egress_known %}<span class="muted">—</span>
-        {% elif f.egress_banned_count == 0 %}<span class="badge success">ok</span>
-        {% else %}<span class="badge failed">{{ f.egress_banned_count }} banned</span>
-          <span class="muted">{{ f.egress_banned | join(', ') }}</span>{% endif %}</td>
-    <td class="muted">{{ f.tags | join(', ') or '—' }}</td>
-  </tr>
-  {% else %}
-  <tr><td colspan="6" class="muted">No clusters registered.</td></tr>
+  <tr>{{ th('集群', 'Cluster') }}{{ th('并发 开/上限', 'Open/Cap') }}{{ th('任务（实时）', 'Jobs (live)') }}{{ th('可达', 'Reachable') }}{{ th('出口', 'Egress') }}{{ th('标签', 'Tags') }}</tr>
+  {% for f in fleet %}{% include "_fleet_row.html" %}{% else %}
+  <tr><td colspan="6" class="muted">没有注册的集群 No clusters registered.</td></tr>
   {% endfor %}
 </table>
-<p class="muted">* done = Job exited but its run row is not closed yet (reconciler lag).</p>
+<p class="muted">* done* = Job 已退出但 run 行尚未关闭（reconciler 延迟） Job exited but its run row is not closed yet (reconciler lag).</p>

@@ -1,5 +1,8 @@
 """MCP server tests: tool registration + a couple invocations."""
 import asyncio
+from pathlib import Path
+
+import pytest
 
 from fd_open_data_mcp.server import mcp
 
@@ -20,6 +23,13 @@ def test_list_concepts_tool(session):
     assert isinstance(list_concepts(), list)
 
 
+def _akshare_registry_present() -> bool:
+    from fd_open_data_mcp.catalog.providers import PROVIDERS
+    return Path(PROVIDERS["akshare"]["registry_db"]()).exists()
+
+
+@pytest.mark.skipif(not _akshare_registry_present(),
+                    reason="fd-akshare registry.db not in this workspace (package retired)")
 def test_import_catalog_tool(session):
     from fd_open_data_mcp.server import import_catalog
     r = import_catalog("akshare")

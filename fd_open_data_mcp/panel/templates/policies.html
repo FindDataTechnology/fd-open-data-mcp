@@ -1,40 +1,20 @@
 {% extends "base.html" %}
+{% from "_macros.html" import th, lbl %}
+{% block title %}策略 Policies · 爬虫控制台{% endblock %}
 {% block content %}
-<h2>Policies</h2>
+<h2>策略 <span class="en">Policies</span></h2>
 <p class="pill-row">
-  <span class="muted">New from frequency template:</span>
+  <span class="muted">从频率模板新建 New from frequency template:</span>
   {% for f in ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'] %}
   <a class="btn" href="/panel/policies/template?frequency={{ f }}">{{ f }}</a>
   {% endfor %}
 </p>
+<div class="table-wrap">
 <table>
-  <tr><th>ID</th><th>Name</th><th>Entity</th><th>Concepts</th><th>Mode</th><th>Freq</th><th>Cron ({{ 'tz' }})</th><th>Last run</th><th>Enabled</th><th></th></tr>
-  {% for p in policies %}
-  <tr>
-    <td>{{ p.id }}</td>
-    <td><a href="/panel/policies/{{ p.id }}">{{ p.name }}</a></td>
-    <td>{{ p.entity_type }}{% if p.entity_ids %}<span class="muted"> ({{ p.entity_ids|length }} ids)</span>{% else %}<span class="muted"> (all)</span>{% endif %}</td>
-    <td class="muted">{{ p.concept_ids|length }}</td>
-    <td>{{ p.mode }}</td>
-    <td>{{ p.frequency }}</td>
-    <td class="muted">{{ p.cron_expr }} {{ p.timezone }}</td>
-    <td class="muted">{{ p.last_run_at or '—' }}</td>
-    <td>
-      <form method="post" action="/panel/policies/{{ p.id }}/toggle">
-        <button type="submit" class="badge {{ 'success' if p.enabled else 'refused' }}">{{ 'ON' if p.enabled else 'OFF' }}</button>
-      </form>
-    </td>
-    <td>
-      <form method="post" action="/panel/policies/{{ p.id }}/run-now">
-        <button type="submit" class="btn" title="bypasses cron, not guardrails">run-now</button>
-      </form>
-      <form method="post" action="/panel/policies/{{ p.id }}/delete" onsubmit="return confirm('delete policy {{ p.id }}?')">
-        <button type="submit" class="link" style="color:#dc2626">delete</button>
-      </form>
-    </td>
-  </tr>
-  {% else %}
-  <tr><td colspan="10" class="muted">No policies yet. <a href="/panel/policies/new">Create one</a>.</td></tr>
+  <tr>{{ th('ID') }}{{ th('名称', 'Name') }}{{ th('实体', 'Entity') }}{{ th('概念', 'Concepts') }}{{ th('模式', 'Mode') }}{{ th('频率', 'Freq') }}{{ th('Cron', 'tz') }}{{ th('上次运行', 'Last run') }}{{ th('启用', 'Enabled') }}<th></th></tr>
+  {% for p in policies %}{% include "_policy_row.html" %}  {% else %}
+  <tr><td colspan="10" class="muted">暂无策略 No policies yet. <a href="/panel/policies/new">创建一个 Create one</a>.</td></tr>
   {% endfor %}
 </table>
+</div>
 {% endblock %}

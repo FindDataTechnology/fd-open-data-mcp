@@ -1,5 +1,6 @@
+{% from "_macros.html" import th %}
 <table>
-  <tr><th>Source</th><th>Proxy</th><th>State</th><th>Fail streak</th><th>Cycles</th><th>Permanent</th><th>Cooldown</th><th>Last success</th></tr>
+  <tr>{{ th('数据源', 'Source') }}{{ th('代理', 'Proxy') }}{{ th('状态', 'State') }}{{ th('连败', 'Fail streak') }}{{ th('熔断次数', 'Cycles') }}{{ th('永久', 'Permanent') }}{{ th('冷却至', 'Cooldown') }}{{ th('最近成功', 'Last success') }}</tr>
   {% for c in circuits %}
   <tr>
     <td>{{ c.source }}</td>
@@ -7,11 +8,11 @@
     <td><span class="badge {% if c.state == 'open' %}failed{% elif c.state == 'half_open' %}refused{% else %}success{% endif %}">{{ c.state }}</span></td>
     <td>{{ c.fail_streak }}</td>
     <td>{{ c.open_cycles }}</td>
-    <td>{% if c.permanent %}<span class="badge failed">permanent</span>{% else %}—{% endif %}</td>
+    <td>{% if c.permanent %}<span class="badge failed">永久 permanent</span>{% else %}—{% endif %}</td>
     <td class="muted">{{ c.cooldown_until or '—' }}</td>
     <td class="muted">{{ c.last_success_at or '—' }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="8" class="muted">No circuit state recorded yet.</td></tr>
+  <tr><td colspan="8" class="muted">暂无熔断状态 No circuit state recorded yet.</td></tr>
   {% endfor %}
 </table>

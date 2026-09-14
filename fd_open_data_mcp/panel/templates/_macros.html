@@ -1,0 +1,80 @@
+{#- Shared helpers: bilingual chrome text + dumb SVG renderers (panel-ui-refresh
+    design D3/D4). Geometry comes from panel.charts; these macros only render. -#}
+
+{% macro th(zh, en='') -%}
+<th>{{ zh }}{% if en %} <span class="en">{{ en }}</span>{% endif %}</th>
+{%- endmacro %}
+
+{% macro lbl(zh, en='') -%}
+{{ zh }}{% if en %} <span class="en">{{ en }}</span>{% endif %}
+{%- endmacro %}
+
+{#- Column chart: g = charts.bar_geometry(...) -#}
+{% macro svg_bars(g) -%}
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" preserveAspectRatio="xMidYMid meet">
+  <line class="axis" x1="{{ g.pad }}" y1="{{ g.h - g.pad }}" x2="{{ g.w - g.pad }}" y2="{{ g.h - g.pad }}"/>
+  {% for b in g.bars %}
+  <rect class="bar" x="{{ b.x }}" y="{{ b.y }}" width="{{ b.bw }}" height="{{ b.bh }}" rx="2"><title>{{ b.title }}</title></rect>
+  <text x="{{ b.x + b.bw / 2 }}" y="{{ g.h - g.pad + 14 }}" text-anchor="middle">{{ b.label }}</text>
+  {% endfor %}
+</svg>
+{%- endmacro %}
+
+{#- Sparkline: g = charts.sparkline_geometry(...) -#}
+{% macro svg_sparkline(g) -%}
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" preserveAspectRatio="none">
+  {% if g.points %}
+  <polygon class="spark-area" points="{{ g.area }}"/>
+  <polyline class="spark" points="{{ g.points }}"/>
+  {% endif %}
+</svg>
+{%- endmacro %}
+
+{#- Stacked ok/err timeline: g = charts.timeline_geometry(...) -#}
+{% macro svg_timeline(g) -%}
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" preserveAspectRatio="xMidYMid meet">
+  <line class="axis" x1="{{ g.pad }}" y1="{{ g.h - g.pad }}" x2="{{ g.w - g.pad }}" y2="{{ g.h - g.pad }}"/>
+  {% for c in g.cols %}
+    {% if c.ok_h %}<rect class="bar-ok" x="{{ c.x }}" y="{{ c.ok_y }}" width="{{ c.bw }}" height="{{ c.ok_h }}"><title>{{ c.title }}</title></rect>{% endif %}
+    {% if c.err_h %}<rect class="bar-err" x="{{ c.x }}" y="{{ c.err_y }}" width="{{ c.bw }}" height="{{ c.err_h }}"><title>{{ c.title }}</title></rect>{% endif %}
+  {% endfor %}
+</svg>
+{%- endmacro %}
+
+{#- Progress bar rendered as SVG so fill width is an attribute, not inline CSS -#}
+{% macro svg_progress(value, maximum, w=120, h=10) -%}
+{% set fraction = (value / maximum) if maximum else 0 %}
+{% set fraction = [[fraction, 1] | min, 0] | max %}
+{% set fw = (w * fraction) | round(1) %}
+<svg class="progress-svg" width="{{ w }}" height="{{ h }}" viewBox="0 0 {{ w }} {{ h }}" role="img" preserveAspectRatio="none">
+  <rect class="progress-track" x="0.5" y="0.5" width="{{ w - 1 }}" height="{{ h - 1 }}" rx="{{ h / 2 }}"/>
+  {% if fw > 0 %}<rect class="progress-fill" x="0" y="0" width="{{ fw }}" height="{{ h }}" rx="{{ h / 2 }}"/>{% endif %}
+</svg>
+{%- endmacro %}
+
+{#- Freshness heatmap tiles: g = charts.heatmap_tiles(...); link_prefix makes
+    each tile drill into the filtered detail table, active_key outlines the
+    currently selected bucket -#}
+{% macro svg_heatmap(g, link_prefix=None, active_key=None) -%}
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" preserveAspectRatio="xMidYMid meet">
+  {% for t in g.tiles %}
+  {% if link_prefix %}<a href="{{ link_prefix }}{{ t.key }}">{% endif %}
+  <g class="{{ 'heat-active' if active_key == t.key }}">
+  <rect class="heat-{{ t.key }}" x="{{ t.x }}" y="0" width="{{ t.w }}" height="{{ g.h * 0.72 }}" rx="6"><title>{{ t.title }}</title></rect>
+  <text class="heat-text" x="{{ t.cx }}" y="{{ g.h * 0.45 }}" text-anchor="middle" font-size="20">{{ t.count }}</text>
+  <text x="{{ t.cx }}" y="{{ g.h * 0.72 + 16 }}" text-anchor="middle">{{ t.label }}</text>
+  <text x="{{ t.cx }}" y="{{ g.h * 0.72 + 30 }}" text-anchor="middle">{{ t.threshold }}</text>
+  </g>
+  {% if link_prefix %}</a>{% endif %}
+  {% endfor %}
+</svg>
+{%- endmacro %}
+
+{% macro legend_freshness() -%}
+<div class="legend">
+  <span><span class="swatch sw-fresh"></span>新鲜 ≤7d fresh</span>
+  <span><span class="swatch sw-aging"></span>老化 7–30d aging</span>
+  <span><span class="swatch sw-stale"></span>过期 &gt;30d stale</span>
+  <span><span class="swatch sw-never"></span>无观测 never</span>
+</div>
+{%- endmacro %}

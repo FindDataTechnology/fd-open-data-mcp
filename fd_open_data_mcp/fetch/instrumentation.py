@@ -46,6 +46,7 @@ from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.fetch.runner import FetchError, run_upstream
 from fd_open_data_mcp.models import FetchLog
 from fd_open_data_mcp.proxy import ban_rules, circuit, injection
+from fd_open_data_mcp.proxy import pool as proxy_pool
 
 logger = logging.getLogger(__name__)
 
@@ -238,7 +239,12 @@ def instrumented_fetch(
                     detail = str(e)
                     last_error = detail
                     status = "error"
-                    st = circuit.get_state(circuit_source, acq.addr_id) if acq.addr_id is not None else {"fail_streak": 0}
+                    # Keyed by circuit unit, not raw addr_id: addresses sharing
+                    # an exit IP share one circuit.
+                    st = (circuit.get_state(
+                        circuit_source,
+                        proxy_pool.unit_for_proxy_id(session, acq.addr_id))
+                        if acq.addr_id is not None else {"fail_streak": 0})
                     # Thread the HTTP status/body carried by FetchError so
                     # status-based + body-based ban rules (403/429/captcha) can
                     # match. Connection errors (RemoteDisconnected, timeout)

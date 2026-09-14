@@ -1,0 +1,1317 @@
+{
+  "generated_at": "2026-09-11T02:40:58+00:00",
+  "backlog": {
+    "archive_delete": {
+      "empty_dirs": [
+        "fd-industry-data/ers",
+        "fd-industry-data/spid",
+        "fd-open-data-mcp/{{pkgetc}}"
+      ],
+      "codeless_spider_dirs": [
+        "fd-industry-data/spiders/cba-banking",
+        "fd-industry-data/spiders/ifind-public",
+        "fd-industry-data/spiders/kaggle-datasets",
+        "fd-industry-data/spiders/oilchem",
+        "fd-industry-data/spiders/toutiao-open",
+        "fd-industry-data/spiders/wind-public",
+        "fd-industry-data/spiers/cisa",
+        "fd-industry-data/spiers/cisa_spider",
+        "fd-industry-data/spiers/gov-stats-czce",
+        "fd-industry-data/spiers/gov-stats-dce",
+        "fd-industry-data/spiers/gov-stats-moa",
+        "fd-industry-data/spiers/gov-stats-nbs",
+        "fd-industry-data/spiers/gov-stats-pbc",
+        "fd-industry-data/spiers/stats-data-query"
+      ],
+      "litter_files": [
+        "fd-industry-data/COMMODITY_DATA_DICTIONARY.md",
+        "fd-industry-data/COMMODITY_SPIDERS_COMPLETE.md",
+        "fd-industry-data/COMPLETION_SUMMARY.md",
+        "fd-industry-data/FINAL_SUMMARY.md",
+        "fd-industry-data/GETTING_STARTED_COMMODITY.md",
+        "fd-industry-data/IMPLEMENTATION_SUMMARY.md",
+        "fd-industry-data/PROJECT_COMPLETE_REPORT.md",
+        "fd-industry-data/PROJECT_SUMMARY.md",
+        "fd-industry-data/SPIDERS_CREATED.md",
+        "fd-industry-data/SPIDER_GENERATION_COMPLETE.md",
+        "fd-industry-data/SPIDER_GENERATION_SUMMARY.md",
+        "fd-industry-data/SPIRERS_GENERATION_SUMMARY.md",
+        "fd-industry-data/STEEL_CREATION_SUMMARY.md",
+        "fd-industry-data/STEEL_DATA_README.md",
+        "fd-industry-data/SUMMARY.md",
+        "fd-industry-data/getting_started.sh",
+        "fd-industry-data/spiders/.generation_progress.txt",
+        "fd-industry-data/spiders/BATCH1_GENERATION_SUMMARY.md",
+        "fd-industry-data/spiders/CREATION_SUMMARY.md",
+        "fd-industry-data/spiders/DATA_DICTIONARY.md",
+        "fd-industry-data/spiders/PROJECT_COMPLETION.md",
+        "fd-industry-data/spiders/quick_start.sh",
+        "fd-industry-data/spiers/.DS_Store",
+        "fd-industry-data/spiers/FINANCIAL_PLATFORMS_COMPLETE.md",
+        "fd-industry-data/spiers/IMPLEMENTATION_SUMMARY.md",
+        "fd-industry-data/spiers/METAL_MINING_SPIDERS_COMPLETE.md",
+        "fd-industry-data/spiers/QUICKSTART.md",
+        "fd-industry-data/spiers/README.md",
+        "fd-industry-data/spiers/test_chinese_media_spiders.py",
+        "fd-industry-data/spiers/test_financial_spiders.py",
+        "fd-industry-data/spiers/test_metal_spiders.py",
+        "fd-open-data-mcp/RELEASE_SUMMARY.md",
+        "fd-open-data-mcp/SETUP_SUMMARY.md"
+      ],
+      "l4_units": [
+        "fd_open_data_mcp/adapters/agriculture.py",
+        "fd_open_data_mcp/adapters/amac-fund.py",
+        "fd_open_data_mcp/adapters/amac_fund.py",
+        "fd_open_data_mcp/adapters/chemicals.py",
+        "fd_open_data_mcp/adapters/cisa-industry.py",
+        "fd_open_data_mcp/adapters/cisa_industry.py",
+        "fd_open_data_mcp/adapters/cme_agricultural.py",
+        "fd_open_data_mcp/adapters/cnreport.py",
+        "fd_open_data_mcp/adapters/dce_agricultural.py",
+        "fd_open_data_mcp/adapters/electronics.py",
+        "fd_open_data_mcp/adapters/fin_platforms.py",
+        "fd_open_data_mcp/adapters/flowers_kifc.py",
+        "fd_open_data_mcp/adapters/nbs-gdp.py",
+        "fd_open_data_mcp/adapters/nonferrous.py",
+        "fd_open_data_mcp/adapters/sac_securities.py",
+        "fd_open_data_mcp/adapters/shfe_futures.py",
+        "fd_open_data_mcp/adapters/steel-assoc.py",
+        "fd_open_data_mcp/adapters/wbgapi.py",
+        "scraw-flowers-kifc",
+        "scraw-nbs-gdp",
+        "scripts/verify_nbs_spider.py",
+        "spiders/alphavantage",
+        "spiders/amac",
+        "spiders/antaike",
+        "spiders/autoflowassoc",
+        "spiders/baiinfo",
+        "spiders/bureauoflaborstatistics",
+        "spiders/caict",
+        "spiders/cas",
+        "spiders/cba",
+        "spiders/ccidconsulting",
+        "spiders/ccin",
+        "spiders/china-flower-assoc",
+        "spiders/chinaautoassoc",
+        "spiders/chinaironandsteelassociation",
+        "spiders/cinnoresearch",
+        "spiders/cmegroupagriculture",
+        "spiders/cnki",
+        "spiders/cnmia",
+        "spiders/coinmarketcapapi",
+        "spiders/cpcif",
+        "spiders/cpcifa",
+        "spiders/crugroup",
+        "spiders/csmar",
+        "spiders/czce",
+        "spiders/datagov",
+        "spiders/digitimesresearch",
+        "spiders/envdata",
+        "spiders/fastmarkets",
+        "spiders/fastmarketsmb",
+        "spiders/financeministry",
+        "spiders/flowers_kifc",
+        "spiders/governmentstats",
+        "spiders/healthcommission",
+        "spiders/huggingfacedatasets",
+        "spiders/iac",
+        "spiders/ifind",
+        "spiders/intriniofinancialdata",
+        "spiders/kaggledatasets",
+        "spiders/kagglezhihudatasets",
+        "spiders/kitcopreciousbasemetals",
+        "spiders/lme",
+        "spiders/lmelondonmetalexchange",
+        "spiders/longzhong",
+        "spiders/ministryofeducation",
+        "spiders/moa",
+        "spiders/nbs-query",
+        "spiders/nbs-stats-http",
+        "spiders/oschinaprojectstatistics",
+        "spiders/pbc",
+        "spiders/people-data",
+        "spiders/polygoniostockmarketdata",
+        "spiders/sac",
+        "spiders/semi",
+        "spiders/shanghaifuturesexchangeshfe",
+        "spiders/shanghaimetalsmarketsmm",
+        "spiders/shfe",
+        "spiders/smm",
+        "spiders/socialsciences",
+        "spiders/spglobalcommodityinsightsmeta",
+        "spiders/src-10",
+        "spiders/src-100",
+        "spiders/src-101",
+        "spiders/src-102",
+        "spiders/src-105",
+        "spiders/src-107",
+        "spiders/src-11",
+        "spiders/src-111",
+        "spiders/src-115",
+        "spiders/src-118",
+        "spiders/src-12",
+        "spiders/src-125",
+        "spiders/src-126",
+        "spiders/src-14",
+        "spiders/src-15",
+        "spiders/src-16",
+        "spiders/src-17",
+        "spiders/src-18",
+        "spiders/src-19",
+        "spiders/src-20",
+        "spiders/src-21",
+        "spiders/src-22",
+        "spiders/src-25",
+        "spiders/src-27",
+        "spiders/src-3",
+        "spiders/src-30",
+        "spiders/src-31",
+        "spiders/src-34",
+        "spiders/src-35",
+        "spiders/src-36",
+        "spiders/src-38",
+        "spiders/src-39",
+        "spiders/src-4",
+        "spiders/src-40",
+        "spiders/src-41",
+        "spiders/src-47",
+        "spiders/src-5",
+        "spiders/src-50",
+        "spiders/src-51",
+        "spiders/src-52",
+        "spiders/src-53",
+        "spiders/src-54",
+        "spiders/src-55",
+        "spiders/src-56",
+        "spiders/src-58",
+        "spiders/src-59",
+        "spiders/src-6",
+        "spiders/src-62",
+        "spiders/src-63",
+        "spiders/src-70",
+        "spiders/src-71",
+        "spiders/src-73",
+        "spiders/src-74",
+        "spiders/src-75",
+        "spiders/src-76",
+        "spiders/src-77",
+        "spiders/src-78",
+        "spiders/src-79",
+        "spiders/src-80",
+        "spiders/src-85",
+        "spiders/src-89",
+        "spiders/src-9",
+        "spiders/src-90",
+        "spiders/src-91",
+        "spiders/src-93",
+        "spiders/src-94",
+        "spiders/src-95",
+        "spiders/src-96",
+        "spiders/src-97",
+        "spiders/src-98",
+        "spiders/steelhome",
+        "spiders/trendforcemarketintelligence",
+        "spiders/tusharefinancialdataplatform",
+        "spiders/tusharepro",
+        "spiders/ucimachinelearningrepository",
+        "spiders/wechat-open-doc",
+        "spiders/wechatofficialaccountmanagement",
+        "spiders/wind",
+        "spiders/worldsteelassociation",
+        "spiders/zhuochuang",
+        "spiers/199it",
+        "spiers/agri-cn",
+        "spiers/agriculture",
+        "spiers/amac",
+        "spiers/amac_spider.py",
+        "spiers/caac",
+        "spiers/caam",
+        "spiers/caep",
+        "spiers/caict",
+        "spiers/camdi",
+        "spiers/cast",
+        "spiers/catering",
+        "spiers/cba",
+        "spiers/cca",
+        "spiers/ccfa",
+        "spiers/cctda",
+        "spiers/cea-ecommerce",
+        "spiers/cec",
+        "spiers/cesa",
+        "spiers/cgcc",
+        "spiers/cha",
+        "spiers/chemicals",
+        "spiers/china-nea",
+        "spiers/china-railway",
+        "spiers/chinabrands",
+        "spiers/chinacdc",
+        "spiers/chinaflower",
+        "spiers/chinametal",
+        "spiers/chinaports",
+        "spiers/chinashipping",
+        "spiers/chinawater",
+        "spiers/cia",
+        "spiers/cisa_spider.py",
+        "spiers/cme_agriculture_spider.py",
+        "spiers/cmegroup_ag_spider.py",
+        "spiers/cnia",
+        "spiers/cnia-lme",
+        "spiers/cnki",
+        "spiers/cnnic",
+        "spiers/cntac",
+        "spiers/cpcia",
+        "spiers/cpia",
+        "spiers/csia",
+        "spiers/eastmoney-choice",
+        "spiers/electronics",
+        "spiers/fin_platforms",
+        "spiers/flowers_kifc",
+        "spiers/ifind-5ifin",
+        "spiers/isc",
+        "spiers/logistics",
+        "spiers/moa-gov-scraper",
+        "spiers/moe-gov",
+        "spiers/mot-highway",
+        "spiers/mysteel",
+        "spiers/nhc",
+        "spiers/nlc",
+        "spiers/nonferrous",
+        "spiers/real-estate",
+        "spiers/sac",
+        "spiers/sac_spider.py",
+        "spiers/securities",
+        "spiers/shfe_spider.py",
+        "spiers/smm-metals",
+        "spiers/sse",
+        "spiers/tourism",
+        "spiers/wanfang",
+        "spiers/wind-financial"
+      ]
+    },
+    "consolidate_duplicates": [
+      {
+        "normalized_slug": "agriculture",
+        "domains": [
+          "agri-info.cn",
+          "agrinet.gov.cn",
+          "caa.org.cn",
+          "caisi.org.cn",
+          "cfia.net.cn",
+          "chinafisheries.org.cn",
+          "chyxx.com",
+          "cmegroup.com",
+          "czce.com.cn",
+          "dce.com.cn",
+          "eastmoney.com",
+          "fao.org",
+          "huinong.com",
+          "moa.gov.cn",
+          "shfe.com.cn",
+          "stats.gov.cn",
+          "zce.com.cn"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/agriculture.py",
+          "spiers/agriculture"
+        ]
+      },
+      {
+        "normalized_slug": "amac",
+        "domains": [
+          "amac.org.cn"
+        ],
+        "units": [
+          "spiders/amac",
+          "spiers/amac",
+          "spiers/amac_spider.py"
+        ]
+      },
+      {
+        "normalized_slug": "amacfund",
+        "domains": [
+          "(no domain)"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/amac-fund.py",
+          "fd_open_data_mcp/adapters/amac_fund.py"
+        ]
+      },
+      {
+        "normalized_slug": "caict",
+        "domains": [
+          "caict.ac.cn"
+        ],
+        "units": [
+          "spiders/caict",
+          "spiers/caict"
+        ]
+      },
+      {
+        "normalized_slug": "cba",
+        "domains": [
+          "chinabankass.org.cn"
+        ],
+        "units": [
+          "spiders/cba",
+          "spiers/cba"
+        ]
+      },
+      {
+        "normalized_slug": "chemicals",
+        "domains": [
+          "baiinfo.com",
+          "ccia.org.cn",
+          "ccin.com.cn",
+          "chemnet.com.cn",
+          "chinamonitor.com.cn",
+          "cisia.org.cn",
+          "cncn.com.cn",
+          "cnfia.org.cn",
+          "cpcifa.org.cn",
+          "czce.com.cn",
+          "datacenter.org.cn",
+          "dce.com.cn",
+          "mii.gov.cn",
+          "molbase.cn",
+          "oilchem.net",
+          "sci99.com",
+          "stats.gov.cn",
+          "tushare.pro",
+          "wind.com.cn"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/chemicals.py",
+          "spiers/chemicals"
+        ]
+      },
+      {
+        "normalized_slug": "cisa",
+        "domains": [
+          "cisa.org.cn"
+        ],
+        "units": [
+          "spiders/cisa",
+          "spiers/cisa_spider.py"
+        ]
+      },
+      {
+        "normalized_slug": "cisaindustry",
+        "domains": [
+          "chinaisa.org.cn"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/cisa-industry.py",
+          "fd_open_data_mcp/adapters/cisa_industry.py"
+        ]
+      },
+      {
+        "normalized_slug": "cnia",
+        "domains": [
+          "chinametal.org.cn",
+          "cnia.org.cn"
+        ],
+        "units": [
+          "spiders/cnia",
+          "spiers/cnia"
+        ]
+      },
+      {
+        "normalized_slug": "cnki",
+        "domains": [
+          "cnki.net"
+        ],
+        "units": [
+          "spiders/cnki",
+          "spiers/cnki"
+        ]
+      },
+      {
+        "normalized_slug": "csia",
+        "domains": [
+          "csia.net.cn",
+          "csia.org.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ],
+        "units": [
+          "spiders/csia",
+          "spiers/csia"
+        ]
+      },
+      {
+        "normalized_slug": "datagov",
+        "domains": [
+          "data.gov",
+          "stlouisfed.org",
+          "uci.edu"
+        ],
+        "units": [
+          "spiders/data-gov",
+          "spiders/datagov"
+        ]
+      },
+      {
+        "normalized_slug": "eastmoneychoice",
+        "domains": [
+          "eastmoney.com"
+        ],
+        "units": [
+          "spiders/eastmoney-choice",
+          "spiers/eastmoney-choice"
+        ]
+      },
+      {
+        "normalized_slug": "electronics",
+        "domains": [
+          "alphavantage.co",
+          "bls.gov",
+          "caict.ac.cn",
+          "ccidconsulting.com",
+          "ceia.org.cn",
+          "cinnoresearch.com",
+          "coinmarketcap.com",
+          "csia.net.cn",
+          "digitimes.com",
+          "gartner.com",
+          "ggii.cn",
+          "idc.com",
+          "intrinio.com",
+          "miit.gov.cn",
+          "polygon.io",
+          "sec.gov",
+          "semi.org",
+          "stats.gov.cn",
+          "stlouisfed.org",
+          "trendforce.com",
+          "worldbank.org"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/electronics.py",
+          "spiers/electronics"
+        ]
+      },
+      {
+        "normalized_slug": "finplatforms",
+        "domains": [
+          "5ifin.com",
+          "csindex.com.cn",
+          "eastmoney.com",
+          "gtarsc.com",
+          "wind.com.cn"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/fin_platforms.py",
+          "spiers/fin_platforms"
+        ]
+      },
+      {
+        "normalized_slug": "flowerskifc",
+        "domains": [
+          "kifc.cn"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/flowers_kifc.py",
+          "spiders/flowers_kifc",
+          "spiers/flowers_kifc"
+        ]
+      },
+      {
+        "normalized_slug": "mysteel",
+        "domains": [
+          "mysteel.com"
+        ],
+        "units": [
+          "spiders/mysteel",
+          "spiers/mysteel"
+        ]
+      },
+      {
+        "normalized_slug": "nbsgdp",
+        "domains": [
+          "stats.gov.cn"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/nbs-gdp.py",
+          "fd_open_data_mcp/adapters/nbs_gdp.py",
+          "spiders/nbs_gdp",
+          "spiers/nbs_gdp"
+        ]
+      },
+      {
+        "normalized_slug": "nhc",
+        "domains": [
+          "nhc.gov.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ],
+        "units": [
+          "spiders/nhc",
+          "spiers/nhc"
+        ]
+      },
+      {
+        "normalized_slug": "nonferrous",
+        "domains": [
+          "asianmetal.net",
+          "atkcn.com",
+          "baiinfo.com",
+          "cathayfutures.com",
+          "chinametal.com.cn",
+          "chinametal.org.cn",
+          "cnia.org.cn",
+          "fastmarkets.com",
+          "inmetals.com",
+          "kitco.com",
+          "lme.com",
+          "metal.com",
+          "miit.gov.cn",
+          "shfe.com.cn",
+          "smm.cn",
+          "stats.gov.cn",
+          "wbms.org",
+          "wind.com.cn"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/nonferrous.py",
+          "spiers/nonferrous"
+        ]
+      },
+      {
+        "normalized_slug": "sac",
+        "domains": [
+          "sac.net.cn"
+        ],
+        "units": [
+          "spiders/sac",
+          "spiers/sac",
+          "spiers/sac_spider.py"
+        ]
+      },
+      {
+        "normalized_slug": "shfe",
+        "domains": [
+          "shfe.com.cn"
+        ],
+        "units": [
+          "spiders/shfe",
+          "spiers/shfe_spider.py"
+        ]
+      },
+      {
+        "normalized_slug": "steelassoc",
+        "domains": [
+          "cisa.org.cn",
+          "shfe.com.cn",
+          "stats.gov.cn",
+          "steelhome.cn",
+          "worldsteel.org"
+        ],
+        "units": [
+          "fd_open_data_mcp/adapters/steel-assoc.py",
+          "spiers/steel-assoc"
+        ]
+      },
+      {
+        "normalized_slug": "wechatmp",
+        "domains": [
+          "qq.com",
+          "sogou.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ],
+        "units": [
+          "spiders/wechat-mp",
+          "spiers/wechat-mp"
+        ]
+      },
+      {
+        "normalized_slug": "weiboopen",
+        "domains": [
+          "weibo.com"
+        ],
+        "units": [
+          "spiders/weibo-open",
+          "spiers/weibo-open"
+        ]
+      }
+    ],
+    "manifest_backfill": [
+      {
+        "path": "spiders/nbs_gdp",
+        "registry_present": "nbs-gdp.yaml"
+      }
+    ],
+    "re_analysis": [
+      {
+        "path": "fd_open_data_mcp/adapters/akshare.py",
+        "domains": []
+      },
+      {
+        "path": "fd_open_data_mcp/adapters/datacommons.py",
+        "domains": []
+      },
+      {
+        "path": "fd_open_data_mcp/adapters/nbs_gdp.py",
+        "domains": [
+          "stats.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/agri-info",
+        "domains": [
+          "agri-info.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/apipoer",
+        "domains": [
+          "apipoer.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/apipoer-open",
+        "domains": [
+          "apipoer.com"
+        ]
+      },
+      {
+        "path": "spiders/awesome-chinese-api",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/bls",
+        "domains": [
+          "bls.gov",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/caa",
+        "domains": [
+          "caa.org.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/cap",
+        "domains": [
+          "cap.gov.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/ceia",
+        "domains": [
+          "ceia.org.cn"
+        ]
+      },
+      {
+        "path": "spiders/china-flower-assoc-new",
+        "domains": [
+          "chinaflower.org.cn"
+        ]
+      },
+      {
+        "path": "spiders/chinamonitor",
+        "domains": [
+          "chinamonitor.com.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/cisa",
+        "domains": [
+          "cisa.org.cn"
+        ]
+      },
+      {
+        "path": "spiders/cisia",
+        "domains": [
+          "cisia.org.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/cn-gov-data",
+        "domains": [
+          "cn.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/cnia",
+        "domains": [
+          "chinametal.org.cn"
+        ]
+      },
+      {
+        "path": "spiders/coinmarketcap",
+        "domains": [
+          "coinmarketcap.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/cqvip",
+        "domains": [
+          "cqvip.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/csia",
+        "domains": [
+          "csia.net.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/cssn",
+        "domains": [
+          "cssn.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/data-gov",
+        "domains": [
+          "data.gov",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/data-gov-cn",
+        "domains": [
+          "data.gov"
+        ]
+      },
+      {
+        "path": "spiders/data-science-china",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/datacenter",
+        "domains": [
+          "datacenter.org.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/datacenter-org",
+        "domains": [
+          "datacenter.org.cn"
+        ]
+      },
+      {
+        "path": "spiders/dce",
+        "domains": [
+          "dce.com.cn"
+        ]
+      },
+      {
+        "path": "spiders/developers",
+        "domains": [
+          "qq.com"
+        ]
+      },
+      {
+        "path": "spiders/digitimes",
+        "domains": [
+          "digitimes.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/eastmoney-choice",
+        "domains": [
+          "eastmoney.com"
+        ]
+      },
+      {
+        "path": "spiders/eastmoney-data",
+        "domains": [
+          "eastmoney.com"
+        ]
+      },
+      {
+        "path": "spiders/eastmoney-futures",
+        "domains": [
+          "eastmoney.com"
+        ]
+      },
+      {
+        "path": "spiders/fivethirtyeight-data",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/flower-association",
+        "domains": [
+          "chinaflower.org.cn"
+        ]
+      },
+      {
+        "path": "spiders/flower-auction",
+        "domains": [
+          "kifc.cn"
+        ]
+      },
+      {
+        "path": "spiders/flower-trading",
+        "domains": [
+          "kunmingflower.com"
+        ]
+      },
+      {
+        "path": "spiders/flowers-yunnan",
+        "domains": [
+          "yunnan.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/fred-data",
+        "domains": [
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/github",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/github-akshare",
+        "domains": [
+          "github.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/github-awesome-datasets",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/github-china-blog",
+        "domains": [
+          "github.blog"
+        ]
+      },
+      {
+        "path": "spiders/github-china-data-hub",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/github-china-topics",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/github-chinese-datasets",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/github-data",
+        "domains": [
+          "github.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/github-datasets",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/github-datasets-topic",
+        "domains": [
+          "github.com"
+        ]
+      },
+      {
+        "path": "spiders/github-fivethirtyeight",
+        "domains": [
+          "github.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/github-opendata-china",
+        "domains": [
+          "github.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/github-topics-china",
+        "domains": [
+          "github.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/gtarsc",
+        "domains": [
+          "gtarsc.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/hqcdc",
+        "domains": [
+          "hqcdc.org.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/huggingface",
+        "domains": [
+          "huggingface.co",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/inmetals",
+        "domains": [
+          "inmetals.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/intrinio",
+        "domains": [
+          "intrinio.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/isee",
+        "domains": [
+          "isee.gov.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/kaggle",
+        "domains": [
+          "kaggle.com"
+        ]
+      },
+      {
+        "path": "spiders/kifc-auction",
+        "domains": [
+          "kifc.cn"
+        ]
+      },
+      {
+        "path": "spiders/kitco",
+        "domains": [
+          "kitco.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/kunfloralexport",
+        "domains": [
+          "kunfloralexport.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/metal-com",
+        "domains": [
+          "metal.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/miit",
+        "domains": [
+          "miit.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/mof",
+        "domains": [
+          "mof.gov.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/mysteel",
+        "domains": [
+          "mysteel.com"
+        ]
+      },
+      {
+        "path": "spiders/nbs-data",
+        "domains": [
+          "stats.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/nbs-sj-query",
+        "domains": [
+          "stats.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/nbs-stats",
+        "domains": [
+          "stats.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/nbs-stats-data",
+        "domains": [
+          "stats.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/nbs-stats-https",
+        "domains": [
+          "stats.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/nbs-stats-official",
+        "domains": [
+          "stats.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/nhc",
+        "domains": [
+          "nhc.gov.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/oschina",
+        "domains": [
+          "oschina.net",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/polygon",
+        "domains": [
+          "polygon.io",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/qbox",
+        "domains": [
+          "qbox.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/sci99",
+        "domains": [
+          "sci99.com"
+        ]
+      },
+      {
+        "path": "spiders/stat-gov",
+        "domains": [
+          "stat.gov.cn",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/toutiao-docs",
+        "domains": [
+          "toutiao.com"
+        ]
+      },
+      {
+        "path": "spiders/toutiao-open-api",
+        "domains": [
+          "toutiao.com"
+        ]
+      },
+      {
+        "path": "spiders/trendforce",
+        "domains": [
+          "trendforce.com"
+        ]
+      },
+      {
+        "path": "spiders/ucimlrepository",
+        "domains": [
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/wanfangdata",
+        "domains": [
+          "stlouisfed.org",
+          "uci.edu",
+          "wanfangdata.com.cn"
+        ]
+      },
+      {
+        "path": "spiders/wechat-mp",
+        "domains": [
+          "qq.com",
+          "stlouisfed.org",
+          "uci.edu"
+        ]
+      },
+      {
+        "path": "spiders/weibo-open",
+        "domains": [
+          "weibo.com"
+        ]
+      },
+      {
+        "path": "spiders/worldsteel",
+        "domains": [
+          "worldsteel.org"
+        ]
+      },
+      {
+        "path": "spiders/www",
+        "domains": [
+          "kaggle.com"
+        ]
+      },
+      {
+        "path": "spiders/yn-agriculture",
+        "domains": [
+          "stlouisfed.org",
+          "uci.edu",
+          "yn.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/yunnan-flowers",
+        "domains": [
+          "stlouisfed.org",
+          "uci.edu",
+          "yunnan.gov.cn"
+        ]
+      },
+      {
+        "path": "spiders/zce",
+        "domains": [
+          "czce.com.cn"
+        ]
+      },
+      {
+        "path": "spiders/zhihu-open",
+        "domains": [
+          "zhihu.com"
+        ]
+      },
+      {
+        "path": "spiers/nbs_gdp",
+        "domains": [
+          "stats.gov.cn"
+        ]
+      },
+      {
+        "path": "spiers/steel-assoc",
+        "domains": [
+          "cisa.org.cn",
+          "shfe.com.cn",
+          "stats.gov.cn",
+          "steelhome.cn",
+          "worldsteel.org"
+        ]
+      },
+      {
+        "path": "spiers/steel-exchange",
+        "domains": [
+          "mysteel.com",
+          "shfe.com.cn",
+          "smm.cn",
+          "stats.gov.cn",
+          "steelhome.cn",
+          "wind.com.cn"
+        ]
+      },
+      {
+        "path": "spiers/steel-info",
+        "domains": [
+          "cisa.org.cn",
+          "mysteel.com",
+          "smm.cn",
+          "stats.gov.cn",
+          "steelhome.cn"
+        ]
+      },
+      {
+        "path": "spiers/steel-market",
+        "domains": [
+          "crugroup.com",
+          "fastmarkets.com",
+          "mysteel.com",
+          "stats.gov.cn",
+          "worldsteel.org"
+        ]
+      },
+      {
+        "path": "spiers/steel-statistics",
+        "domains": [
+          "cisa.org.cn",
+          "miit.gov.cn",
+          "stats.gov.cn",
+          "worldsteel.org"
+        ]
+      }
+    ]
+  }
+}

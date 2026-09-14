@@ -1,5 +1,6 @@
+{% from "_macros.html" import th %}
 <table>
-  <tr><th>Run</th><th>Policy</th><th>Status</th><th>Yield</th><th>Finished</th></tr>
+  <tr>{{ th('运行', 'Run') }}{{ th('策略', 'Policy') }}{{ th('状态', 'Status') }}{{ th('产出', 'Yield') }}{{ th('完成于', 'Finished') }}</tr>
   {% for r in runs %}
   <tr>
     <td><a href="/panel/runs/{{ r.id }}">#{{ r.id }}</a></td>
@@ -7,12 +8,12 @@
     <td><span class="badge {{ r.status }}">{{ r.status }}</span></td>
     <td>
       {% if r.status == 'running' %}<span class="muted">—</span>
-      {% elif r.rows_new is none %}<span class="muted">not reported</span>
-      {% else %}{{ r.rows_new }} new / {{ r.rows_attempted or 0 }} att.{% endif %}
+      {% elif r.rows_new is none %}<span class="muted">未上报 not reported</span>
+      {% else %}{{ r.rows_new }} 新 new / {{ r.rows_attempted or 0 }} 试 att.{% endif %}
     </td>
     <td class="muted">{{ r.finished_at or '—' }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="5" class="muted">No runs yet.</td></tr>
+  <tr><td colspan="5" class="muted">还没有运行 No runs yet.</td></tr>
   {% endfor %}
 </table>

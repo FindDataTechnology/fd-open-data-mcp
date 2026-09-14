@@ -183,9 +183,6 @@ def run_wbgapi(command: str, params: dict) -> Any:
 
 
 def run_upstream(source: str, command: str, params: dict) -> Any:
-    if source == "cn-report":
-        from fd_open_data_mcp.adapters.cnreport import run_cnreport
-        return run_cnreport(command, params)
     if source == "akshare":
         return run_akshare(command, params)
     if source == "yfinance":
@@ -197,39 +194,6 @@ def run_upstream(source: str, command: str, params: dict) -> Any:
     if source == "nbs-gdp":
         from fd_open_data_mcp.adapters.nbs_gdp import run_nbs_gdp
         return run_nbs_gdp(command, params)
-    if source == "cisa-industry":
-        from fd_open_data_mcp.adapters.cisa_industry import run_cisa_industry
-        return run_cisa_industry(command, params)
-    if source == "amac-fund":
-        from fd_open_data_mcp.adapters.amac_fund import run_amac_fund
-        return run_amac_fund(command, params)
-    if source == "shfe-metal-futures":
-        from fd_open_data_mcp.adapters.shfe_futures import run_shfe_futures
-        return run_shfe_futures(command, params)
-    if source == "agriculture":
-        from fd_open_data_mcp.adapters.dce_agricultural import run_dce_agricultural
-        return run_dce_agricultural(command, params)
-    if source == "cme-agricultural-futures":
-        from fd_open_data_mcp.adapters.cme_agricultural import run_cme_agricultural
-        return run_cme_agricultural(command, params)
-    if source == "chemicals":
-        from fd_open_data_mcp.adapters.chemicals import run_chemicals
-        return run_chemicals(command, params)
-    if source == "electronics":
-        from fd_open_data_mcp.adapters.electronics import run_electronics
-        return run_electronics(command, params)
-    if source == "nonferrous":
-        from fd_open_data_mcp.adapters.nonferrous import run_nonferrous
-        return run_nonferrous(command, params)
-    if source == "flowers-kifc":
-        from fd_open_data_mcp.adapters.flowers_kifc import run_flowers_kifc
-        return run_flowers_kifc(command, params)
-    if source == "fin_platforms":
-        from fd_open_data_mcp.adapters.fin_platforms import run_fin_platforms
-        return run_fin_platforms(command, params)
-    if source == "sac-securities":
-        from fd_open_data_mcp.adapters.sac_securities import run_sac_securities
-        return run_sac_securities(command, params)
     if source == "polygon":
         # run_polygon lives in the external fd-polygon datasource package (the
         # manifest's fetch.module). Lazy-imported so fd-open-data-mcp does not

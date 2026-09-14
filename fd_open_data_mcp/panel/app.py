@@ -170,6 +170,58 @@ def _run_launcher():
     return _default_launcher()
 
 
+# ── cockpit aggregations (panel-ui-refresh: KPI row + yield trend) ─────────
+def kpi_snapshot(s) -> dict:
+    """Home KPI row from `policy_runs`: running count, 24h terminal-run
+    success rate, 24h summed new rows, and 24h failures (failed +
+    zero_yield — the two operator-actionable terminal states)."""
+    now = dt.datetime.utcnow()
+    since = now - dt.timedelta(hours=24)
+    running = int(s.query(func.count(PolicyRun.id))
+                  .filter(PolicyRun.status == "running").scalar() or 0)
+    by_status: dict[str, int] = dict(
+        s.query(PolicyRun.status, func.count(PolicyRun.id))
+        .filter(PolicyRun.finished_at >= since,
+                PolicyRun.status != "running")
+        .group_by(PolicyRun.status).all())
+    terminal = sum(by_status.values())
+    successes = by_status.get("success", 0)
+    new_rows = int(s.query(func.coalesce(func.sum(PolicyRun.rows_new), 0))
+                   .filter(PolicyRun.finished_at >= since,
+                           PolicyRun.rows_new.isnot(None)).scalar() or 0)
+    return {
+        "running": running,
+        "success_rate": round(100 * successes / terminal) if terminal else None,
+        "new_rows": new_rows,
+        "failures": by_status.get("failed", 0) + by_status.get("zero_yield", 0),
+    }
+
+
+def yield_trend(s, days: int = 14) -> dict:
+    """Daily summed rows_new over the window, zero-filled, as bar geometry
+    (panel.charts) so the home template renders it directly."""
+    from fd_open_data_mcp.panel.charts import bar_geometry
+
+    now = dt.datetime.utcnow()
+    since = now - dt.timedelta(days=days - 1)
+    # func.date() returns a string on sqlite but a date on postgres —
+    # normalize keys to ISO strings so the zero-fill lookup always matches
+    rows = {
+        (k.isoformat() if hasattr(k, "isoformat") else str(k)): int(v or 0)
+        for k, v in s.query(func.date(PolicyRun.finished_at),
+                            func.sum(PolicyRun.rows_new))
+        .filter(PolicyRun.finished_at >= since,
+                PolicyRun.rows_new.isnot(None))
+        .group_by(func.date(PolicyRun.finished_at)).all()
+    }
+    labels, values = [], []
+    for i in range(days):
+        day = (since + dt.timedelta(days=i)).date()
+        labels.append(day.strftime("%m-%d"))
+        values.append(rows.get(day.isoformat(), 0))
+    return bar_geometry(values, labels=labels)
+
+
 def _policy_from_form(form) -> dict:
     """Extract a policy payload dict from a submitted form."""
     return {
@@ -287,8 +339,8 @@ def create_app() -> FastAPI:
         if session is None:
             return HTMLResponse("")
         return HTMLResponse(
-            f'<span class="muted">{session["name"]}</span> '
-            f'<a href="/panel/auth/logout" class="btn">logout</a>')
+            f'<span>{session["name"]}</span> '
+            f'<a href="/panel/auth/logout" class="btn">退出 logout</a>')
 
     # ── pages ──────────────────────────────────────────────────────────────
     @app.get("/", response_class=HTMLResponse)
@@ -297,7 +349,7 @@ def create_app() -> FastAPI:
 
     def _unavailable(e: Exception) -> HTMLResponse:
         # One failing partial must not fail the page (spec: live panel refresh)
-        return HTMLResponse(f'<p class="muted">section unavailable: {e}</p>')
+        return HTMLResponse(f'<p class="muted">分区暂不可用 section unavailable: {e}</p>')
 
     def _scheduler_quiet(s) -> tuple[bool, str | None]:
         """True when no run has started within RECONCILER_QUIET_HOURS — the
@@ -318,7 +370,8 @@ def create_app() -> FastAPI:
                 request, "home.html",
                 {"poll_seconds": POLL_SECONDS,
                  "quiet_hours": RECONCILER_QUIET_HOURS,
-                 "scheduler_quiet": quiet, "last_run_started": last_started})
+                 "scheduler_quiet": quiet, "last_run_started": last_started,
+                 "kpi": kpi_snapshot(s), "trend": yield_trend(s)})
         finally:
             s.close()
 
@@ -417,22 +470,31 @@ def create_app() -> FastAPI:
 
             # fetch_log carries no run key (design D5): approximate by the run's
             # window filtered to its plan concepts + cluster, labeled as such.
+            from collections import Counter
+
+            from fd_open_data_mcp.panel.charts import (
+                timeline_buckets, timeline_geometry)
+
             fetch_summary: list[dict] = []
+            fetch_timeline = None
             window_end = run.finished_at or dt.datetime.utcnow()
             if run.started_at:
                 concept_ids = [c["id"] for c in concepts if c["id"] is not None]
                 fq = (
-                    s.query(FetchLog.status, func.count(FetchLog.id))
+                    s.query(FetchLog.timestamp, FetchLog.status)
                     .filter(FetchLog.timestamp >= run.started_at,
                             FetchLog.timestamp <= window_end,
                             FetchLog.cluster_id == run.cluster_id)
                 )
                 if concept_ids:
                     fq = fq.filter(FetchLog.concept_id.in_(concept_ids))
+                rows = fq.all()
+                samples = [(t, status == "ok") for t, status in rows]
                 fetch_summary = [
                     {"status": status, "count": int(cnt)}
-                    for status, cnt in fq.group_by(FetchLog.status).all()
+                    for status, cnt in Counter(st for _, st in rows).items()
                 ]
+                fetch_timeline = timeline_geometry(timeline_buckets(samples))
             return templates.TemplateResponse(
                 request, "run_detail.html",
                 {"run": run.toDict(), "policy_name": policy_name,
@@ -444,6 +506,7 @@ def create_app() -> FastAPI:
                           "start": date_range.get("start"),
                           "end": date_range.get("end")},
                  "fetch_summary": fetch_summary,
+                 "fetch_timeline": fetch_timeline,
                  "fetch_window": [run.started_at.isoformat() if run.started_at else None,
                                   run.finished_at.isoformat() if run.finished_at else "now"],
                  "duration_min": (int(((run.finished_at or dt.datetime.utcnow())
@@ -473,14 +536,37 @@ def create_app() -> FastAPI:
         return out
 
     @app.get("/panel/data", response_class=HTMLResponse)
-    def data_coverage(request: Request, concept_id: int | None = None,
-                      entity_type: str = ""):
+    def data_coverage(request: Request, concept_id: str = "",
+                      entity_type: str = "", freshness: str = ""):
+        try:
+            cid: int | None = int(concept_id) if concept_id else None
+        except ValueError:
+            cid = None
+        from fd_open_data_mcp.panel.charts import (
+            freshness_bucket, freshness_days, heatmap_tiles)
         from fd_open_data_mcp.visibility.coverage import coverage_by_concept
 
         s = _session()
         try:
-            rows = coverage_by_concept(s, concept_id=concept_id,
-                                       entity_type=entity_type or None)
+            # heatmap counts come from the unfiltered universe; never-observed
+            # concepts appear in no observation row, so count them from Concept
+            all_rows = coverage_by_concept(s)
+            universe = (s.query(Concept)
+                        .filter_by(deprecated=False).count())
+            counts: dict[str, int] = {}
+            for r in all_rows:
+                key = freshness_bucket(freshness_days(r["latest_date"]))
+                counts[key] = counts.get(key, 0) + 1
+            counts["never"] = max(
+                0, universe - len({r["concept_id"] for r in all_rows}))
+            heat = heatmap_tiles(counts)
+
+            rows = (coverage_by_concept(s, concept_id=cid,
+                                        entity_type=entity_type or None)
+                    if cid or entity_type else all_rows)
+            if freshness:
+                rows = [r for r in rows
+                        if freshness_bucket(freshness_days(r["latest_date"])) == freshness]
             total_rows = sum(r["rows"] for r in rows)
             census_rows = _census_rows(s)
             return templates.TemplateResponse(
@@ -489,7 +575,8 @@ def create_app() -> FastAPI:
                  "n_concepts": len(rows),
                  "census": census_rows,
                  "census_total": sum(r.get("approx_rows") or 0 for r in census_rows),
-                 "concept_id": concept_id, "entity_type": entity_type})
+                 "concept_id": cid, "entity_type": entity_type,
+                 "freshness": freshness, "heat": heat})
         finally:
             s.close()
 
@@ -515,43 +602,82 @@ def create_app() -> FastAPI:
         finally:
             s.close()
 
+    def _run_row_dict(s, r: PolicyRun, policies: dict) -> dict:
+        d = {"id": r.id, "policy": policies.get(r.policy_id, f"#{r.policy_id}"),
+             "policy_id": r.policy_id, "origin": r.origin,
+             "status": r.status, "job_ref": r.job_ref,
+             "started_at": r.started_at.isoformat() if r.started_at else None,
+             "finished_at": r.finished_at.isoformat() if r.finished_at else None,
+             "detail": r.detail}
+        d["estimate"] = _run_estimate(s, r.plan_json)
+        return d
+
+    def _toast(resp, message: str, level: str = "ok"):
+        # Inline actions announce outcomes via HX-Trigger; app.js renders the toast.
+        resp.headers["HX-Trigger"] = json.dumps(
+            {"toast": {"message": message, "level": level}})
+        return resp
+
+    def _run_row_response(request: Request, s, run_id: int):
+        r = s.query(PolicyRun).get(run_id)
+        if r is None:
+            return None
+        policies = {p.id: p.name for p in s.query(CrawlPolicy).all()}
+        return templates.TemplateResponse(
+            request, "_run_row.html",
+            {"r": _run_row_dict(s, r, policies), "policies": policies})
+
     @app.get("/panel/runs", response_class=HTMLResponse)
-    def runs(request: Request, status: str = "", policy_id: int | None = None):
+    def runs(request: Request, status: str = "", policy_id: str = ""):
+        # `policy_id` arrives as a string because the filter form/chips submit
+        # the select even when empty ("all policies"); "" means no filter
+        try:
+            pid: int | None = int(policy_id) if policy_id else None
+        except ValueError:
+            pid = None
         s = _session()
         try:
             q = s.query(PolicyRun)
             if status:
                 q = q.filter_by(status=status)
-            if policy_id is not None:
-                q = q.filter_by(policy_id=policy_id)
+            if pid is not None:
+                q = q.filter_by(policy_id=pid)
             runs_rows = q.order_by(PolicyRun.started_at.desc()).limit(200).all()
             policies = {p.id: p.name for p in s.query(CrawlPolicy).all()}
-            rendered = []
-            for r in runs_rows:
-                d = {"id": r.id, "policy": policies.get(r.policy_id, f"#{r.policy_id}"),
-                     "policy_id": r.policy_id, "origin": r.origin,
-                     "status": r.status, "job_ref": r.job_ref,
-                     "started_at": r.started_at.isoformat() if r.started_at else None,
-                     "finished_at": r.finished_at.isoformat() if r.finished_at else None,
-                     "detail": r.detail}
-                d["estimate"] = _run_estimate(s, r.plan_json)
-                rendered.append(d)
-            return templates.TemplateResponse(
-                request, "runs.html",
-                {"runs": rendered, "status": status, "policies": policies})
+            rendered = [_run_row_dict(s, r, policies) for r in runs_rows]
+            ctx = {"runs": rendered, "status": status, "policies": policies}
+            # status chips / policy filter swap just the results region
+            if request.headers.get("hx-request") == "true":
+                return templates.TemplateResponse(
+                    request, "partial_runs_results.html", ctx)
+            return templates.TemplateResponse(request, "runs.html", ctx)
         finally:
             s.close()
 
     # ── run control (panel-ops-console) ─────────────────────────────────────
     @app.post("/panel/runs/{run_id}/cancel")
-    def run_cancel(run_id: int):
-        """Cancel an open run: CAS row close + best-effort Job deletion."""
+    def run_cancel(run_id: int, request: Request):
+        """Cancel an open run: CAS row close + best-effort Job deletion.
+        HTMX requests get the re-rendered row + toast; plain posts redirect."""
         from fd_open_data_mcp.refresh.runs import cancel_run
 
+        hx = request.headers.get("hx-request") == "true"
         s = _session()
         try:
-            out = cancel_run(s, run_id, actor="panel",
-                             launcher=_run_launcher())
+            try:
+                out = cancel_run(s, run_id, actor="panel",
+                                 launcher=_run_launcher())
+            except HTTPException:
+                raise
+            if hx:
+                if out["status"] == "cancelled":
+                    row = _run_row_response(request, s, run_id)
+                    return _toast(row, f"运行 Run #{run_id} 已取消 cancelled")
+                if out["status"] == "not_found":
+                    return _toast(HTMLResponse(""), f"run {run_id} not found", "err")
+                return _toast(_run_row_response(request, s, run_id),
+                              f"运行 Run #{run_id} 已结束，未取消 already finished "
+                              f"({out.get('current_status')})", "err")
         finally:
             s.close()
         if out["status"] == "cancelled":
@@ -565,19 +691,36 @@ def create_app() -> FastAPI:
     async def cluster_capacity(cluster_id: int, request: Request):
         """Edit a cluster's max-concurrent-open-runs; effective next tick."""
         form = await request.form()
+        hx = request.headers.get("hx-request") == "true"
         try:
             value = int(form.get("capacity", ""))
         except (TypeError, ValueError):
+            if hx:
+                return _toast(HTMLResponse("", status_code=400),
+                              "capacity 必须是整数 must be an integer", "err")
             raise HTTPException(400, "capacity must be an integer")
         if value < 0:
+            if hx:
+                return _toast(HTMLResponse("", status_code=400),
+                              "capacity 必须 >= 0 must be >= 0", "err")
             raise HTTPException(400, "capacity must be >= 0")
         s = _session()
         try:
             c = s.get(Cluster, cluster_id)
             if c is None:
+                if hx:
+                    return _toast(HTMLResponse(""),
+                                  f"cluster {cluster_id} not found", "err")
                 raise HTTPException(404, f"cluster {cluster_id} not found")
             c.capacity = value
             s.commit()
+            if hx:
+                row = next((f for f in _snapshot.fleet_health(s)
+                            if f["id"] == cluster_id), None)
+                resp = (templates.TemplateResponse(request, "_fleet_row.html",
+                                                   {"f": row}) if row
+                        else HTMLResponse(""))
+                return _toast(resp, f"{c.name} 容量已保存 capacity saved: {value}")
         finally:
             s.close()
         return RedirectResponse("/panel", status_code=303)
@@ -657,36 +800,59 @@ def create_app() -> FastAPI:
             s.close()
         return RedirectResponse("/panel/policies", status_code=303)
 
+    def _policy_row_response(request: Request, s, pid: int):
+        p = s.query(CrawlPolicy).get(pid)
+        if p is None:
+            return None
+        return templates.TemplateResponse(
+            request, "_policy_row.html", {"p": p.toDict()})
+
     @app.post("/panel/policies/{policy_id}/toggle")
-    def policy_toggle(policy_id: int):
+    def policy_toggle(policy_id: int, request: Request):
         s = _session()
         try:
             p = _policy_or_404(s, policy_id)
             p.enabled = not p.enabled
             s.commit()
+            if request.headers.get("hx-request") == "true":
+                state = "已启用 enabled" if p.enabled else "已停用 disabled"
+                return _toast(_policy_row_response(request, s, policy_id),
+                              f"{p.name} {state}")
         finally:
             s.close()
         return RedirectResponse("/panel/policies", status_code=303)
 
     @app.post("/panel/policies/{policy_id}/delete")
-    def policy_delete(policy_id: int):
+    def policy_delete(policy_id: int, request: Request):
         s = _session()
         try:
             p = _policy_or_404(s, policy_id)
             s.delete(p)
             s.commit()
+            if request.headers.get("hx-request") == "true":
+                # empty 200 body removes the swapped row
+                return _toast(HTMLResponse(""), f"{p.name} 已删除 deleted")
         finally:
             s.close()
         return RedirectResponse("/panel/policies", status_code=303)
 
     @app.post("/panel/policies/{policy_id}/run-now")
-    def policy_run_now(policy_id: int):
+    def policy_run_now(policy_id: int, request: Request):
         from fd_open_data_mcp.refresh.reconciler import _default_launcher, launch_policy
 
+        hx = request.headers.get("hx-request") == "true"
         s = _session()
         try:
             p = _policy_or_404(s, policy_id)
             result = launch_policy(s, p, _default_launcher())
+            if hx:
+                if result.get("status") == "launched":
+                    return _toast(_policy_row_response(request, s, policy_id),
+                                  f"{p.name} 已触发运行 launched "
+                                  f"(run #{result.get('run_id')})")
+                return _toast(_policy_row_response(request, s, policy_id),
+                              f"{p.name} 未触发 not launched: {result.get('reason')}",
+                              "err")
         finally:
             s.close()
         return RedirectResponse(f"/panel/runs?policy_id={policy_id}", status_code=303)
@@ -769,6 +935,7 @@ def create_app() -> FastAPI:
                      .order_by(BanRule.source, BanRule.priority.desc()).limit(200).all())
             return templates.TemplateResponse(request, "proxy.html", {
                 "msg": msg, "err": err,
+                "poll_seconds": POLL_SECONDS,
                 "mgmt_ready": _proxy_control_ready(),
                 "providers": sorted(providers.values(), key=lambda b: b["name"]),
                 "proxies": [

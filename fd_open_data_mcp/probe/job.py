@@ -1,14 +1,16 @@
 """Probe job: recover OPEN circuits and retire permanently-burned proxies.
 
-Runs as a k8s CronJob (~60s). For each ``(source, proxy_id)`` circuit that is
+Runs as a k8s CronJob (~60s). For each ``(source, unit)`` circuit that is
 ``OPEN`` past its ``cooldown_until``:
 
-  1. Run ONE probe fetch through that specific proxy (not via ProxySelector - the
+  1. Resolve the unit to a concrete active address (a grouped unit — several
+     ports behind one exit IP — probes any single member; they share an egress).
+  2. Run ONE probe fetch through that address (not via ProxySelector - the
      probe owns HALF_OPEN; crawl fetches never touch a HALF_OPEN circuit).
-  2. Classify the probe outcome (ban_rules).
-  3. ``circuit.probe_transition``: success -> ``CLOSED`` (open_cycles reset);
+  3. Classify the probe outcome (ban_rules).
+  4. ``circuit.probe_transition``: success -> ``CLOSED`` (open_cycles reset);
      failure -> ``OPEN`` with doubled cooldown and ``open_cycles += 1``;
-     ``open_cycles >= K`` -> ``permanent`` (proxy surfaced for retirement).
+     ``open_cycles >= K`` -> ``permanent``, and the whole unit is retired.
 
 A ``TRANSIENT`` probe outcome counts as success (transient != ban). The probe
 uses a cheap, known-good command per source (``PROBE_COMMANDS``); sources
@@ -29,6 +31,7 @@ from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.fetch.runner import FetchError, run_upstream
 from fd_open_data_mcp.models import FetchLog, Proxy, SourceProbe
 from fd_open_data_mcp.proxy import ban_rules, circuit, injection
+from fd_open_data_mcp.proxy import pool as proxy_pool
 from fd_open_data_mcp.proxy.injection import use_proxy
 
 logger = logging.getLogger(__name__)
@@ -61,7 +64,7 @@ def _probe_one(session, source: str, proxy: Proxy) -> bool:
     except FetchError as e:
         detail = str(e)
         status = "error"
-        st = circuit.get_state(source, proxy.id)
+        st = circuit.get_state(source, proxy_pool.circuit_unit(proxy))
         # Thread HTTP status/body from the FetchError so status/body ban rules
         # match here too (risk R7 - the probe path had the same None/None bug).
         # Combined streak = max(fail, transient) so streak-gated rules fire on a
@@ -100,16 +103,18 @@ def run_probe_cycle() -> dict:
     session = get_database().get_session()
     probed = recovered = reopened = permanent = 0
     try:
-        for source, proxy_id in candidates:
-            proxy = session.get(Proxy, proxy_id)
-            if proxy is None or proxy.status != "active":
+        for source, unit in candidates:
+            proxy = proxy_pool.proxy_for_unit(session, unit)
+            if proxy is None:
+                # No active address left behind this unit (retired or deleted) —
+                # nothing to probe; leave the circuit for the TTL / an operator.
                 continue
             healthy = _probe_one(session, source, proxy)
-            new_state = circuit.probe_transition(source, proxy_id, healthy)
+            new_state = circuit.probe_transition(source, unit, healthy)
             probed += 1
             if new_state.get("permanent"):
                 permanent += 1
-                _retire_proxy(session, proxy, source)
+                _retire_unit(session, unit, source)
             elif new_state["state"] == "closed":
                 recovered += 1
             else:
@@ -121,16 +126,28 @@ def run_probe_cycle() -> dict:
     return {"probed": probed, "recovered": recovered, "reopened": reopened, "permanent": permanent}
 
 
-def _retire_proxy(session, proxy: Proxy, source: str) -> None:
-    """Mark a permanently-banned proxy retired so it stops being selected."""
+def _retire_unit(session, unit: str, source: str) -> None:
+    """Mark every active address in ``unit`` retired.
+
+    The circuit went permanent for the whole unit, so every address it covers is
+    dead — for a grouped unit that is all the ports behind the banned exit IP,
+    not just the one the probe happened to pick. Retiring only that one would
+    leave its siblings active (unselectable, but still reported as usable).
+    """
     try:
-        proxy.status = "retired"
-        proxy.retired_at = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc)
+        retired: list[int] = []
+        for p in proxy_pool.active_proxies(session):
+            if proxy_pool.circuit_unit(p) == unit:
+                p.status = "retired"
+                p.retired_at = now
+                retired.append(p.id)
         session.commit()
-        logger.warning("retired proxy %s (id=%d) for source %s", proxy.ip, proxy.id, source)
+        logger.warning("retired unit %s (source %s): %d address(es) %s",
+                       unit, source, len(retired), retired)
     except Exception as e:  # noqa: BLE001
         session.rollback()
-        logger.error("failed to retire proxy %d: %s", proxy.id, e)
+        logger.error("failed to retire unit %s: %s", unit, e)
 
 
 if __name__ == "__main__":

@@ -1,0 +1,29 @@
+{% from "_macros.html" import th %}
+<form method="get" action="/panel/runs" class="chips">
+  <input type="hidden" name="status" value="{{ status }}">
+  <a class="chip {{ 'active' if not status }}" href="/panel/runs"
+     hx-get="/panel/runs" hx-include="[name='policy_id']"
+     hx-target="#runs-results" hx-swap="innerHTML" hx-push-url="true">全部 All</a>
+  {% for s in ['running', 'success', 'failed', 'cancelled'] %}
+  <a class="chip {{ s }} {{ 'active' if status == s }}" href="/panel/runs?status={{ s }}"
+     hx-get="/panel/runs" hx-vals='{"status": "{{ s }}"}' hx-include="[name='policy_id']"
+     hx-target="#runs-results" hx-swap="innerHTML" hx-push-url="true">{{ s }}</a>
+  {% endfor %}
+  <select name="policy_id"
+          hx-get="/panel/runs" hx-include="this"
+          hx-target="#runs-results" hx-swap="innerHTML" hx-push-url="true">
+    <option value="">全部策略 all policies</option>
+    {% for pid, pname in policies.items() %}
+    <option value="{{ pid }}" {{ 'selected' if request.query_params.get('policy_id')|int == pid }}>{{ pname }}</option>
+    {% endfor %}
+  </select>
+  <noscript><button type="submit" class="btn">筛选 Filter</button></noscript>
+</form>
+<div class="table-wrap">
+<table>
+  <tr>{{ th('ID') }}{{ th('策略', 'Policy') }}{{ th('状态', 'Status') }}{{ th('预估抓取', 'Est. fetches') }}{{ th('任务', 'Job') }}{{ th('开始', 'Started') }}{{ th('结束', 'Finished') }}{{ th('详情', 'Detail') }}</tr>
+  {% for r in runs %}{% include "_run_row.html" %}{% else %}
+  <tr><td colspan="8" class="muted">暂无运行 No runs.</td></tr>
+  {% endfor %}
+</table>
+</div>

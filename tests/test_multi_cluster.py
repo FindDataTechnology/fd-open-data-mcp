@@ -103,9 +103,11 @@ def test_pick_cluster_skips_banned_egress(session, monkeypatch):
     session.commit()
     a_direct = session.query(Proxy).filter_by(scheme="direct", cluster_id=a.id).first()
 
-    # simulate eastmoney banning tokyo's egress (circuit OPEN)
-    def _sel(source, proxy_id):
-        return not (source == "eastmoney" and proxy_id == a_direct.id)
+    # simulate eastmoney banning tokyo's egress (circuit OPEN). is_selectable
+    # takes the circuit UNIT (a str): a direct-egress row declares no exit_ip,
+    # so its unit is str(id) — the same Redis key as before, stringified.
+    def _sel(source, unit):
+        return not (source == "eastmoney" and unit == str(a_direct.id))
 
     monkeypatch.setattr(circuit, "is_selectable", _sel)
     chosen = pick_cluster(session, _plan(("eastmoney",)))

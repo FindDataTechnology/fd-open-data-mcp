@@ -1,23 +1,23 @@
 {% extends "base.html" %}
-{% block title %}{{ 'Template' if is_template else ('Edit' if policy else 'New') }} policy{% endblock %}
+{% block title %}{{ '模板 Template' if is_template else ('编辑 Edit' if policy else '新建 New') }} policy 策略{% endblock %}
 {% block content %}
-<h2>{{ 'Template: ' ~ template_frequency ~ ' policy' if is_template else ('Edit policy' if policy else 'New policy') }}</h2>
+<h2>{{ '模板策略: ' ~ template_frequency if is_template else ('编辑策略 Edit policy' if policy else '新建策略 New policy') }}</h2>
 {% if is_template %}
-<p class="muted">Pre-selected the verified {{ template_frequency }} concepts and proposed the matching
-schedule below — adjust anything before saving; the result is an ordinary policy.</p>
+<p class="muted">已预选通过校验的 {{ template_frequency }} 概念并给出匹配的调度 Pre-selected the verified {{ template_frequency }} concepts and proposed the matching
+schedule below — 保存前可任意调整；结果是一条普通策略 adjust anything before saving; the result is an ordinary policy.</p>
 {% endif %}
 
-{% if msg %}<div class="banner" style="background:#dcfce7;color:#166534;border:1px solid #bbf7d0">{{ msg }}</div>{% endif %}
+{% if msg %}<div class="banner ok">{{ msg }}</div>{% endif %}
 {% if err %}<div class="banner warn">✗ {{ err }}</div>{% endif %}
 <form id="pf" method="post" action="/panel/policies/save">
   {% if policy %}<input type="hidden" name="policy_id" value="{{ policy.id }}">{% endif %}
 
   <fieldset>
-    <legend>Identity</legend>
+    <legend>标识 Identity</legend>
     <div class="row2">
-      <div><label>Name</label>
+      <div><label>名称 Name</label>
         <input type="text" name="name" required value="{{ policy.name if policy else '' }}"></div>
-      <div><label>Entity type</label>
+      <div><label>实体类型 Entity type</label>
         <select name="entity_type" id="entity_type" required>
           {% for t in entity_types %}
           <option value="{{ t }}" {{ 'selected' if policy and policy.entity_type == t }}>{{ t }}</option>
@@ -27,14 +27,14 @@ schedule below — adjust anything before saving; the result is an ordinary poli
         </select></div>
     </div>
     <div>
-      <label>Entity IDs <span class="muted">(comma-separated; empty = all {{ 'of type' }})</span></label>
+      <label>实体 ID Entity IDs <span class="muted">（逗号分隔 comma-separated；留空 = 该类型全部 empty = all）</span></label>
       <input type="text" name="entity_ids" value="{{ policy.entity_ids|join(',') if policy and policy.entity_ids else '' }}" placeholder="5369, 5370">
     </div>
-    <label><input type="checkbox" name="enabled" {{ 'checked' if not policy or policy.enabled }}> enabled</label>
+    <label><input type="checkbox" name="enabled" {{ 'checked' if not policy or policy.enabled }}> 启用 enabled</label>
   </fieldset>
 
   <fieldset>
-    <legend>Concepts</legend>
+    <legend>概念 Concepts</legend>
     <div class="concepts">
       {% for cat, cs in concept_groups %}
       <fieldset>
@@ -49,51 +49,51 @@ schedule below — adjust anything before saving; the result is an ordinary poli
   </fieldset>
 
   <fieldset>
-    <legend>Crawl scope</legend>
+    <legend>抓取范围 Crawl scope</legend>
     <div class="row">
-      <div><label>Mode</label>
+      <div><label>模式 Mode</label>
         <select name="mode" id="mode">{% for m in modes %}<option value="{{ m }}" {{ 'selected' if policy and policy.mode == m }}>{{ m }}</option>{% endfor %}</select></div>
-      <div><label>Frequency</label>
+      <div><label>频率 Frequency</label>
         <select name="frequency" id="frequency">{% for f in frequencies %}<option value="{{ f }}" {{ 'selected' if policy and policy.frequency == f }}>{{ f }}</option>{% endfor %}</select></div>
-      <div><label>Source filter <span class="muted">(comma; empty=all)</span></label>
+      <div><label>源过滤 Source filter <span class="muted">（逗号分隔；空 = 全部 comma; empty=all）</span></label>
         <input type="text" name="source_filter" id="source_filter" value="{{ policy.source_filter|join(',') if policy and policy.source_filter else '' }}"></div>
     </div>
     <div class="row">
-      <div><label>Date policy</label>
+      <div><label>日期策略 Date policy</label>
         <select name="date_policy_mode" id="date_policy_mode">
           {% for m in date_policy_modes %}<option value="{{ m }}" {{ 'selected' if policy and policy.date_policy.mode == m }}>{{ m }}</option>{% endfor %}
         </select></div>
-      <div id="dp_days" style="display:none"><label>Trailing days</label>
+      <div id="dp_days" hidden><label>回溯天数 Trailing days</label>
         <input type="number" name="date_policy_days" value="{{ policy.date_policy.days if policy and policy.date_policy.mode == 'trailing' else 1 }}" min="1"></div>
-      <div id="dp_explicit" style="display:none">
-        <div class="grid"><div><label>Start</label><input type="date" name="date_policy_start" value="{{ policy.date_policy.start or '' if policy and policy.date_policy.mode == 'explicit' else '' }}"></div>
-        <div><label>End</label><input type="date" name="date_policy_end" value="{{ policy.date_policy.end or '' if policy and policy.date_policy.mode == 'explicit' else '' }}"></div></div>
+      <div id="dp_explicit" hidden>
+        <div class="grid"><div><label>开始 Start</label><input type="date" name="date_policy_start" value="{{ policy.date_policy.start or '' if policy and policy.date_policy.mode == 'explicit' else '' }}"></div>
+        <div><label>结束 End</label><input type="date" name="date_policy_end" value="{{ policy.date_policy.end or '' if policy and policy.date_policy.mode == 'explicit' else '' }}"></div></div>
       </div>
     </div>
     <div class="row">
-      <div><label>Cron expr</label>
+      <div><label>Cron 表达式 Cron expr</label>
         <input type="text" name="cron_expr" value="{{ policy.cron_expr if policy else default_cron }}"></div>
-      <div><label>Timezone</label>
+      <div><label>时区 Timezone</label>
         <input type="text" name="timezone" value="{{ policy.timezone if policy else 'UTC' }}"></div>
-      <div><label><input type="checkbox" name="force" {{ 'checked' if policy and policy.force }}> force (override fetch cap)</label></div>
+      <div><label><input type="checkbox" name="force" {{ 'checked' if policy and policy.force }}> 强制（绕过抓取上限）force (override fetch cap)</label></div>
     </div>
   </fieldset>
 
   <div class="pill-row">
-    <button type="submit" class="btn" style="background:var(--accent);color:#fff;padding:.5rem 1.2rem;border-radius:6px">Save</button>
+    <button type="submit" class="btn btn-primary">保存 Save</button>
     <button type="submit" class="btn" formaction="/panel/crawl/adhoc"
-            title="Run this plan once without saving a policy — same fetch ceiling applies">Run once (no policy)</button>
-    <a href="/panel/policies">Cancel</a>
+            title="不保存策略，直接运行此计划一次 Run this plan once without saving a policy — same fetch ceiling applies">运行一次（不建策略）Run once (no policy)</button>
+    <a href="/panel/policies">取消 Cancel</a>
     <div id="estimate" hx-post="/panel/estimate" hx-include="#pf" hx-trigger="change from:#pf"
-         hx-target="this" hx-swap="outerHTML">estimate: —</div>
+         hx-target="this" hx-swap="outerHTML">预估 estimate: —</div>
   </div>
 </form>
 
 <script>
   const mode = document.getElementById('date_policy_mode');
   const show = () => {
-    document.getElementById('dp_days').style.display = mode.value === 'trailing' ? 'block' : 'none';
-    document.getElementById('dp_explicit').style.display = mode.value === 'explicit' ? 'block' : 'none';
+    document.getElementById('dp_days').hidden = mode.value !== 'trailing';
+    document.getElementById('dp_explicit').hidden = mode.value !== 'explicit';
   };
   mode.addEventListener('change', show); show();
 </script>

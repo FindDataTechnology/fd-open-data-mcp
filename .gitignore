@@ -47,6 +47,8 @@ htmlcov/
 # NOTE: gitignore treats a trailing "# ..." as part of the pattern, so the
 # .env* patterns below must stay bare or they silently match nothing.
 .env
+.env.*
+!.env.example
 .env.local
 .env.localOverrides
 *.local.env
@@ -56,6 +58,8 @@ htmlcov/
 *.db-journal
 *.db-shm
 *.db-wal
+*.sqlite
+*.sqlite3
 metadata/*.db
 
 # Logs

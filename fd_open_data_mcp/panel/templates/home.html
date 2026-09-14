@@ -1,50 +1,63 @@
 {% extends "base.html" %}
-{% block title %}Home · Crawl Control Center{% endblock %}
+{% block title %}总览 Home · 爬虫控制台{% endblock %}
 {% block content %}
-<h2>Now</h2>
+<h2>现在与接下来 <span class="en">Now</span></h2>
 
 {% if scheduler_quiet %}
 <div class="banner warn">
-  ⚠ No run has started in the last {{ quiet_hours }}h
-  {% if last_run_started %}(last: {{ last_run_started }}){% else %}(no runs ever recorded){% endif %}
-  — the reconciler may be suspended or nothing is scheduled.
+  ⚠ 调度器静默：No run has started in the last {{ quiet_hours }}h
+  {% if last_run_started %}(上次 last: {{ last_run_started }}){% else %}(从未记录过运行 no runs ever recorded){% endif %}
+  — reconciler 可能已挂起或没有任何调度 the reconciler may be suspended or nothing is scheduled.
 </div>
 {% endif %}
 
+{% from "_macros.html" import svg_bars %}
+<div class="kpi-row">
+  <div class="kpi"><div class="kpi-value">{{ kpi.running }}</div><div class="kpi-label">运行中 <span class="en">Running now</span></div></div>
+  <div class="kpi k-ok"><div class="kpi-value">{{ kpi.success_rate ~ '%' if kpi.success_rate is not none else '—' }}</div><div class="kpi-label">24h 成功率 <span class="en">success rate</span></div></div>
+  <div class="kpi"><div class="kpi-value">{{ "{:,}".format(kpi.new_rows) }}</div><div class="kpi-label">24h 新增行 <span class="en">new rows</span></div></div>
+  <div class="kpi k-err"><div class="kpi-value">{{ kpi.failures }}</div><div class="kpi-label">24h 失败 <span class="en">failures</span></div></div>
+</div>
+
+<section class="card mt">
+  <h3>产出趋势（近 14 天）<span class="en">Yield trend (last 14 days)</span></h3>
+  {{ svg_bars(trend) }}
+</section>
+
 <div class="home-grid">
   <section class="card">
-    <h3>Fleet</h3>
+    <h3>舰队 <span class="en">Fleet</span></h3>
     <div hx-get="/panel/partials/fleet" hx-trigger="load, every {{ poll_seconds }}s">
-      <p class="muted">loading…</p>
+      <p class="muted">加载中 loading…</p>
     </div>
   </section>
 
   <section class="card">
-    <h3>Running runs</h3>
+    <h3>运行中的爬取 <span class="en">Running runs</span></h3>
     <div hx-get="/panel/partials/running" hx-trigger="load, every {{ poll_seconds }}s">
-      <p class="muted">loading…</p>
+      <p class="muted">加载中 loading…</p>
     </div>
   </section>
 
   <section class="card">
-    <h3>Next up</h3>
+    <h3>接下来 <span class="en">Next up</span></h3>
     <div hx-get="/panel/partials/next" hx-trigger="load, every {{ poll_seconds }}s">
-      <p class="muted">loading…</p>
+      <p class="muted">加载中 loading…</p>
     </div>
   </section>
 
   <section class="card">
-    <h3>Recent finished</h3>
+    <h3>最近完成 <span class="en">Recent finished</span></h3>
     <div hx-get="/panel/partials/recent" hx-trigger="load, every {{ poll_seconds }}s">
-      <p class="muted">loading…</p>
+      <p class="muted">加载中 loading…</p>
     </div>
   </section>
 </div>
 
-<section class="card" style="margin-top:1rem">
-  <h3>Missed runs</h3>
+<section class="card mt">
+  <h3>错过的运行 <span class="en">Missed runs</span></h3>
   <div hx-get="/panel/partials/missed" hx-trigger="load, every {{ poll_seconds }}s">
-    <p class="muted">loading…</p>
+    <p class="muted">加载中 loading…</p>
   </div>
 </section>
 {% endblock %}
