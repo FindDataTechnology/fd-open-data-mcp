@@ -13,17 +13,15 @@ from fd_open_data_mcp.fetch.dispatch import read
 from fd_open_data_mcp.models import Concept, Schedule, SemanticObservation
 from fd_open_data_mcp.refresh.scheduler import generate_schedules
 from fd_open_data_mcp.semantic.bindings import propose_bindings
-from fd_open_data_mcp.semantic.concepts import (
-    consume_indicator_defs, default_entities_db,
-)
+from fd_open_data_mcp.semantic.concepts import consume_indicator_defs
 
-# The pipeline consumes sibling-package registries (fd-akshare registry.db for
-# functions/columns, fd-entities-indicators for indicator_defs concepts); both
-# packages are retired from some workspace checkouts — skip rather than fail.
+# The pipeline consumes a sibling-package registry (fd-akshare registry.db for
+# functions/columns); that package is retired from some workspace checkouts —
+# skip rather than fail. Concepts now come from the protocol vocabulary, which
+# ships with the protocol package, so no fd-entities-indicators is required.
 pytestmark = pytest.mark.skipif(
-    not Path(PROVIDERS["akshare"]["registry_db"]()).exists()
-    or not Path(default_entities_db()).exists(),
-    reason="sibling registries (fd-akshare / fd-entities-indicators) not in this workspace",
+    not Path(PROVIDERS["akshare"]["registry_db"]()).exists(),
+    reason="sibling registry (fd-akshare) not in this workspace",
 )
 
 

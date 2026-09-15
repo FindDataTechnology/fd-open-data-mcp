@@ -11,6 +11,7 @@ from typing import Optional
 from sqlalchemy import text
 
 from fd_open_data_mcp import db as dbmod
+from fd_open_data_mcp.entities.resolver import anchors_by_entity, entity_anchors
 from fd_open_data_mcp.server import mcp
 
 
@@ -62,6 +63,11 @@ def list_entities(
             }
             entities.append(entity)
 
+        # External anchors (Wikidata QID / Data Commons DCID) in one extra query.
+        anchors = anchors_by_entity(session, entity_type, [e["id"] for e in entities])
+        for entity in entities:
+            entity["anchors"] = anchors.get(entity["id"], [])
+
         return entities
 
     finally:
@@ -110,6 +116,7 @@ def get_entity(
             "name_en": result.name_en,
             "name_zh": result.name_zh,
             "metadata": metadata,
+            "anchors": entity_anchors(session, result.entity_type, result.id),
         }
 
     finally:

@@ -184,13 +184,54 @@ def import_catalog_cmd(provider):
 
 @cli.command("consume-concepts")
 def consume_concepts_cmd():
-    """Consume indicator_defs into the concepts table."""
+    """Seed concept families + variables from the protocol vocabulary."""
     from fd_open_data_mcp.db import get_database
     from fd_open_data_mcp.semantic.concepts import consume_indicator_defs
 
     s = get_database().get_session()
     try:
         _echo(consume_indicator_defs(s))
+    finally:
+        s.close()
+
+
+@cli.command("list-concepts")
+@click.option("--entity-type", help="Restrict to one entity type (country, stock, ...)")
+@click.option("--concept-family", help="Restrict to one concept family id (GDP, Population, ...)")
+def list_concepts_cmd(entity_type, concept_family):
+    """List variables with their concept family (the two-level concept model)."""
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.semantic.concepts import list_concepts_with_family
+
+    s = get_database().get_session()
+    try:
+        _echo(list_concepts_with_family(s, entity_type=entity_type, concept_family=concept_family))
+    finally:
+        s.close()
+
+
+@cli.command("list-concept-families")
+def list_concept_families_cmd():
+    """List the concept families (the curated semantic vocabulary)."""
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.semantic.concepts import list_concept_families
+
+    s = get_database().get_session()
+    try:
+        _echo(list_concept_families(s))
+    finally:
+        s.close()
+
+
+@cli.command("import-crosswalks")
+def import_crosswalks_cmd():
+    """Ingest the shipped crosswalk registry (crosswalks/*.yaml) as mappings."""
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.semantic.crosswalk import import_crosswalks
+
+    s = get_database().get_session()
+    try:
+        _echo(import_crosswalks(s))
     finally:
         s.close()
 

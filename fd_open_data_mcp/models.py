@@ -6,9 +6,13 @@ Layered schema:
     sources, functions, columns (model class FunctionColumn)
 
   Semantic layer:
-    concepts            (consumed from fd-entities-indicators/indicator_defs;
-                         canonical identity = code + entity_type + unit + frequency)
+    concept_families    (the small curated vocabulary: fd:GDP, fd:Population,
+                         ... materialized from the protocol's concepts.yaml)
+    concepts            (the Variables - a family qualified by entity_type,
+                         measure, unit, frequency; canonical identity is the
+                         five-tuple code + entity_type + measure + unit + frequency)
     concept_bindings    (physical column -> concept; confidence + provenance)
+    concept_mappings    (concept -> external vocabulary term; SKOS relation)
 
   Entity identity:
     entity_source_identifiers  (entity -> per-source identifier)
@@ -145,6 +149,37 @@ class FunctionColumn(Base):
         }
 
 
+class ConceptFamily(Base):
+    """A concept family — the first level of the two-level concept model.
+
+    Materialized from the protocol vocabulary's ``concepts.yaml``. Variables in
+    ``concepts`` reference a family by ``concept_code``; the reference is loose
+    (no hard FK) because derived families may lag the vocabulary.
+    """
+    __tablename__ = "concept_families"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    code = Column(String(128), unique=True, nullable=False, index=True)
+    name_en = Column(String(255), nullable=True)
+    name_zh = Column(String(255), nullable=True)
+    description = Column(String, nullable=True)
+    value_type = Column(String(32), nullable=True)   # currency/count/ratio/index/text/date/duration
+    unit_type = Column(String(32), nullable=True)    # currency/count/percent/index/none
+    dimensions = Column(JSONB, nullable=True)        # qualifier ids that apply to this family
+    uri = Column(String(512), nullable=True)         # https://schema.finddata.tech/concept/<code>
+    deprecated = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "code": self.code, "name_en": self.name_en,
+            "name_zh": self.name_zh, "description": self.description,
+            "value_type": self.value_type, "unit_type": self.unit_type,
+            "dimensions": self.dimensions, "uri": self.uri,
+            "deprecated": self.deprecated,
+        }
+
+
 class Concept(Base):
     __tablename__ = "concepts"
     __table_args__ = (
@@ -160,18 +195,20 @@ class Concept(Base):
     measure = Column(String(64), nullable=True, default="")  # statistical method/basis: nominal_current/real_constant/ppp/per_capita/growth
     frequency = Column(String(32), nullable=False, default="unknown")
     entity_type = Column(String(32), nullable=False)  # country/city/stock/fund/bond/index/future/crypto/organization/industry
+    concept_code = Column(String(128), nullable=True, index=True)  # -> concept_families.code
     source = Column(String(64), nullable=True)  # origin indicator_def source
     verified = Column(Boolean, nullable=False, default=True)
     deprecated = Column(Boolean, nullable=False, default=False)  # retired duplicate; excluded from discovery + dispatch
     created_at = Column(DateTime, default=_now)
 
     bindings = relationship("ConceptBinding", back_populates="concept", cascade="all, delete-orphan")
+    mappings = relationship("ConceptMapping", back_populates="concept", cascade="all, delete-orphan")
 
     def toDict(self) -> dict:
         return {
             "id": self.id, "code": self.code, "name_en": self.name_en, "name_zh": self.name_zh,
             "category": self.category, "unit": self.unit, "measure": self.measure,
-            "frequency": self.frequency,
+            "frequency": self.frequency, "concept_code": self.concept_code,
             "entity_type": self.entity_type, "source": self.source, "verified": self.verified,
             "deprecated": self.deprecated,
         }
@@ -196,6 +233,38 @@ class ConceptBinding(Base):
         return {
             "id": self.id, "concept_id": self.concept_id, "column_id": self.column_id,
             "confidence": self.confidence, "provenance": self.provenance, "reviewed": self.reviewed,
+        }
+
+
+class ConceptMapping(Base):
+    """A Variable <-> external-vocabulary-term assertion (the crosswalk).
+
+    Same propose-and-confirm governance as ``ConceptBinding``: confidence,
+    provenance, and a review flag. ``relation`` is restricted to the SKOS
+    mapping properties (see ``fd_open_data_protocol.vocabulary.RELATION_TYPES``).
+    """
+    __tablename__ = "concept_mappings"
+    __table_args__ = (
+        UniqueConstraint("concept_id", "vocabulary", "term", "relation", name="uq_concept_mapping"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    concept_id = Column(Integer, ForeignKey("concepts.id", ondelete="CASCADE"), nullable=False, index=True)
+    vocabulary = Column(String(64), nullable=False, index=True)  # datacommons/worldbank/wikidata/xbrl-us-gaap/sdmx
+    term = Column(String(255), nullable=False, index=True)       # the external identifier or code
+    relation = Column(String(16), nullable=False)                # exact/close/broader/narrower/related
+    confidence = Column(Float, nullable=False, default=0.0)
+    provenance = Column(String(32), nullable=False, default="manual")  # registry/manual/llm
+    reviewed = Column(Boolean, nullable=False, default=False)
+    created_at = Column(DateTime, default=_now)
+
+    concept = relationship("Concept", back_populates="mappings")
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "concept_id": self.concept_id, "vocabulary": self.vocabulary,
+            "term": self.term, "relation": self.relation, "confidence": self.confidence,
+            "provenance": self.provenance, "reviewed": self.reviewed,
         }
 
 

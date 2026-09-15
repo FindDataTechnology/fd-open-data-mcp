@@ -6,6 +6,27 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+#### Semantic vocabulary core (two-level concept model + crosswalk)
+
+- **Concept families** — new `concept_families` table, materialized from
+  `fd-open-data-protocol`'s `vocabulary/concepts.yaml`, with `concepts.concept_code`
+  linking every Variable to exactly one family. Variables without an explicit
+  family get one derived from the concept code.
+- **`consume-concepts` repointed** from the (absent) `fd-entities-indicators`
+  sqlite to the protocol vocabulary — seeding now works on a clean checkout.
+- **Concept crosswalk** — new `concept_mappings` table asserting Variable ↔
+  external-vocabulary equivalences (SKOS relation, confidence, provenance,
+  review state), plus `crosswalks/*.yaml` ingestion.
+- **External entity anchors** — `wikidata` (QID) and `datacommons` (DCID) as
+  per-source identifier sources, resolvable back to the local entity; manifest
+  `entity_definitions[].metadata.external_ids` persists anchors at registration.
+- **New tools** — `list_concept_families`, `record_concept_mapping`,
+  `list_concept_mappings`, `import_crosswalks`; `list_concepts` now reports each
+  Variable's family and filters by it; `resolve_entity` also resolves an
+  external anchor to its entity; `get_entity`/`list_entities` expose anchors.
+- **New CLI commands** — `import-crosswalks`, `list-concepts`,
+  `list-concept-families`.
+
 #### New Data Source Adapters (21 sources)
 
 - **NBS GDP** (`nbs-gdp`): National Bureau of Statistics macroeconomic data

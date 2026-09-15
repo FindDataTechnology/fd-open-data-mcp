@@ -31,10 +31,12 @@ the first error.
 pip install "fd-open-data-mcp[data]" fd-polygon fd-cn-report
 
 # 2) Initialize the ontology DB and wire every layer: catalogs -> concepts ->
-#    column bindings -> per-source entity ids -> refresh schedules -> manifests.
+#    crosswalks -> column bindings -> per-source entity ids -> refresh
+#    schedules -> manifests.
 fd-open-data-mcp migrate \
   && fd-open-data-mcp import-catalog \
   && fd-open-data-mcp consume-concepts \
+  && fd-open-data-mcp import-crosswalks \
   && fd-open-data-mcp propose-bindings \
   && fd-open-data-mcp seed-entities \
   && fd-open-data-mcp generate-schedules \
@@ -97,14 +99,16 @@ fd-open-data-mcp migrate
 fd-open-data-mcp import-catalog
 # or one provider:  fd-open-data-mcp import-catalog akshare
 
-# 3. consume indicator_defs as concepts + propose column->concept bindings
+# 3. seed concept families + variables from the protocol vocabulary, ingest the
+#    external crosswalks, then propose column->concept bindings
 fd-open-data-mcp consume-concepts
+fd-open-data-mcp import-crosswalks
 fd-open-data-mcp propose-bindings
 
 # 4. seed per-source entity identifiers (akshare/yfinance for stocks, worldbank for countries)
 fd-open-data-mcp seed-entities
 
-# 5. generate per-concept refresh schedules from indicator_defs.frequency
+# 5. generate per-concept refresh schedules from concept frequency
 fd-open-data-mcp generate-schedules
 
 # 6. read data by concept + entity (read-through cache + ranked dispatch + failover)
@@ -122,9 +126,9 @@ list in your MCP client for the authoritative set):
 
 | Area | Representative tools |
 |------|----------------------|
-| Catalog / import | `import_catalog`, `register_datasource`, `register_discovered`, `consume_concepts`, `enumerate_wbgapi_indicators`, `ingest_entities_from_dump` |
+| Catalog / import | `import_catalog`, `register_datasource`, `register_discovered`, `consume_concepts`, `import_crosswalks`, `enumerate_wbgapi_indicators` |
 | Entity identity | `seed_entity_identifiers`, `resolve_entity`, `add_entity`, `add_entity_identifier`, `update_entity`, `get_entity`, `list_entities` |
-| Semantic layer | `list_concepts`, `update_concept`, `re_embed_concept`, `propose_bindings`, `list_bindings`, `review_bindings`, `confirm_binding`, `update_binding`, `rank_sources` |
+| Semantic layer | `list_concepts`, `list_concept_families`, `update_concept`, `re_embed_concept`, `propose_bindings`, `list_bindings`, `review_bindings`, `confirm_binding`, `update_binding`, `record_concept_mapping`, `list_concept_mappings`, `rank_sources` |
 | Entity graph | `add_relationship`, `list_relationships`, `graph_search` |
 | Vector search | `semantic_search`, `semantic_search_entities`, `semantic_search_unified`, `ai_search` |
 | Fetch | `read`, `fetch`, `plan_crawl` |

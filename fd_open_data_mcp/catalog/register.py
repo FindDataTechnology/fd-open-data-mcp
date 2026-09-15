@@ -14,6 +14,8 @@ from fd_open_data_mcp.catalog.enrich import derive_meaning
 from fd_open_data_mcp.models import (
     Concept, ConceptBinding, Entity, EntityRelationship, Function, FunctionColumn, Source,
 )
+from fd_open_data_mcp.entities.resolver import persist_external_ids
+from fd_open_data_mcp.semantic.concepts import assign_family
 
 
 def upsert_entity(session: Session, entity_spec: Any, source_name: str = None) -> tuple[Entity, str]:
@@ -218,6 +220,10 @@ def register_datasource(manifest: Any, session: Session) -> dict:
             session.add(concept)
             session.flush()
             concept_count += 1
+        # Two-level model: an explicit hint family wins; otherwise a missing
+        # family is derived (never re-derives a family already assigned).
+        if hint.concept_family or concept.concept_code is None:
+            assign_family(session, concept, explicit=hint.concept_family)
         binding = session.query(ConceptBinding).filter_by(
             concept_id=concept.id, column_id=col.id,
         ).first()
@@ -255,6 +261,7 @@ def register_datasource(manifest: Any, session: Session) -> dict:
     # entity_definitions -> entities table (canonical entity metadata)
     entity_def_count = 0
     relationship_count = 0
+    anchor_count = 0
     entity_map: dict[tuple[str, str], Entity] = {}  # (entity_type, code) -> Entity
 
     if hasattr(manifest, 'entity_definitions') and manifest.entity_definitions:
@@ -264,6 +271,11 @@ def register_datasource(manifest: Any, session: Session) -> dict:
             entity_map[(entity_spec.entity_type, entity_spec.code)] = entity
             if status == "created":
                 entity_def_count += 1
+            # Reserved metadata key `external_ids` -> per-source anchor rows
+            # (add-semantic-vocabulary-core, design D7).
+            anchor_count += len(persist_external_ids(
+                session, entity_spec.entity_type, entity.id, entity_spec.metadata,
+            ))
 
         # Second pass: create relationships (after all entities exist)
         for entity_spec in manifest.entity_definitions:
@@ -299,6 +311,7 @@ def register_datasource(manifest: Any, session: Session) -> dict:
         "entities": entity_count + entity_def_count,
         "entity_definitions": entity_def_count,
         "relationships": relationship_count,
+        "anchors": anchor_count,
     }
 
 

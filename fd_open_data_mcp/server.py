@@ -266,7 +266,7 @@ def update_binding(
 # ─── Semantic layer ─────────────────────────────────────────────────────────
 @mcp.tool
 def consume_concepts() -> dict:
-    """Consume ``indicator_defs`` from fd-entities-indicators into the concepts table."""
+    """Seed concept families + variables from the protocol vocabulary."""
     from fd_open_data_mcp.semantic.concepts import consume_indicator_defs
 
     s = _session()
@@ -289,16 +289,112 @@ def propose_bindings() -> dict:
 
 
 @mcp.tool
-def list_concepts(entity_type: str | None = None) -> list[dict]:
-    """List concepts (optionally filtered by entity_type)."""
-    from fd_open_data_mcp.models import Concept
+def list_concepts(
+    entity_type: str | None = None, concept_family: str | None = None,
+) -> list[dict]:
+    """List concepts (Variables) with their concept family; optionally filtered.
+
+    Args:
+        entity_type: restrict to one entity type (country, stock, ...)
+        concept_family: restrict to one concept family id (GDP, Population, ...)
+    """
+    from fd_open_data_mcp.semantic.concepts import list_concepts_with_family
 
     s = _session()
     try:
-        q = s.query(Concept)
-        if entity_type:
-            q = q.filter_by(entity_type=entity_type)
-        return [c.toDict() for c in q.limit(500).all()]
+        return list_concepts_with_family(s, entity_type=entity_type, concept_family=concept_family)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def list_concept_families() -> list[dict]:
+    """List the concept families (the curated semantic vocabulary) + variable counts."""
+    from fd_open_data_mcp.semantic.concepts import list_concept_families as _list
+
+    s = _session()
+    try:
+        return _list(s)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def record_concept_mapping(
+    concept_id: int,
+    vocabulary: str,
+    term: str,
+    relation: str,
+    confidence: float = 1.0,
+    provenance: str = "manual",
+    reviewed: bool = False,
+) -> dict:
+    """Assert that a Variable maps to an external vocabulary term.
+
+    Args:
+        concept_id: Variable (concepts.id) being mapped
+        vocabulary: external vocabulary, e.g. datacommons / worldbank / wikidata / xbrl-us-gaap / sdmx
+        term: the external identifier or code, e.g. SP.POP.TOTL or Q148
+        relation: SKOS mapping property — exact / close / broader / narrower / related
+        confidence: 0..1; below the review threshold it is flagged pending review
+        provenance: registry / manual / llm
+        reviewed: mark the assertion as reviewed
+
+    Returns:
+        {mapping: {...}, created: bool}
+    """
+    from fd_open_data_mcp.semantic.crosswalk import record_mapping
+
+    s = _session()
+    try:
+        row, created = record_mapping(
+            s, concept_id, vocabulary, term, relation,
+            confidence=confidence, provenance=provenance, reviewed=reviewed,
+        )
+        s.commit()
+        return {"mapping": row.toDict(), "created": created}
+    except Exception:
+        s.rollback()
+        raise
+    finally:
+        s.close()
+
+
+@mcp.tool
+def list_concept_mappings(
+    concept_id: int | None = None,
+    vocabulary: str | None = None,
+    term: str | None = None,
+) -> list[dict]:
+    """List concept mappings forward (by Variable) or in reverse (by external term).
+
+    Args:
+        concept_id: restrict to one Variable
+        vocabulary: restrict to one external vocabulary
+        term: restrict to one external term — with `vocabulary` this is the
+            reverse lookup ("which Variables map to SP.POP.TOTL?")
+
+    Returns:
+        Mappings with relation, confidence, provenance, review state, the
+        Variable they belong to, and a `pending_review` flag.
+    """
+    from fd_open_data_mcp.semantic.crosswalk import list_mappings
+
+    s = _session()
+    try:
+        return list_mappings(s, concept_id=concept_id, vocabulary=vocabulary, term=term)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def import_crosswalks() -> dict:
+    """Ingest the shipped crosswalk registry (crosswalks/*.yaml) as mappings."""
+    from fd_open_data_mcp.semantic.crosswalk import import_crosswalks as _import
+
+    s = _session()
+    try:
+        return _import(s)
     finally:
         s.close()
 
@@ -361,14 +457,45 @@ def seed_entity_identifiers() -> dict:
 
 
 @mcp.tool
-def resolve_entity(entity_type: str, entity_id: int, source: str) -> dict:
-    """Resolve the per-source identifier for an entity (None -> source is skipped)."""
-    from fd_open_data_mcp.entities.resolver import resolve_identifier
+def resolve_entity(
+    entity_type: str | None = None,
+    entity_id: int | None = None,
+    source: str | None = None,
+    identifier: str | None = None,
+) -> dict:
+    """Resolve an entity <-> per-source identifier, in either direction.
+
+    Forward (entity -> identifier), the default:
+        resolve_entity(entity_type="country", entity_id=1, source="worldbank")
+        -> {"identifier": "CN"}   (or null when that source has no mapping)
+
+    Reverse (external anchor -> entity), pass `identifier` instead of the
+    entity: `wikidata` (QID, e.g. Q148) and `datacommons` (DCID, e.g.
+    country/CHN) are the anchor sources.
+        resolve_entity(source="wikidata", identifier="Q148")
+        -> {"match": {"entity_type": "country", "code": "CN", ...}}
+        An identifier no entity carries returns {"match": null}, not an error.
+    """
+    from fd_open_data_mcp.entities.resolver import (
+        find_entity_by_identifier, resolve_identifier,
+    )
 
     s = _session()
     try:
+        if identifier is not None:
+            if not source:
+                return {"match": None, "error": "source is required with identifier"}
+            match = find_entity_by_identifier(s, source, identifier)
+            if match is None:
+                return {"match": None, "note": "no entity carries this identifier"}
+            return {"match": match}
+
+        if not (entity_type and source) or entity_id is None:
+            return {"identifier": None,
+                    "error": "pass (entity_type, entity_id, source) or (source, identifier)"}
         ident = resolve_identifier(s, entity_type, entity_id, source)
-        return {"identifier": ident} if ident else {"identifier": None, "note": "no mapping; source will be skipped"}
+        return {"identifier": ident} if ident else {
+            "identifier": None, "note": "no mapping; source will be skipped"}
     finally:
         s.close()
 

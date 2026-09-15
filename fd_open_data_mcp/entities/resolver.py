@@ -4,15 +4,29 @@
   the concept's entity_type (spec entity-identity).
 - ``resolve_identifier`` returns the per-source identifier for an entity, or
   None - callers skip that source on None (graceful degradation, design.md).
+- ``find_entity_by_identifier`` resolves the other way: an external anchor
+  (Wikidata QID, Data Commons DCID) back to the local entity carrying it.
 - ``seed_*`` populate entity_source_identifiers for the common mappings.
 """
 from __future__ import annotations
 
+import logging
+import re
 from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from fd_open_data_mcp.models import Concept, EntitySourceIdentifier
+from fd_open_data_mcp.models import Concept, Entity, EntitySourceIdentifier
+
+logger = logging.getLogger(__name__)
+
+# Anchor sources: identifiers that point at an entity in an external graph.
+ANCHOR_SOURCES: tuple[str, ...] = ("wikidata", "datacommons")
+_QID = re.compile(r"^Q\d+$")
+
+
+class InvalidIdentifier(ValueError):
+    """Raised when an identifier does not match the expected form for its source."""
 
 
 class EntityTypeMismatch(Exception):
@@ -79,10 +93,32 @@ def resolve_identifier(
     return row.identifier if row else None
 
 
+def normalize_identifier(source: str, identifier: str) -> str:
+    """Validate + normalize a per-source identifier.
+
+    Anchor sources have a declared form: a Wikidata anchor is a QID matching
+    ``Q<digits>`` (case-insensitive on input, stored upper-cased), a Data
+    Commons anchor is a non-empty DCID such as ``country/CHN``. Other sources
+    are passed through unchanged.
+    """
+    ident = (identifier or "").strip()
+    if source == "wikidata":
+        ident = ident.upper()
+        if not _QID.match(ident):
+            raise InvalidIdentifier(
+                f"invalid wikidata identifier '{identifier}': expected a QID "
+                f"matching Q<digits> (e.g. Q148)"
+            )
+    elif source == "datacommons" and not ident:
+        raise InvalidIdentifier("datacommons identifier must be a non-empty DCID")
+    return ident
+
+
 def add_identifier(
     session: Session, entity_type: str, entity_id: int, source: str, identifier: str,
 ) -> EntitySourceIdentifier:
-    """Upsert a per-source entity identifier."""
+    """Upsert a per-source entity identifier (validated against its source's form)."""
+    identifier = normalize_identifier(source, identifier)
     row = session.query(EntitySourceIdentifier).filter_by(
         entity_type=entity_type, entity_id=entity_id, source=source,
     ).first()
@@ -96,6 +132,86 @@ def add_identifier(
         session.flush()
     session.commit()
     return row
+
+
+def entity_anchors(session: Session, entity_type: str, entity_id: int) -> list[dict]:
+    """External anchors (source + identifier) carried by one entity."""
+    rows = (
+        session.query(EntitySourceIdentifier)
+        .filter_by(entity_type=entity_type, entity_id=entity_id)
+        .order_by(EntitySourceIdentifier.source)
+        .all()
+    )
+    return [{"source": r.source, "identifier": r.identifier} for r in rows]
+
+
+def anchors_by_entity(
+    session: Session, entity_type: str, entity_ids: list[int],
+) -> dict[int, list[dict]]:
+    """Anchors for many entities of one type, keyed by ``entity_id``."""
+    out: dict[int, list[dict]] = {}
+    if not entity_ids:
+        return out
+    rows = (
+        session.query(EntitySourceIdentifier)
+        .filter(
+            EntitySourceIdentifier.entity_type == entity_type,
+            EntitySourceIdentifier.entity_id.in_(entity_ids),
+        )
+        .all()
+    )
+    for r in rows:
+        out.setdefault(r.entity_id, []).append({"source": r.source, "identifier": r.identifier})
+    return out
+
+
+def find_entity_by_identifier(session: Session, source: str, identifier: str) -> Optional[dict]:
+    """Resolve an external anchor back to the local entity carrying it.
+
+    Returns the entity's type/code/labels, or None when no entity carries the
+    identifier. An identifier that does not match the source's form is a
+    no-match, not an error (spec ``external-entity-anchors``).
+    """
+    try:
+        ident = normalize_identifier(source, identifier)
+    except InvalidIdentifier:
+        return None
+    row = session.query(EntitySourceIdentifier).filter_by(source=source, identifier=ident).first()
+    if row is None:
+        return None
+    entity = session.get(Entity, row.entity_id)
+    if entity is None:
+        return None
+    return {
+        "entity_id": entity.id,
+        "entity_type": entity.entity_type,
+        "code": entity.code,
+        "name_en": entity.name_en,
+        "name_zh": entity.name_zh,
+    }
+
+
+def persist_external_ids(
+    session: Session, entity_type: str, entity_id: int, metadata: Optional[dict],
+) -> list[dict]:
+    """Persist a manifest ``external_ids`` metadata block as anchor rows.
+
+    ``{"wikidata": "Q148", "datacommons": "country/CHN"}`` becomes two
+    ``entity_source_identifiers`` rows. Malformed or unknown entries are logged
+    and skipped — a bad anchor never fails registration (design D7).
+    """
+    anchors = (metadata or {}).get("external_ids")
+    if not isinstance(anchors, dict):
+        return []
+    persisted: list[dict] = []
+    for source, identifier in anchors.items():
+        try:
+            row = add_identifier(session, entity_type, entity_id, source, str(identifier))
+        except InvalidIdentifier as e:  # noqa: BLE001 - logged, never fatal
+            logger.warning("ignoring external_ids entry %s=%r: %s", source, identifier, e)
+            continue
+        persisted.append({"source": row.source, "identifier": row.identifier})
+    return persisted
 
 
 _ISO2_TO_ISO3: dict[str, str] = {

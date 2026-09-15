@@ -27,6 +27,8 @@ _ALTER_COLUMNS = {
     # Nullable FKs (SET NULL on cluster delete) so legacy rows survive.
     "policy_runs": [("cluster_id", "INTEGER")],
     "proxies": [("cluster_id", "INTEGER")],
+    # add-semantic-vocabulary-core: the Variable's concept-family reference.
+    "concepts": [("concept_code", "VARCHAR(128)")],
 }
 
 
