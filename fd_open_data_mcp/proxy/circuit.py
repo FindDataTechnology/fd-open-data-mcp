@@ -28,9 +28,17 @@ endpoint is not just a blip. A ban (stronger signal) resets transient_streak; ok
 resets both streaks. ok also closes a HALF_OPEN circuit (defensive - the probe
 is the normal closer, but a real fetch succeeding also closes).
 
-Degrades gracefully: if REDIS_URL is unset, ``_client()`` returns None and the
-circuit is a no-op (everything reads CLOSED) - the "ships dark" property: with
-no Redis, behavior matches the pre-proxy baseline.
+Degrades gracefully: if neither PROXY_REDIS_URL nor REDIS_URL is set,
+``_client()`` returns None and the circuit is a no-op (everything reads
+CLOSED) - the "ships dark" property: with no Redis, behavior matches the
+pre-proxy baseline.
+
+Redis selection follows the fd-proxy-service convention: ``PROXY_REDIS_URL``
+wins over ``REDIS_URL``. The forwarder classifies fetches and writes circuit
+state to the dedicated proxy-redis (db1); crawler-side consumers that must see
+forwarder-written state (probe job, reconciler, panel) set ``PROXY_REDIS_URL``
+to that same DB. Plain ``REDIS_URL`` (the shared crawl redis, db0) remains the
+default so visibility/instrumentation state stays where it is today.
 """
 from __future__ import annotations
 
@@ -55,11 +63,15 @@ _REDIS = None  # type: ignore[var-annotated]
 
 
 def _client():
-    """Lazy shared redis client. Returns None if REDIS_URL is unset (dark mode)."""
+    """Lazy shared redis client.
+
+    ``PROXY_REDIS_URL`` (the dedicated proxy-redis the forwarder writes) wins
+    over ``REDIS_URL``; returns None if neither is set (dark mode).
+    """
     global _REDIS
     if _REDIS is not None:
         return _REDIS
-    url = os.environ.get("REDIS_URL")
+    url = os.environ.get("PROXY_REDIS_URL") or os.environ.get("REDIS_URL")
     if not url:
         return None
     try:
