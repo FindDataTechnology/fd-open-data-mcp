@@ -2,6 +2,59 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.16] - 2026-09-18
+
+### Fixed
+
+#### Requests that can never succeed no longer get retried
+
+The retry, circuit-breaker and ranking machinery could express "this route is
+unhealthy" but not "this request is impossible", so a missing endpoint was
+classified `transient` and retried against proxies it had nothing to do with.
+Between 2026-08-30 and 2026-09-16 the fleet logged **5,277,961** `has no
+callable` attempts, and on 09-16 it issued roughly 266,000 failed fetches in 24
+hours with **zero** successes.
+
+- **`permanent` failure class** — a new `ban_rules` classification, seeded for
+  the `has no callable` family. A permanent failure is not retried and does NOT
+  touch a proxy circuit or the outcomes stream: the exit is not at fault.
+- **`fetch/capability.py`** — static, no-I/O resolution of `(source, command)`.
+  Whether a callable exists is decidable without spending a network request.
+- **Entity-domain agreement** — rules matched on column *name* alone, so every
+  akshare endpoint with a `收盘`/`close` column bound to `price.close`/`stock`:
+  options, futures, bonds, funds and indices among them (concept 234 reached
+  **117** dispatch-eligible bindings). A proposal is now refused when the
+  function's declared domain and the rule's concept domain disagree. Domain
+  comes from a command prefix, an instrument word, or the source; instrument
+  words are checked before prefixes, or `stock_board_industry_index_ths` is
+  claimed by `stock_`.
+
+### Changed
+
+- **Binding eligibility needs evidence, not just a score** — the dispatch gate
+  was satisfiable by `confidence >= 0.6` alone and the rule table emits
+  0.85–0.9, so every machine proposal was live and the review step gated
+  nothing. An `llm`-provenance binding now requires confirmation; confidence is
+  a floor, never a substitute. Ships **report-only**
+  (`FD_BINDING_ELIGIBILITY_GATE`) so a mis-written gate cannot narrow a live
+  crawl before it is reviewed.
+- **`confirm_by_rule` / `verify_functions_by_rule`** — rule-based binding
+  confirmation and function verification. Both require positive evidence
+  (domain agreement AND resolvability) and refuse rather than assume. A
+  confirmation records the distinct provenance `rule-confirmed`.
+- **Bounded failover chain** — `FD_CRAWL_CHAIN_MAX` (default 8). Candidates
+  past the bound are reported as not-attempted rather than dropped silently.
+- **Permanent-path suppression** — a `(concept, function)` whose recent
+  outcomes are all permanent is excluded outright rather than reordered
+  ("last" is still "attempted"). Derived from `fetch_log`, computed once per
+  plan, clearable by data. Suppression is **cluster-independent** because a
+  missing callable is missing from every egress — unlike demotion, which is
+  route health and stays per-cluster.
+
+Note there are **two** gates: a binding is dispatchable only when the binding
+is eligible AND its function is verified. Of the 536 bindings confirmed by the
+new rule, 508 sat on `verified = false` functions and remained unreachable.
+
 ## [Unreleased]
 
 ### Added
