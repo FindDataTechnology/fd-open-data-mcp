@@ -85,8 +85,10 @@ RATE_LIMITS: dict[str, tuple[float, int]] = {
 PROBES: dict[str, tuple[str, dict]] = {
     # Use the Tencent endpoint (stock_zh_a_hist_tx) as the probe - it is the
     # reliable path on overseas IPs (eastmoney stock_zh_a_hist gets IP-banned).
+    # akshare >= 1.18.9x dropped the `period` kwarg and wants sz-prefixed
+    # symbols - signature-checked against 1.18.96 (the image's version).
     "akshare": ("stock_zh_a_hist_tx", {
-        "symbol": "000001", "period": "daily",
+        "symbol": "sz000001",
         "start_date": "20260701", "end_date": "20260701", "adjust": "qfq",
     }),
     "yfinance": ("ticker_history", {"symbol": "AAPL", "period": "1d"}),
