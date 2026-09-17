@@ -14,7 +14,8 @@ Per fetch:
      classify a ban — this is why the contract is acquire/release, not a blind
      ``HTTP_PROXY`` env-set (see ``injection.py`` module docstring).
   3. ``run_upstream`` is called (timed).
-  4. ``ban_rules.classify`` maps the outcome to ok/transient/ban/blocked.
+  4. ``ban_rules.classify`` maps the outcome to
+     ok/transient/ban/blocked/permanent.
      ``fail_streak`` is read from the local ``circuit`` view (``REDIS_URL``) for
      streak-gated rules; when REDIS_URL points at proxy-redis this is the live
      streak the forwarder owns, ships-dark (no redis) -> 0 (streak rules inert,
@@ -28,7 +29,10 @@ TRANSIENT => retry once on the same upstream. BAN => release + re-acquire
 OPEN so ``acquire_any`` skips it). Upstream loop exhausted, OR a direct-sentinel
 fetch banned => ``SourceUnavailable`` (caller fails over to the next
 real_source). ``blocked`` => raise ``FetchError`` (no point burning another
-upstream). Behavior above the transport layer is unchanged.
+upstream). ``permanent`` => raise ``FetchError`` immediately, with no retry and
+no circuit or outcomes-stream write: the endpoint does not exist, so the exit is
+not at fault and there is nothing to re-acquire away from. Behavior above the
+transport layer is unchanged.
 
 Degrades to today's behavior when ``FD_PROXY_FORWARDER`` is unset: ``acquire``
 returns the direct sentinel, ``release`` is a no-op, fetches egress direct from
@@ -92,7 +96,8 @@ def _record(session, source: str, proxy_id: Optional[int], classification: str,
             concept_id: Optional[int] = None, entity_type: Optional[str] = None,
             entity_id: Optional[int] = None, real_source: Optional[str] = None,
             function_id: Optional[int] = None,
-            cluster_id: Optional[int] = None) -> None:
+            cluster_id: Optional[int] = None,
+            to_circuit: bool = True) -> None:
     """Write fetch_log (cold) + the outcomes stream (hot).
 
     Args:
@@ -102,6 +107,9 @@ def _record(session, source: str, proxy_id: Optional[int], classification: str,
             attribution keys on the endpoint, not the source)
         cluster_id: The egress the fetch ran from (pods carry SCRAW_CLUSTER_ID;
             None on the read() path / ships-dark)
+        to_circuit: When False, skip the hot outcomes stream. Use for failures
+            intrinsic to the request (``permanent``) — the exit is not at fault,
+            so recording it there would feed a proxy signal that is not real.
     """
     try:
         session.add(FetchLog(
@@ -127,6 +135,8 @@ def _record(session, source: str, proxy_id: Optional[int], classification: str,
         else:
             logger.warning("fetch_log write failed (source=%s): %s", source, e)
     # Use real_source for outcomes stream if available, otherwise fall back to source
+    if not to_circuit:
+        return
     outcome_source = real_source if real_source else source
     circuit.write_outcome(outcome_source, {
         "source": outcome_source, "proxy_id": proxy_id or 0,
@@ -258,6 +268,18 @@ def instrumented_fetch(
                         e.response_text, combined_streak
                     )
                 elapsed_ms = int((time.time() - t0) * 1000)
+                if classification == "permanent":
+                    # Intrinsic to the request (the endpoint does not exist):
+                    # no exit, retry or cooldown changes the outcome. Record it
+                    # and stop, without retrying. Deliberately does NOT call
+                    # release() and does NOT write the outcomes stream — the
+                    # exit is not at fault, so this must not become a proxy or
+                    # circuit signal. Before this, 5.3M `has no callable`
+                    # attempts were scored against proxies.
+                    _record(session, source, acq.addr_id, classification, elapsed_ms,
+                            status, detail, concept_id, entity_type, entity_id,
+                            real_source, function_id, cluster_id, to_circuit=False)
+                    raise FetchError(f"{source}/{command} permanent: {detail}")
                 # Hand the classification to the forwarder, which owns the
                 # circuit state machine (writes to proxy-redis via /release).
                 # No-op in ships-dark (no forwarder) or when addr_id is None

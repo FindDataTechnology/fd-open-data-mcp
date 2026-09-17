@@ -7,6 +7,14 @@ v1 uses a rule table mapping well-known column names (zh/en) and cn-gov
 PPP vs per-capita) bind to **distinct** concepts (design.md D1).
 
 An LLM fallback hook is exposed (``propose_concept_llm``) but unimplemented.
+
+Matching is on the column NAME alone, which is why a domain check guards it: a
+name like ``收盘`` occurs in stock, option, futures, bond and fund endpoints
+alike, so matching on it alone bound all of them to `price.close`/`stock`
+(concept 234 reached 117 dispatch-eligible bindings, two of which accounted for
+every fetch the fleet made on 2026-09-16). A proposal is now refused when the
+function's declared domain and the rule's concept domain disagree — see
+:func:`function_domain` and :func:`propose_concept`.
 """
 from __future__ import annotations
 
@@ -83,29 +91,153 @@ _RULES: list[tuple[tuple[str, ...], tuple[str, str, str, str, str], float]] = [
     (("sp.dyn.le00.in",), ("life_expectancy", "country", "", "years", "yearly"), 0.85),
 ]
 
+# cn-gov semantic_type hints -> generic document concepts. These carry no
+# instrument domain, so they are never domain-checked.
+_SEMANTIC_TYPE_RULES: dict[str, tuple[str, str, str, str, str]] = {
+    "title": ("doc.title", "industry", "", "", "irregular"),
+    "date": ("doc.date", "industry", "", "", "irregular"),
+    "url": ("doc.url", "industry", "", "", "irregular"),
+}
+
+# Entity domain declared by a function's command prefix. Checked most-specific
+# first: a name that is prefixed `stock_` but is really an index endpoint is an
+# exception, not a stock function.
+_DOMAIN_PREFIXES: tuple[tuple[str, str], ...] = (
+    ("option_", "future"),
+    ("futures_", "future"),
+    ("bond_", "bond"),
+    ("fund_", "fund"),
+    ("index_", "index"),
+    ("stock_", "stock"),
+)
+
+# akshare names a few index endpoints with a `stock_` prefix.
+_DOMAIN_PREFIX_EXCEPTIONS: tuple[tuple[str, str], ...] = (
+    ("stock_zh_index_", "index"),
+    ("stock_hk_index_", "index"),
+    ("stock_us_index_", "index"),
+)
+
+# Sources whose every endpoint serves one entity domain, used when the command
+# name declares nothing. This is still positive evidence — "this source only
+# serves country indicators" is a fact about the source, not the absence of a
+# contradiction — and without it the domain rule cannot confirm the 103
+# bindings whose commands (`get_indicator_data`, `mee_tzgg_archive`) carry no
+# prefix, emptying nine concepts.
+_SOURCE_DOMAIN: dict[str, str] = {
+    "wbgapi": "country",
+    "worldbank": "country",
+    "cn-gov": "industry",       # government notices; doc.* concepts are `industry`
+    "fd-cn-gov": "industry",
+    "yfinance": "stock",
+    "edgar": "stock",           # its financials.* rules bind `stock`
+}
+
+
+# A source-level default is coarse: yfinance serves stock prices AND option
+# chains, so `ticker_option_chain` would inherit `stock` and its `volume` column
+# would be read as the underlying's traded volume. A command NAME that carries a
+# different instrument family overrides the source default.
+_DOMAIN_MARKERS: tuple[tuple[str, str], ...] = (
+    ("option", "future"),
+    # akshare ships more `stock_`-prefixed index endpoints than the exception
+    # table above lists (`stock_board_concept_index_ths`,
+    # `stock_buffett_index_lg`) — their "close" is an index level, not a share
+    # price, so a name carrying `index` is not a stock function.
+    ("index", "index"),
+)
+
+
+def function_domain(
+    command: Optional[str], source: Optional[str] = None,
+) -> Optional[str]:
+    """The entity domain a function declares, from its command name or its source.
+
+    A function's name says what instrument family it returns: `option_czce_hist`
+    returns options, `futures_zh_spot` futures, `bond_zh_hs_daily` bonds. When
+    the name declares nothing (a provider command, a document fetch) the source's
+    domain is used. Returns None when neither declares one — an undeclared domain
+    is not evidence of a conflict, so such columns are checked as before.
+    """
+    if command:
+        lowered = command.lower()
+        # Most specific first: an explicit exception, then an instrument word
+        # anywhere in the name, then the general family prefix. Markers MUST
+        # precede prefixes or `stock_board_industry_index_ths` is claimed by the
+        # `stock_` prefix before its `index` is ever seen.
+        for prefix, domain in _DOMAIN_PREFIX_EXCEPTIONS:
+            if lowered.startswith(prefix):
+                return domain
+        for marker, domain in _DOMAIN_MARKERS:
+            if marker in lowered:
+                return domain
+        for prefix, domain in _DOMAIN_PREFIXES:
+            if lowered.startswith(prefix):
+                return domain
+    if source:
+        return _SOURCE_DOMAIN.get(source.lower())
+    return None
+
+def _match_rule(column_name: Optional[str], semantic_type: Optional[str]):
+    """First matching (rule spec, confidence) for a column, or (None, None)."""
+    sem = (semantic_type or "").lower().strip()
+    if sem in _SEMANTIC_TYPE_RULES:
+        return _SEMANTIC_TYPE_RULES[sem], 0.8
+    name = (column_name or "").lower()
+    for patterns, spec, conf in _RULES:
+        if any(p in name for p in patterns):
+            return spec, conf
+    return None, None
+
+
+def domain_conflict(
+    column_name: Optional[str],
+    semantic_type: Optional[str] = None,
+    command: Optional[str] = None,
+    source: Optional[str] = None,
+) -> Optional[dict]:
+    """The cross-domain refusal a rule-derived proposal would hit, for reporting.
+
+    Returns None when there is no conflict — including when no rule matches at
+    all, since that is not a domain problem.
+    """
+    spec, _conf = _match_rule(column_name, semantic_type)
+    if spec is None:
+        return None
+    code, entity_type = spec[0], spec[1]
+    declared = function_domain(command, source)
+    if declared is None or declared == entity_type:
+        return None
+    return {
+        "command": command, "column": column_name, "concept": code,
+        "concept_entity_type": entity_type, "function_domain": declared,
+    }
+
 
 def propose_concept(
     column_name: str,
     column_description: Optional[str] = None,
     semantic_type: Optional[str] = None,
+    command: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> Optional[dict]:
-    """Return a concept proposal {code, entity_type, measure, unit, frequency, confidence} or None."""
-    name = (column_name or "").lower()
-    sem = (semantic_type or "").lower().strip()
+    """Return a concept proposal {code, entity_type, measure, unit, frequency, confidence} or None.
 
-    # cn-gov semantic_type hints -> generic document concepts
-    if sem == "title":
-        return {"code": "doc.title", "entity_type": "industry", "measure": "", "unit": "", "frequency": "irregular", "confidence": 0.8}
-    if sem == "date":
-        return {"code": "doc.date", "entity_type": "industry", "measure": "", "unit": "", "frequency": "irregular", "confidence": 0.8}
-    if sem == "url":
-        return {"code": "doc.url", "entity_type": "industry", "measure": "", "unit": "", "frequency": "irregular", "confidence": 0.8}
-
-    for patterns, (code, etype, measure, unit, freq), conf in _RULES:
-        if any(p in name for p in patterns):
-            return {"code": code, "entity_type": etype, "measure": measure,
-                    "unit": unit, "frequency": freq, "confidence": conf}
-    return None
+    ``command`` and ``source`` identify the function. When either declares an
+    entity domain (see :func:`function_domain`) and the matched rule's concept
+    belongs to a different one, the proposal is refused — returned as None, so no
+    binding is created. This is what stops an options function's 收盘 column from
+    becoming a stock closing price.
+    """
+    spec, conf = _match_rule(column_name, semantic_type)
+    if spec is None:
+        return None
+    code, entity_type, measure, unit, frequency = spec
+    declared = function_domain(command, source)
+    if declared is not None and declared != entity_type:
+        return None
+    return {"code": code, "entity_type": entity_type, "measure": measure,
+            "unit": unit, "frequency": frequency, "confidence": conf}
 
 
 def propose_concept_llm(

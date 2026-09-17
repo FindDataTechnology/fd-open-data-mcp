@@ -18,6 +18,10 @@ from fd_open_data_mcp.models import BanRule, Proxy, SourceProbe, SourceRateLimit
 # (rule_type, pattern, classification, streak_min, priority) per source.
 BAN_RULES: dict[str, list[tuple]] = {
     "akshare": [
+        # permanent: intrinsic to (source, command) - the installed library has
+        # no such endpoint, so no exit/retry/cooldown can change the outcome.
+        # Priority above every route signal: it is the most definitive one.
+        ("error", "has no callable", "permanent", 0, 110),
         ("status", "403", "ban", 0, 100),
         ("status", "429", "ban", 0, 100),
         ("status", "5xx", "transient", 0, 90),
@@ -29,11 +33,15 @@ BAN_RULES: dict[str, list[tuple]] = {
         ("body", "captcha", "blocked", 0, 85),
     ],
     "yfinance": [
+        ("error", "has no callable", "permanent", 0, 110),
+        ("error", "has no method", "permanent", 0, 110),
         ("status", "429", "ban", 0, 100),
         ("status", "401", "blocked", 0, 95),   # needs auth
         ("status", "5xx", "transient", 0, 90),
     ],
     "edgar": [
+        ("error", "has no callable", "permanent", 0, 110),
+        ("error", "has no method", "permanent", 0, 110),
         ("status", "429", "ban", 0, 100),
         ("status", "403", "blocked", 0, 95),   # SEC needs declared identity
         ("status", "5xx", "transient", 0, 90),
@@ -43,6 +51,7 @@ BAN_RULES: dict[str, list[tuple]] = {
         ("status", "5xx", "transient", 0, 90),
     ],
     "wbgapi": [
+        ("error", "has no callable", "permanent", 0, 110),
         ("status", "429", "ban", 0, 100),
         ("status", "5xx", "transient", 0, 90),
     ],

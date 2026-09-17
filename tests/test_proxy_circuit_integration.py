@@ -245,3 +245,103 @@ def test_yahoo_finance_429_classified_ban_via_yfinance_fallback(
     # on the yahoo_finance circuit (circuit_source = real_source).
     st = circuit.get_state("yahoo_finance", 1)
     assert st["fail_streak"] == 1
+
+
+# --- permanent failures are not a route problem -----------------------------
+
+def _seed_permanent_rule(session):
+    session.add(BanRule(source="akshare", rule_type="error",
+                        pattern="has no callable", classification="permanent",
+                        streak_min=0, priority=110))
+    session.commit()
+
+
+def test_permanent_failure_issues_one_call_and_touches_no_circuit(
+        session, fake_redis, monkeypatch):
+    """A missing endpoint is intrinsic to the request: one upstream call, no
+    retry, and NO circuit or outcomes-stream write.
+
+    Before this, the failure defaulted to transient: it was retried, and each
+    attempt was scored against whichever exit happened to serve it — feeding a
+    proxy signal for a defect no exit could fix.
+    """
+    _seed_permanent_rule(session)
+
+    fw = _FakeForwarder([1])
+    monkeypatch.setattr("fd_open_data_mcp.proxy.injection.proxy_client", fw)
+
+    calls: list[tuple] = []
+
+    def fake_run(source, command, params):
+        calls.append((source, command))
+        raise FetchError("akshare has no callable option_czce_hist")
+
+    monkeypatch.setattr(instr_mod, "run_upstream", fake_run)
+
+    with pytest.raises(FetchError, match="permanent"):
+        instr_mod.instrumented_fetch(
+            "akshare", "option_czce_hist", {"symbol": "SR501"},
+            session=session, max_proxies=3)
+
+    # Exactly one upstream call — no retry, and no re-acquire onto another exit.
+    assert calls == [("akshare", "option_czce_hist")]
+
+    # The circuit is untouched: no failure recorded against the exit.
+    st = circuit.get_state("akshare", 1)
+    assert st["state"] == "closed"
+    assert st["fail_streak"] == 0
+    assert st["transient_streak"] == 0
+
+    # No outcomes-stream write either — that stream is the proxy signal.
+    assert fake_redis.streams == {}
+
+
+def test_permanent_failure_records_exactly_one_fetch_log_row(
+        session, fake_redis, monkeypatch):
+    """The attempt is still recorded (spec concept-fetch: every attempt is
+    recorded) — exactly one row, status error, carrying the permanent class."""
+    _seed_permanent_rule(session)
+
+    fw = _FakeForwarder([1])
+    monkeypatch.setattr("fd_open_data_mcp.proxy.injection.proxy_client", fw)
+    monkeypatch.setattr(
+        instr_mod, "run_upstream",
+        lambda source, command, params: (_ for _ in ()).throw(
+            FetchError("akshare has no callable option_czce_hist")))
+
+    with pytest.raises(FetchError):
+        instr_mod.instrumented_fetch(
+            "akshare", "option_czce_hist", {"symbol": "SR501"},
+            session=session, function_id=None, max_proxies=3)
+
+    logs = session.query(FetchLog).filter_by(source="akshare").all()
+    assert len(logs) == 1
+    assert logs[0].status == "error"
+    assert logs[0].classification == "permanent"
+    assert "has no callable" in (logs[0].detail or "")
+
+
+def test_transient_failure_still_retries_and_touches_the_circuit(
+        session, fake_redis, monkeypatch):
+    """The permanent path must not swallow transient behavior: a genuine
+    connection failure still retries and is still recorded against the exit."""
+    fw = _FakeForwarder([1])
+    monkeypatch.setattr("fd_open_data_mcp.proxy.injection.proxy_client", fw)
+
+    calls: list[int] = []
+
+    def fake_run(source, command, params):
+        calls.append(1)
+        raise FetchError("RemoteDisconnected('Remote end closed connection')")
+
+    monkeypatch.setattr(instr_mod, "run_upstream", fake_run)
+
+    with pytest.raises(SourceUnavailable):  # exhausts upstreams, not permanent
+        instr_mod.instrumented_fetch(
+            "akshare", "stock_zh_a_hist", {"symbol": "600519"},
+            session=session, max_proxies=1)
+
+    assert len(calls) == 2  # 1 retry on transient, unchanged
+    st = circuit.get_state("akshare", 1)
+    assert st["transient_streak"] >= 1
+    assert fake_redis.streams != {}  # the outcomes stream IS written

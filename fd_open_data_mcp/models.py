@@ -766,15 +766,17 @@ class BanRule(Base):
     """Per-source ban-classification rule. Matched in priority order (desc); first
     match wins. rule_type: status (http status code/pattern), error (exception
     message substring), body (response body regex). classification: ok / transient
-    / ban / blocked. `streak_min` gates the rule (e.g. RemoteDisconnected -> ban
-    only after streak >= 3)."""
+    / ban / blocked / permanent. `streak_min` gates the rule (e.g.
+    RemoteDisconnected -> ban only after streak >= 3). `permanent` marks a failure
+    intrinsic to the request (the endpoint does not exist), not a route-health
+    signal - it must not move a proxy circuit."""
     __tablename__ = "ban_rules"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     source = Column(String(64), nullable=False, index=True)
     rule_type = Column(String(16), nullable=False)  # status / error / body
     pattern = Column(String(255), nullable=False)
-    classification = Column(String(16), nullable=False)  # ok / transient / ban / blocked
+    classification = Column(String(16), nullable=False)  # ok / transient / ban / blocked / permanent
     streak_min = Column(Integer, nullable=False, default=0)
     priority = Column(Integer, nullable=False, default=0)
     enabled = Column(Boolean, nullable=False, default=True)

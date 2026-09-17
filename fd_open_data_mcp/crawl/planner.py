@@ -13,6 +13,7 @@ executor (it cannot be enumerated cheaply without the entities DB).
 from __future__ import annotations
 
 import datetime as dt
+import os
 
 from sqlalchemy import func, text
 from sqlalchemy.orm import Session
@@ -22,8 +23,54 @@ from fd_open_data_mcp.crawl.plan import (
 )
 from fd_open_data_mcp.entities.resolver import resolve_identifier
 from fd_open_data_mcp.fetch.dispatch import _bindings_for_source
+from fd_open_data_mcp.fetch.suppress import suppressed_paths
+from fd_open_data_mcp.fetch.capability import (
+    UNRESOLVABLE, check_command,
+)
 from fd_open_data_mcp.models import Concept
 from fd_open_data_mcp.ranking.scorer import rank_sources_for_concept
+
+
+def _candidate_pairs(session: Session, concept_ids: list[int]) -> set[tuple[int, int]]:
+    """Every ``(concept_id, function_id)`` the requested concepts could route to.
+
+    Bounded by ``concept_bindings`` (a few thousand rows), so computing the
+    suppressed set up front costs one small query rather than one per cell.
+    """
+    from fd_open_data_mcp.models import ConceptBinding, FunctionColumn
+
+    rows = (
+        session.query(ConceptBinding.concept_id, FunctionColumn.function_id)
+        .join(FunctionColumn, FunctionColumn.id == ConceptBinding.column_id)
+        .filter(ConceptBinding.concept_id.in_(list(concept_ids)))
+        .all()
+    )
+    return {(concept_id, function_id) for concept_id, function_id in rows}
+
+
+def capability_check_enabled() -> bool:
+    """Whether an endpoint that cannot be resolved here is excluded at plan time.
+
+    Report-only by default, like the eligibility gate: a host without the crawl
+    image's libraries resolves nothing (``UNVERIFIABLE``), and enforcing there
+    would be inert at best — so the switch is explicit and separate.
+    """
+    return (os.environ.get("FD_CAPABILITY_CHECK") or "report").strip().lower() == "enforce"
+
+
+def chain_bound() -> int:
+    """Maximum candidates in one concept's failover chain (spec concept-fetch).
+
+    A chain is built from every binding for the concept, in rank order, with no
+    cap. Concept ``price.close``/``stock`` reached 117 entries, and with three
+    proxies times one retry per proxy a single cell could issue several hundred
+    upstream calls before giving up. Candidates past the bound are recorded as
+    not-attempted rather than dropped silently.
+    """
+    try:
+        return max(1, int(os.environ.get("FD_CRAWL_CHAIN_MAX", "8")))
+    except ValueError:
+        return 8
 
 
 def plan_crawl(
@@ -67,7 +114,18 @@ def plan_crawl(
     # no explicit start was given (explicit start wins, per spec). CLI/MCP also clear
     # since_last when --start is set; this guard makes the planner robust on direct call.
     concepts = {cid: session.get(Concept, cid) for cid in concept_ids}
+
+    # Permanent-path suppression (spec concept-fetch). Computed ONCE for the
+    # whole plan, not per cell: a (concept, function) whose recent outcomes are
+    # all permanent cannot succeed from ANY egress, so unlike a demotion it is
+    # excluded outright. Applied before the chain bound so the bound is filled
+    # with candidates that can run.
+    suppressed = suppressed_paths(session, _candidate_pairs(session, concept_ids))
+    suppressed_report: list[dict] = []
+    enforce_capability = capability_check_enabled()
+    capability_cache: dict[tuple[str, str], str] = {}
     unroutable: list[dict] = []
+    truncated: list[dict] = []
     if since_last and date_range.start is None:
         # per-concept watermark at its own granularity: a monthly concept's since-last
         # advances from its monthly observations, never from a daily row on the 1st
@@ -131,6 +189,26 @@ def plan_crawl(
                     # series mode fetches the whole history in one call — only
                     # bulk_history endpoints can serve it (design D6)
                     continue
+                if (cid, fn.id) in suppressed:
+                    suppressed_report.append({
+                        "concept_id": cid, "code": concept.code,
+                        "reason": "permanently failing path",
+                        "source": src, "function_id": fn.id, "command": fn.command,
+                    })
+                    continue
+                if enforce_capability:
+                    key = (src, fn.command)
+                    status = capability_cache.get(key)
+                    if status is None:
+                        status = check_command(*key)[0]
+                        capability_cache[key] = status
+                    if status == UNRESOLVABLE:
+                        suppressed_report.append({
+                            "concept_id": cid, "code": concept.code,
+                            "reason": "endpoint unresolvable",
+                            "source": src, "function_id": fn.id, "command": fn.command,
+                        })
+                        continue
                 sources.append(PlanSource(
                     source=src, score=cand["score"],
                     function_id=fn.id, function_command=fn.command,
@@ -150,6 +228,17 @@ def plan_crawl(
                            else "no confirmed binding / no candidate source"),
             })
             continue
+        bound = chain_bound()
+        if len(sources) > bound:
+            for dropped in sources[bound:]:
+                truncated.append({
+                    "concept_id": cid, "code": concept.code,
+                    "reason": "chain bound exceeded", "bound": bound,
+                    "dropped_source": dropped.source,
+                    "dropped_function_id": dropped.function_id,
+                    "dropped_command": dropped.function_command,
+                })
+            sources = sources[:bound]
         wanted.append(PlanConcept(
             concept_id=cid, code=concept.code, entity_type=concept.entity_type,
             unit=concept.unit, frequency=concept.frequency,
@@ -178,6 +267,8 @@ def plan_crawl(
         date_range=date_range,
         unroutable=unroutable,
         unmapped=unmapped,
+        truncated=truncated,
+        suppressed=suppressed_report,
         mode=mode,
         plan_cells=_count_cells(session, wanted, entity_scope, date_range, mode),
     )

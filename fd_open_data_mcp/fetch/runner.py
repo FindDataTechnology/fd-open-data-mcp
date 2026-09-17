@@ -182,31 +182,46 @@ def run_wbgapi(command: str, params: dict) -> Any:
         raise FetchError(f"wbgapi {command} raised: {e}", status, text) from e
 
 
+def _run_nbs_gdp(command: str, params: dict) -> Any:
+    from fd_open_data_mcp.adapters.nbs_gdp import run_nbs_gdp
+    return run_nbs_gdp(command, params)
+
+
+def _run_polygon(command: str, params: dict) -> Any:
+    # run_polygon lives in the external fd-polygon datasource package (the
+    # manifest's fetch.module). Lazy-imported so fd-open-data-mcp does not
+    # depend on polygon-api-client unless a polygon fetch is actually made.
+    from fd_polygon.provider import run_polygon
+    return run_polygon(command, params)
+
+
+def _run_datacommons(command: str, params: dict) -> Any:
+    # run_dc lives in the external fd-datacommons datasource package. Lazy
+    # so fd-open-data-mcp does not depend on requests unless it is used.
+    from fd_datacommons.provider import run_dc
+    return run_dc(command, params)
+
+
+# source -> runner. The single source of truth for "can this source be called
+# at all": ``fetch/capability.py`` reads this dict to answer the static
+# resolvability question, so the two can never disagree about which sources
+# exist. Provider runners are thin wrappers that import lazily.
+RUNNERS: dict[str, Any] = {
+    "akshare": run_akshare,
+    "yfinance": run_yfinance,
+    "edgar": run_edgar,
+    "wbgapi": run_wbgapi,
+    "nbs-gdp": _run_nbs_gdp,
+    "polygon": _run_polygon,
+    "datacommons": _run_datacommons,
+}
+
+
 def run_upstream(source: str, command: str, params: dict) -> Any:
-    if source == "akshare":
-        return run_akshare(command, params)
-    if source == "yfinance":
-        return run_yfinance(command, params)
-    if source == "edgar":
-        return run_edgar(command, params)
-    if source == "wbgapi":
-        return run_wbgapi(command, params)
-    if source == "nbs-gdp":
-        from fd_open_data_mcp.adapters.nbs_gdp import run_nbs_gdp
-        return run_nbs_gdp(command, params)
-    if source == "polygon":
-        # run_polygon lives in the external fd-polygon datasource package (the
-        # manifest's fetch.module). Lazy-imported so fd-open-data-mcp does not
-        # depend on polygon-api-client unless a polygon fetch is actually made.
-        from fd_polygon.provider import run_polygon
-        return run_polygon(command, params)
-    if source == "datacommons":
-        # run_dc lives in the external fd-datacommons datasource package (the
-        # manifest's fetch.module). Lazy-imported so fd-open-data-mcp does not
-        # depend on requests unless a datacommons fetch is actually made.
-        from fd_datacommons.provider import run_dc
-        return run_dc(command, params)
-    raise FetchError(f"no runner for source {source}")
+    runner = RUNNERS.get(source)
+    if runner is None:
+        raise FetchError(f"no runner for source {source}")
+    return runner(command, params)
 
 
 def returned_columns(result: Any) -> list[tuple[str, str]]:

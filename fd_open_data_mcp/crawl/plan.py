@@ -74,6 +74,17 @@ class CrawlPlan(BaseModel):
     date_range: DateRange
     unroutable: list[dict] = Field(default_factory=list)  # concepts refused (no binding / mismatch / mode)
     unmapped: list[dict] = Field(default_factory=list)     # (entity, source) pairs with no identifier
+    # Candidates dropped because a concept's failover chain exceeded the bound
+    # (spec concept-fetch). Recorded so a truncation is visible rather than
+    # silent: concept price.close/stock carried 117 dispatch-eligible bindings,
+    # so one cell could issue hundreds of upstream calls before giving up.
+    truncated: list[dict] = Field(default_factory=list)
+    # Candidates omitted because they cannot run — either observed to fail
+    # permanently ("permanently failing path") or statically unresolvable in the
+    # executing environment ("endpoint unresolvable"). Excluded rather than
+    # demoted, and before the chain bound is applied so the bound is filled with
+    # candidates that can actually run.
+    suppressed: list[dict] = Field(default_factory=list)
     persistence: dict = Field(default_factory=lambda: {"table": "semantic_observations"})
     # fix-silent-zero-yield-crawls: the number of cells the plan emits. 0 means
     # the plan carries no work (a caught-up watermark) — which the reconciler

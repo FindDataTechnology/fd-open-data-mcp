@@ -1,10 +1,18 @@
 """Ban-classification rule engine.
 
 Maps a fetch outcome ``(http_status, error, body)`` to one of
-``ok / transient / ban / blocked`` using a per-source rule set from the
-``ban_rules`` table. Rules are matched in priority order (desc); the first match
-wins. ``streak_min`` gates a rule (e.g. ``RemoteDisconnected -> ban`` only after
-the fail streak is already >= 3, so a single network blip is transient).
+``ok / transient / ban / blocked / permanent`` using a per-source rule set from
+the ``ban_rules`` table. Rules are matched in priority order (desc); the first
+match wins. ``streak_min`` gates a rule (e.g. ``RemoteDisconnected -> ban`` only
+after the fail streak is already >= 3, so a single network blip is transient).
+
+``permanent`` is NOT a route-health signal and MUST NOT move a proxy circuit: it
+means the request itself can never succeed — the endpoint does not exist in the
+installed library, or the resolved identifier set is structurally invalid — so
+no exit, retry or cooldown changes the outcome. It is distinct from ``blocked``
+(a 401/403/captcha needing a human or strategy change) because a blocked source
+may still be reachable through another endpoint, while a permanent failure is
+intrinsic to ``(source, command)``.
 
 Default (no rule matches): 2xx -> ok, else transient. Rules are data - a new
 source declares its ban signals at registration, no code change.
@@ -33,6 +41,12 @@ logger = logging.getLogger(__name__)
 _CACHE: dict[str, tuple[float, list[dict]]] = {}
 _TTL = 60.0
 
+# The complete set of classification values a rule may carry. A rule seeded
+# with anything else is ignored with a warning rather than silently shipped to
+# the retry loop, where an unrecognised value would fall through to the
+# re-acquire branch and behave like a ban.
+CLASSIFICATIONS: tuple[str, ...] = ("ok", "transient", "ban", "blocked", "permanent")
+
 # real_source -> library name. ``classify`` is called with real_source names
 # (e.g. ``eastmoney``) but ban rules are seeded for library names (e.g.
 # ``akshare`` — akshare calls eastmoney/tencent/sina under the hood). When the
@@ -50,22 +64,34 @@ REAL_SOURCE_FALLBACK: dict[str, str] = {
 
 
 def _query_rules(session: Session, source: str) -> list[dict]:
-    """Query the ``ban_rules`` table for ``source`` (no cache)."""
+    """Query the ``ban_rules`` table for ``source`` (no cache).
+
+    Rules carrying a classification outside :data:`CLASSIFICATIONS` are skipped
+    with a warning: an unrecognised value would otherwise reach the retry loop
+    and be treated like a ban.
+    """
     ban_rules = (
         session.query(BanRule)
         .filter(BanRule.source == source, BanRule.enabled.is_(True))
         .order_by(BanRule.priority.desc())
         .all()
     )
-    return [
-        {
+    out: list[dict] = []
+    for br in ban_rules:
+        if br.classification not in CLASSIFICATIONS:
+            logger.warning(
+                "ban_rules: rule %s for %s has unknown classification %r "
+                "(expected one of %s) - rule ignored",
+                br.id, source, br.classification, ", ".join(CLASSIFICATIONS),
+            )
+            continue
+        out.append({
             "streak_min": br.streak_min,
             "rule_type": br.rule_type,
             "pattern": br.pattern,
             "classification": br.classification,
-        }
-        for br in ban_rules
-    ]
+        })
+    return out
 
 
 def _load_rules(session: Session, source: str) -> list[dict]:
@@ -124,7 +150,7 @@ def classify(
     body: Optional[str],
     fail_streak: int = 0,
 ) -> str:
-    """Classify an outcome. Returns ok / transient / ban / blocked."""
+    """Classify an outcome. Returns ok / transient / ban / blocked / permanent."""
     rules = _load_rules(session, source)
     for rule in rules:
         if rule["streak_min"] and fail_streak < rule["streak_min"]:
