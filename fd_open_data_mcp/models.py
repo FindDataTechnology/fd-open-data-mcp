@@ -34,9 +34,11 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     JSON,
     String,
+    Text,
     UniqueConstraint,
 )
 from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
@@ -713,9 +715,14 @@ class Proxy(Base):
                          nullable=True, index=True)         # per-cluster direct egress (None = shared/legacy)
     # panel-ops-console: mirror the provider columns fd-proxy-service migration
     # 001 added to the same physical table (the crawler never writes them; the
-    # panel proxy page groups rows by owner).
-    provider = Column(String(64), nullable=True)   # owning provider (gost-own, paid-static, …)
+    # panel proxy page groups rows by owner). Types must match that migration:
+    # it declares `provider TEXT`, so a bounded String here would make a freshly
+    # built database diverge from the live one.
+    provider = Column(Text, nullable=True)         # owning provider (gost-own, paid-static, …)
     provider_meta = Column(JSONB, nullable=True)
+    # fd-proxy-service migration 002_mihomo_routing_concurrency.sql: per-address
+    # global in-flight cap; NULL = the provider default (itself NULL = uncapped).
+    max_concurrency = Column(Integer, nullable=True)
     created_at = Column(DateTime, nullable=False, default=_now)
     retired_at = Column(DateTime, nullable=True)
 
@@ -834,4 +841,65 @@ class SourceProbe(Base):
         return {
             "source": self.source, "command": self.command,
             "params": self.params, "enabled": self.enabled,
+        }
+
+
+# --- Retrofitted from the live database -----------------------------------------
+# These two tables exist in the canonical database and are read/written with raw
+# SQL, but no model described them — they were created by ad-hoc scripts under
+# scripts/. Declared here so the schema can be built from code alone. Column
+# definitions, unique constraints and index names match the live tables so a
+# freshly built database can be compared against the canonical one.
+
+class EntityEmbedding(Base):
+    """Vector embedding of an entity, keyed ``(entity_id, model)``.
+
+    Created by ``scripts/generate_entity_embeddings.py``; read by
+    ``embeddings/generator.py`` and ``semantic/entity_search.py``. ``embedding``
+    holds a serialised vector as TEXT (not JSONB — the two embedding tables
+    differ on this).
+    """
+    __tablename__ = "entity_embeddings"
+    __table_args__ = (
+        UniqueConstraint("entity_id", "model", name="entity_embeddings_entity_id_model_key"),
+        Index("idx_entity_embeddings_entity_id", "entity_id"),
+        Index("idx_entity_embeddings_model", "model"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_id = Column(Integer, nullable=False)
+    embedding = Column(Text, nullable=False)
+    model = Column(String(128), nullable=False)
+    created_at = Column(DateTime, default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "entity_id": self.entity_id,
+            "model": self.model, "created_at": self.created_at,
+        }
+
+
+class ConceptEmbedding(Base):
+    """Vector embedding of a concept, keyed ``(concept_id, model)``.
+
+    Created by ``scripts/migrate_add_vector_search.py``; read by ``ai_search.py``
+    and ``semantic_search.py``. ``embedding`` is JSONB (``entity_embeddings``
+    stores TEXT instead).
+    """
+    __tablename__ = "concept_embeddings"
+    __table_args__ = (
+        UniqueConstraint("concept_id", "model", name="concept_embeddings_concept_id_model_key"),
+        Index("idx_concept_embeddings_concept_id", "concept_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    concept_id = Column(Integer, nullable=False)
+    embedding = Column(JSONB, nullable=False)
+    model = Column(String(128), nullable=False)
+    created_at = Column(DateTime, default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "concept_id": self.concept_id,
+            "model": self.model, "created_at": self.created_at,
         }
