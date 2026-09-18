@@ -632,6 +632,13 @@ class MultiClusterLauncher:
         if dns:
             pod_spec["dnsPolicy"] = dns["policy"]
             pod_spec["dnsConfig"] = {"nameservers": dns["nameservers"]}
+        # Eastmoney's push2*.eastmoney.com blocks most of the fleet's egress
+        # IPs; only nodes labeled eastmoney-ok=true can reach it (found live:
+        # 97.114-segment egress gets RemoteDisconnected, 89.212/89.174 work).
+        # Pin akshare/eastmoney jobs to those nodes — unpinned pods burned
+        # thousands of requests per chunk on dead egress before failing.
+        if "eastmoney" in plan_json or '"akshare"' in plan_json:
+            pod_spec["nodeSelector"] = {"eastmoney-ok": "true"}
         return [
             {
                 "apiVersion": "v1", "kind": "ConfigMap",
