@@ -847,13 +847,20 @@ def rank_sources(concept_id: int, requested_date: str | None = None) -> list[dic
 
 # ─── Concept-fetch ──────────────────────────────────────────────────────────
 @mcp.tool
-def read(concept_id: int, entity_type: str, entity_id: int, dates: list[str]) -> list[dict]:
-    """Read a concept for an entity over dates (read-through cache + ranked dispatch)."""
+def read(concept_id: int, entity_type: str, entity_id: int, dates: list[str],
+         source: str | None = None, all_sources: bool = False) -> list[dict]:
+    """Read a concept for an entity over dates (read-through cache + ranked dispatch).
+
+    source: pin the read (and any dispatch) to one source. all_sources: return
+    every held row per date, best-ranked first, without dispatching — for
+    cross-source comparison.
+    """
     from fd_open_data_mcp.fetch.dispatch import read as _read
 
     s = _session()
     try:
-        return _read(s, concept_id, entity_type, entity_id, dates)
+        return _read(s, concept_id, entity_type, entity_id, dates,
+                     source=source, all_sources=all_sources)
     finally:
         s.close()
 

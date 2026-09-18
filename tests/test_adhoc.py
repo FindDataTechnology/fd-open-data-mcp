@@ -117,7 +117,8 @@ def test_adhoc_and_policy_runs_coexist(session):
 def test_overlapping_adhoc_upserts_stay_idempotent(session):
     """Overlapping scope is safe: two runs over the same plan cells upsert the
     same observation key — the pipeline's ON CONFLICT DO NOTHING contract (the
-    uq_sem_obs key includes granularity). Verified with the same writer SQL."""
+    uq_sem_obs key includes granularity and source_used,
+    add-multi-source-observations). Verified with the same writer SQL."""
     from sqlalchemy import text
 
     cid = _register(session)
@@ -125,7 +126,7 @@ def test_overlapping_adhoc_upserts_stay_idempotent(session):
         INSERT INTO semantic_observations
             (concept_id, entity_type, entity_id, date, granularity, value, unit, source_used, fetched_at)
         VALUES (:cid, 'stock', 1, '2025-06-10', 'day', '9.5', 'currency', 'test-src', CURRENT_TIMESTAMP)
-        ON CONFLICT (concept_id, entity_type, entity_id, date, granularity) DO NOTHING
+        ON CONFLICT (concept_id, entity_type, entity_id, date, granularity, source_used) DO NOTHING
     """)
     for _ in range(2):  # simulate two overlapping runs writing the same key
         session.execute(stmt, {"cid": cid})

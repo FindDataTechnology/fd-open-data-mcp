@@ -42,17 +42,19 @@ def test_monthly_and_daily_coexist(session, concept):
 
 
 def test_upsert_do_nothing_is_idempotent_per_cadence(session, concept):
-    """The writer's ON CONFLICT DO NOTHING (per (concept, entity, date, granularity))
-    keeps the existing row on re-insert, mirroring the crawler's write path."""
+    """The writer's ON CONFLICT DO NOTHING (per (concept, entity, date, granularity,
+    source_used)) keeps the existing row on re-insert, mirroring the crawler's
+    write path (add-multi-source-observations added source_used to the key)."""
     from sqlalchemy.dialects.sqlite import insert
 
     values = dict(concept_id=concept.id, entity_type="stock", entity_id=1,
                   date="2024-06-01", granularity="day", unit="", source_used="test")
     ins = insert(SemanticObservation).values(value="first", **values)
     session.execute(ins.on_conflict_do_nothing(index_elements=[
-        "concept_id", "entity_type", "entity_id", "date", "granularity"]))
+        "concept_id", "entity_type", "entity_id", "date", "granularity", "source_used"]))
     session.execute(ins.on_conflict_do_nothing(index_elements=[
-        "concept_id", "entity_type", "entity_id", "date", "granularity"]).values(value="second"))
+        "concept_id", "entity_type", "entity_id", "date", "granularity",
+        "source_used"]).values(value="second"))
     session.commit()
 
     rows = session.query(SemanticObservation).all()

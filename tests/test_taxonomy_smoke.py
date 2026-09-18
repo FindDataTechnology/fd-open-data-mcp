@@ -1,12 +1,33 @@
 """Smoke tests for entity taxonomy against live Postgres DB."""
 from __future__ import annotations
 
+import os
+import socket
+
 import pytest
 
 from fd_open_data_mcp.entities.taxonomy import (
     count_by_type,
     find_entity,
     list_entities,
+)
+
+
+def _host_resolves(host: str) -> bool:
+    try:
+        socket.getaddrinfo(host, None)
+    except OSError:
+        return False
+    return True
+
+
+# The taxonomy DB lives on an internal-network host (PG_HOST in taxonomy.py).
+# When that host is unresolvable (no VPN / off-network), these are environment
+# skips, not failures — the same distinction the spec suite makes for
+# network-dependent sources.
+pytestmark = pytest.mark.skipif(
+    not _host_resolves(os.environ.get("PG_HOST", "guangzhou-xinru")),
+    reason="remote taxonomy Postgres host unreachable (internal network / VPN required)",
 )
 
 

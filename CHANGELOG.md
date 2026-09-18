@@ -59,6 +59,33 @@ new rule, 508 sat on `verified = false` functions and remained unreachable.
 
 ### Added
 
+#### Multi-source observations (`add-multi-source-observations`)
+
+- **Sources coexist per observation point** — the `semantic_observations`
+  unique key gains `source_used` (`concept, entity, date, granularity,
+  source`), so WorldBank's China-2024 GDP and NBS's are stored as separate
+  attributed rows instead of first-writer-wins. Values are never merged.
+- **Query-time source selection** — a plain `read` returns the highest-ranked
+  source's row (`source_rankings`, effective on the next read with no row
+  rewrites); `read(source=...)` pins cache reads and dispatch to one source;
+  `read(all_sources=true)` returns every held row per point, best-ranked
+  first, without dispatching. Same parameters on the MCP `read` tool and the
+  `fd-open-data-mcp read` CLI (`--source`, `--all-sources`).
+- **Source-scoped watermarks** — `since_last` crawl plans compute their
+  watermark over the policy's `source_filter` when set, so a second source's
+  backfill plan starts from what that source itself holds.
+- **Coverage counts points, not rows** — `/panel/data` and `data_stats`
+  report distinct observation points plus a per-concept `sources` count, so
+  coexistence never inflates coverage.
+- **Online migration** — `fd-open-data-mcp migrate` swaps `uq_sem_obs` to the
+  source-aware key (Postgres: concurrent index build + constraint swap under
+  an advisory lock; SQLite: table rebuild). Data-preserving by construction
+  (the relaxed key admits every existing row). `migrations/
+  007_multi_source_observations[.rollback].sql` is the manual runbook; the
+  rollback dedupes to the highest-ranked source per point and reports what
+  it removed. Requires `scraw-fd-open-data-mcp` deployed against the same
+  schema (its writer names the 6-column conflict target).
+
 #### New Data Source Adapters (21 sources)
 
 - **NBS GDP** (`nbs-gdp`): National Bureau of Statistics macroeconomic data

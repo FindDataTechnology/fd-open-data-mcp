@@ -1,8 +1,10 @@
 """Read-through concept-keyed cache (semantic_observations).
 
-Staleness TTL is derived from the concept's frequency. Conflict policy: keep
-the highest-ranked source's value with ``source_used``; never merge values
-from different sources (design.md D8, D9; spec concept-fetch).
+Staleness TTL is derived from the concept's frequency. Conflict policy
+(add-multi-source-observations): one row per (point, source) — values from
+different sources COEXIST, never merged or overwritten; a plain read returns
+the highest-ranked source's row (source_rankings at query time, so ranking
+churn takes effect without rewriting rows).
 
 Sharded reads: on the Postgres coordinator (guangzhou-xinru) the dedup view
 ``semantic_observations_read`` unions the local base table with the FDW-backed
@@ -11,7 +13,10 @@ shard row per (concept, entity, date, granularity) key. The READ path
 (``read_cache`` / ``read_cache_range``) consults that view when present so
 shard rows are visible to dispatch; the WRITE path keeps targeting the base
 table (the view is read-only), so upserts are unaffected. On SQLite / a local
-DB without the view, reads transparently fall back to the base table.
+DB without the view, reads transparently fall back to the base table. The view
+collapses sources per point (its dedup is not yet source-aware — see
+migrations/007 ops note), so view-path reads return the view's chosen row;
+source-specific reads and ``all_sources`` query the base table directly.
 
 Historical immutability: an observation whose period has fully elapsed
 (yesterday's close, last month's CPI, last year's GDP) is a final fact — its
@@ -151,14 +156,50 @@ def _use_view(session: Session) -> bool:
     return available
 
 
+def _source_order(session: Session, concept_id: int) -> dict[str, int]:
+    """source -> preference position for a concept (lower = better), from
+    source_rankings (quality desc, then accessibility desc; unranked sources
+    sort after ranked ones, alphabetically for determinism). Computed per call:
+    a ranking change takes effect on the next read with no stored-row rewrite."""
+    from fd_open_data_mcp.models import SourceRanking
+
+    rows = (
+        session.query(SourceRanking.source, SourceRanking.quality, SourceRanking.accessibility)
+        .filter(SourceRanking.concept_id == concept_id)
+        .all()
+    )
+    ordered = sorted(rows, key=lambda r: (-r.quality, -r.accessibility, r.source))
+    return {r.source: i for i, r in enumerate(ordered)}
+
+
+def _prefer(candidates: list, concept_id: int, order: dict[str, int]):
+    """Pick the highest-ranked row among candidates (ties: alphabetical source,
+    then row id). candidates share one observation point."""
+    if not candidates:
+        return None
+    unranked = len(order)
+
+    def _key(o):
+        src = o.source_used or ""
+        return (order.get(src, unranked), src, o.id or 0)
+
+    return min(candidates, key=_key)
+
+
 def read_cache(
     session: Session, concept_id: int, entity_type: str, entity_id: int, date: str,
+    source: Optional[str] = None,
 ) -> Optional[CachedObs]:
     """Read one cached observation for the dispatch (read) path.
 
     Prefers the dedup view (so FDW-backed shard rows are visible); falls back
-    to the base table on SQLite / a DB without the view.
+    to the base table on SQLite / a DB without the view. ``source`` selects one
+    source's row explicitly (base-table query: the view collapses sources).
+    Without ``source``, the highest-ranked source's row wins (base path; the
+    view path returns the view's pre-deduped row — see module docstring).
     """
+    if source is not None:
+        return _read_base(session, concept_id, entity_type, entity_id, date, source=source)
     if _use_view(session):
         row = session.execute(text(
             f"SELECT {_READ_COLS} FROM semantic_observations_read "
@@ -166,46 +207,102 @@ def read_cache(
             "LIMIT 1"
         ), {"c": concept_id, "t": entity_type, "e": entity_id, "d": date}).first()
         return _ReadRow(row) if row else None
-    return _read_base(session, concept_id, entity_type, entity_id, date)
+    rows = _read_base_all(session, concept_id, entity_type, entity_id, date)
+    if not rows:
+        return None
+    if len(rows) == 1:
+        return rows[0]
+    return _prefer(rows, concept_id, _source_order(session, concept_id))
+
+
+def read_cache_all(
+    session: Session, concept_id: int, entity_type: str, entity_id: int, date: str,
+) -> list:
+    """Every held row for one observation point, best-ranked source first.
+
+    Base-table only: the coordinator dedup view collapses sources per point, so
+    comparison mode must bypass it (shard rows are not included — see module
+    docstring). Never dispatches; a missing source is a coverage gap, not a
+    surprise fetch.
+    """
+    rows = _read_base_all(session, concept_id, entity_type, entity_id, date)
+    if len(rows) > 1:
+        order = _source_order(session, concept_id)
+        rows = sorted(rows, key=lambda o: (order.get(o.source_used or "", len(order)),
+                                           o.source_used or ""))
+    return rows
 
 
 def read_cache_range(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
-    start: str, end: str,
+    start: str, end: str, source: Optional[str] = None,
 ) -> list:
-    """All cached observations in ``[start, end]`` (inclusive), date-ordered.
+    """Cached observations in ``[start, end]`` (inclusive), date-ordered.
 
     Dates are stored as 'YYYY-MM-DD' strings, so lexicographic bounds work.
-    Prefers the dedup view; falls back to the base table.
+    Prefers the dedup view; falls back to the base table. When several sources
+    hold the same (date, granularity) point, the highest-ranked source's row is
+    returned — one row per point, as plain reads expect. ``source`` narrows to
+    one source's rows (base-table query).
     """
-    if _use_view(session):
-        result = session.execute(text(
-            f"SELECT {_READ_COLS} FROM semantic_observations_read "
-            "WHERE concept_id=:c AND entity_type=:t AND entity_id=:e "
-            "AND date>=:s AND date<=:e2 ORDER BY date"
-        ), {"c": concept_id, "t": entity_type, "e": entity_id,
-            "s": start, "e2": end})
-        return [_ReadRow(r) for r in result]
-    return _read_base_range(session, concept_id, entity_type, entity_id, start, end)
+    if source is not None or not _use_view(session):
+        rows = _read_base_range(session, concept_id, entity_type, entity_id, start, end,
+                                source=source)
+        return _dedupe_range(rows, concept_id, session)
+    result = session.execute(text(
+        f"SELECT {_READ_COLS} FROM semantic_observations_read "
+        "WHERE concept_id=:c AND entity_type=:t AND entity_id=:e "
+        "AND date>=:s AND date<=:e2 ORDER BY date"
+    ), {"c": concept_id, "t": entity_type, "e": entity_id,
+        "s": start, "e2": end})
+    return [_ReadRow(r) for r in result]
+
+
+def _dedupe_range(rows: list, concept_id: int, session: Session) -> list:
+    """Collapse multi-source rows per (date, granularity) to the preferred one."""
+    if len(rows) <= 1:
+        return rows
+    order = _source_order(session, concept_id)
+    best: dict[tuple, object] = {}
+    for r in rows:
+        key = (r.date, getattr(r, "granularity", None) or "day")
+        cur = best.get(key)
+        if cur is None or _prefer([r, cur], concept_id, order) is r:
+            best[key] = r
+    return sorted(best.values(), key=lambda r: r.date)
 
 
 def _read_base(
     session: Session, concept_id: int, entity_type: str, entity_id: int, date: str,
+    source: Optional[str] = None,
 ) -> Optional[SemanticObservation]:
     """Base-table lookup — used by the WRITE path to find the upsert target.
 
     The view is read-only, so writes must resolve against the base table.
+    Upserts are per (point, source): ``source`` scopes the target so this
+    source's write never lands on — or overwrites — another source's row.
     """
+    q = session.query(SemanticObservation).filter_by(
+        concept_id=concept_id, entity_type=entity_type, entity_id=entity_id, date=date,
+    )
+    if source is not None:
+        q = q.filter(SemanticObservation.source_used == source)
+    return q.first()
+
+
+def _read_base_all(
+    session: Session, concept_id: int, entity_type: str, entity_id: int, date: str,
+) -> list[SemanticObservation]:
     return session.query(SemanticObservation).filter_by(
         concept_id=concept_id, entity_type=entity_type, entity_id=entity_id, date=date,
-    ).first()
+    ).all()
 
 
 def _read_base_range(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
-    start: str, end: str,
+    start: str, end: str, source: Optional[str] = None,
 ) -> list[SemanticObservation]:
-    return (
+    q = (
         session.query(SemanticObservation)
         .filter(
             SemanticObservation.concept_id == concept_id,
@@ -214,23 +311,24 @@ def _read_base_range(
             SemanticObservation.date >= start,
             SemanticObservation.date <= end,
         )
-        .order_by(SemanticObservation.date)
-        .all()
     )
+    if source is not None:
+        q = q.filter(SemanticObservation.source_used == source)
+    return q.order_by(SemanticObservation.date).all()
 
 
 def write_cache(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     date: str, value: Optional[str], unit: Optional[str], source_used: str,
 ) -> SemanticObservation:
-    """Upsert one observation.
+    """Upsert one observation for ``source_used``.
 
-    The caller (dispatch) selects the source by rank; we store a single row per
-    (concept, entity, date) with ``source_used`` attached. Re-fetch overwrites
-    the value and bumps ``fetched_at``. Values from different sources are never
-    merged into one row.
+    One row per (point, source): the write targets this source's own row —
+    an existing row from ANOTHER source is left untouched and a new row is
+    added for this source instead. Re-fetch overwrites this row's value and
+    bumps ``fetched_at``. Values from different sources are never merged.
     """
-    obs = _read_base(session, concept_id, entity_type, entity_id, date)
+    obs = _read_base(session, concept_id, entity_type, entity_id, date, source=source_used)
     now = datetime.now(timezone.utc)
     if obs is None:
         obs = SemanticObservation(
@@ -241,7 +339,6 @@ def write_cache(
     else:
         obs.value = value
         obs.unit = unit
-        obs.source_used = source_used
         obs.fetched_at = now
     session.commit()
     return obs
@@ -253,16 +350,20 @@ def write_cache_range(
 ) -> int:
     """Bulk-upsert observations for ``{date: value}`` in one commit.
 
-    Same conflict policy as ``write_cache`` (one row per key, re-fetch
-    overwrites); this is the batch form used by ``read_range`` so a range
-    fetch costs one commit instead of one per date. Returns rows written.
+    Same per-source conflict policy as ``write_cache`` (one row per (date,
+    source); another source's rows are untouched); this is the batch form used
+    by ``read_range`` so a range fetch costs one commit instead of one per
+    date. Returns rows written.
     """
     if not rows:
         return 0
     existing = {
         obs.date: obs
         for obs in _read_base_range(
-            session, concept_id, entity_type, entity_id, min(rows), max(rows))
+            session, concept_id, entity_type, entity_id, min(rows), max(rows),
+            source=source_used,
+        )
+        if obs.source_used == source_used
     }
     now = datetime.now(timezone.utc)
     for d, value in rows.items():
@@ -276,7 +377,6 @@ def write_cache_range(
         else:
             obs.value = str(value)
             obs.unit = unit
-            obs.source_used = source_used
             obs.fetched_at = now
     session.commit()
     return len(rows)

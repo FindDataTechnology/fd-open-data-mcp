@@ -80,18 +80,19 @@ def _migrate_wide(
             params["limit"] = limit
         sql = text(f"""
             INSERT INTO semantic_observations
-                (concept_id, entity_type, entity_id, date, value, unit, source_used, fetched_at)
+                (concept_id, entity_type, entity_id, date, granularity, value, unit, source_used, fetched_at)
             SELECT :concept_id, :et, esi.entity_id, d.{date_col}::text,
-                   d.{col}::text, :unit, :source, now()
+                   :granularity, d.{col}::text, :unit, :source, now()
             FROM {table} d
             JOIN entity_source_identifiers esi
               ON esi.source = :source AND esi.entity_type = :et
              AND esi.identifier = d.{symbol_col}
             WHERE {' AND '.join(where)}{limit_sql}
-            ON CONFLICT (concept_id, entity_type, entity_id, date) DO NOTHING
+            ON CONFLICT (concept_id, entity_type, entity_id, date, granularity, source_used) DO NOTHING
         """)
         params["et"] = entity_type
         params["source"] = source
+        params["granularity"] = "day"  # DAILY_COLUMNS tables are all daily OHLCV
         result = session.execute(sql, params)
         session.commit()  # commit per-column so progress is visible + resumable
         summary["columns"][col] = {"concept": code, "concept_id": concept_id, "inserted": result.rowcount}

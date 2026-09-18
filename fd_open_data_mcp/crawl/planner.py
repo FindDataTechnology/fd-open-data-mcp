@@ -15,7 +15,7 @@ from __future__ import annotations
 import datetime as dt
 import os
 
-from sqlalchemy import func, text
+from sqlalchemy import bindparam, func, text
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.crawl.plan import (
@@ -129,12 +129,16 @@ def plan_crawl(
     if since_last and date_range.start is None:
         # per-concept watermark at its own granularity: a monthly concept's since-last
         # advances from its monthly observations, never from a daily row on the 1st
-        # (fix-observation-time-granularity).
+        # (fix-observation-time-granularity). Scoped to the plan's source_filter when
+        # set (add-multi-source-observations): a second source's backfill plan must
+        # start from what THAT source holds — rows another source crawled are not
+        # its coverage.
         watermarks = []
         for cid in concept_ids:
             c = concepts.get(cid)
             gran = _granularity_for(c.frequency) if c else "day"
-            watermarks.append(_watermark(session, cid, entity_scope.entity_type, gran))
+            watermarks.append(_watermark(session, cid, entity_scope.entity_type, gran,
+                                         sources=source_filter))
         non_none = [w for w in watermarks if w is not None]
         if non_none:
             min_wm = min(non_none)
@@ -372,20 +376,28 @@ def _granularity_for(frequency: str | None) -> str:
 
 
 def _watermark(session: Session, concept_id: int, entity_type: str,
-               granularity: str = "day") -> str | None:
+               granularity: str = "day", sources: list[str] | None = None) -> str | None:
     """Return max(date) for this concept at a given granularity, or None.
 
-    The observation table's UniqueConstraint has no ``source_used``, so there's exactly
-    one row per ``(concept, entity, date, granularity)`` regardless of source. Filtering
-    by granularity keeps a concept's since-last watermark on its own cadence — legacy
-    bare 'YYYY'/'YYYY-MM' rows (tagged 'day' by the migration heuristic) never corrupt
-    a monthly/yearly watermark.
+    Observations are keyed per (point, source) (add-multi-source-observations), so
+    the unfiltered watermark — max over every source's rows — means "the point is
+    covered when ANY source holds it"; that stays the default for unfiltered plans.
+    A ``sources`` list narrows the scan (a plan's ``source_filter``): a source-scoped
+    plan advances from what those sources themselves hold. Filtering by granularity
+    keeps a concept's since-last watermark on its own cadence — legacy bare
+    'YYYY'/'YYYY-MM' rows (tagged 'day' by the migration heuristic) never corrupt a
+    monthly/yearly watermark.
     """
-    row = session.execute(
-        text("SELECT max(date) FROM semantic_observations "
-             "WHERE concept_id=:c AND entity_type=:et AND granularity=:g"),
-        {"c": concept_id, "et": entity_type, "g": granularity},
-    ).first()
+    sql = ("SELECT max(date) FROM semantic_observations "
+           "WHERE concept_id=:c AND entity_type=:et AND granularity=:g")
+    params: dict = {"c": concept_id, "et": entity_type, "g": granularity}
+    stmt = text(sql)
+    if sources:
+        # expanding bindparam renders the list as an IN (...) tuple
+        stmt = text(sql + " AND source_used IN :sources").bindparams(
+            bindparam("sources", expanding=True))
+        params["sources"] = list(sources)
+    row = session.execute(stmt, params).first()
     return row[0] if row and row[0] else None
 
 

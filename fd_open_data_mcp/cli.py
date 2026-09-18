@@ -323,14 +323,18 @@ def rank_sources_cmd(concept_id, requested_date):
 @click.option("--entity-type", required=True)
 @click.option("--entity-id", type=int, required=True)
 @click.option("--date", "dates", multiple=True, required=True)
-def read_cmd(concept_id, entity_type, entity_id, dates):
+@click.option("--source", default=None, help="Pin the read (and dispatch) to one source.")
+@click.option("--all-sources", is_flag=True,
+              help="Return every held row per date, best-ranked first; no dispatch.")
+def read_cmd(concept_id, entity_type, entity_id, dates, source, all_sources):
     """Read a concept for an entity over one or more --date values."""
     from fd_open_data_mcp.db import get_database
     from fd_open_data_mcp.fetch.dispatch import read as _read
 
     s = get_database().get_session()
     try:
-        _echo(_read(s, concept_id, entity_type, entity_id, list(dates)))
+        _echo(_read(s, concept_id, entity_type, entity_id, list(dates),
+                    source=source, all_sources=all_sources))
     finally:
         s.close()
 

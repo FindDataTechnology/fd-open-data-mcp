@@ -306,8 +306,22 @@ priority over `OPENAI_API_KEY` if both are set.
   queue). A real fetch promotes a binding to `sample-confirmed`.
 - **Ranking** is per `(source × concept)`, self-tuning from `fetch_log`
   (bounded so one failure can't remove a source).
-- **Conflict policy**: one cached value per `(concept, entity, date)` with
-  `source_used` attached; values are never merged across sources.
+- **Conflict policy** (multi-source coexistence): one row per
+  `(concept, entity, date, granularity, source)` — sources coexist, values
+  are never merged across sources. A plain `read` returns the highest-ranked
+  source's row (query-time selection via `source_rankings`, so ranking churn
+  takes effect without rewrites); `read(source=...)` pins one source;
+  `read(all_sources=true)` returns every held row per point for comparison
+  without dispatching. `since_last` plans scope their watermark to the
+  policy's `source_filter` when set, so a second source's backfill starts
+  from what that source itself holds. Coverage metrics count distinct
+  observation points, plus a per-concept `sources` count.
+  Migration: `fd-open-data-mcp migrate` swaps `uq_sem_obs` online on
+  Postgres (concurrent index build, no exclusive lock; data-preserving by
+  construction); `migrations/007_multi_source_observations[.rollback].sql`
+  is the manual runbook equivalent. Ops note: after migrating, update the
+  coordinator's `semantic_observations_read` dedup view to collapse per
+  `(point, source)` — until then, view-path reads see one source per point.
 - **Vector search** uses JSONB + numpy (pgvector unavailable on the target
   Postgres); concept + entity embeddings power `semantic_search*` and
   `ai_search`.

@@ -33,6 +33,7 @@ from fd_open_data_mcp.entities.resolver import check_applicability, resolve_iden
 from fd_open_data_mcp.fetch.cache import (
     is_stale,
     read_cache,
+    read_cache_all,
     read_cache_range,
     write_cache,
     write_cache_range,
@@ -146,34 +147,40 @@ def _get_real_sources(fn: Function) -> list[dict]:
 def dispatch_one(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     date: str, requested_date: Optional[str] = None,
+    source: Optional[str] = None,
 ) -> Optional[dict]:
     """Fetch one (concept, entity, date) with cache + ranked failover.
 
     Supports real_source-based failover: when a function declares multiple
     real_sources (e.g., eastmoney, tencent), tries each in priority order.
+    ``source`` pins the read AND the dispatch to one source: the cache is read
+    for that source only, and ranked candidates outside it are skipped (its
+    fresh row is served; its stale/missing row is refreshed from it).
     """
     concept = session.get(Concept, concept_id)
     if concept is None:
         return None
 
-    obs = read_cache(session, concept_id, entity_type, entity_id, date)
+    obs = read_cache(session, concept_id, entity_type, entity_id, date, source=source)
     if obs is not None and not is_stale(obs, concept.frequency):
         return {"date": date, "value": obs.value, "unit": obs.unit,
                 "source_used": obs.source_used, "from_cache": True}
 
     for cand in rank_sources_for_concept(session, concept_id, requested_date):
-        source = cand["source"]
-        identifier = resolve_identifier(session, entity_type, entity_id, source)
+        cand_source = cand["source"]
+        if source is not None and cand_source != source:
+            continue  # source-pinned read: never fetch from another source
+        identifier = resolve_identifier(session, entity_type, entity_id, cand_source)
         if identifier is None:
             continue  # graceful degradation: no per-source id for this entity
-        for binding, fn in _bindings_for_source(session, concept_id, source):
+        for binding, fn in _bindings_for_source(session, concept_id, cand_source):
             params = _build_params(fn, identifier, date, binding)
 
             # Get real_sources for this function (if declared)
             real_sources = _get_real_sources(fn)
 
             # Try each real_source in priority order (or just the library source if none declared)
-            sources_to_try = real_sources if real_sources else [{"name": source, "priority": 0}]
+            sources_to_try = real_sources if real_sources else [{"name": cand_source, "priority": 0}]
 
             for real_source_spec in sources_to_try:
                 real_source = real_source_spec.get("name")
@@ -184,7 +191,7 @@ def dispatch_one(
                     # SourceUnavailable when every proxy for this source is OPEN ->
                     # fail over to the next real_source or source.
                     result = instrumented_fetch(
-                        source, fn.command, params,
+                        cand_source, fn.command, params,
                         real_source=real_source,  # Pass real_source for circuit tracking
                         session=session, function_id=fn.id,
                         concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
@@ -194,36 +201,43 @@ def dispatch_one(
                     if len(sources_to_try) > 1:
                         # Log failover event
                         logger.info(f"real_source failover: {real_source} -> trying next priority")
-                    record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
+                    record_fetch_outcome(session, cand_source, concept_id, "error", _ms(t0))
                     continue  # Try next real_source
                 except FetchError:
-                    record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
+                    record_fetch_outcome(session, cand_source, concept_id, "error", _ms(t0))
                     continue
                 except Exception:  # noqa: BLE001 - any upstream failure -> failover
-                    record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
+                    record_fetch_outcome(session, cand_source, concept_id, "error", _ms(t0))
                     continue
 
                 # Success!
                 latency = _ms(t0)
-                value = _extract_value(result, binding.column.name, date, source, fn.command,
+                value = _extract_value(result, binding.column.name, date, cand_source, fn.command,
                                        identifier=identifier)
                 if value is None:
-                    record_fetch_outcome(session, source, concept_id, "error", latency)
+                    record_fetch_outcome(session, cand_source, concept_id, "error", latency)
                     continue
-                record_fetch_outcome(session, source, concept_id, "ok", latency)
+                record_fetch_outcome(session, cand_source, concept_id, "ok", latency)
                 promote_on_sample(session, fn.id, returned_columns(result))
                 write_cache(session, concept_id, entity_type, entity_id, date,
-                            str(value), concept.unit, source)
+                            str(value), concept.unit, cand_source)
                 return {"date": date, "value": value, "unit": concept.unit,
-                        "source_used": source, "real_source_used": real_source, "from_cache": False}
+                        "source_used": cand_source, "real_source_used": real_source, "from_cache": False}
     return None
 
 
 def read(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     dates: list[str], requested_date: Optional[str] = None,
+    source: Optional[str] = None, all_sources: bool = False,
 ) -> list[dict]:
-    """Read a concept for an entity over a list of dates (read-through + dispatch)."""
+    """Read a concept for an entity over a list of dates (read-through + dispatch).
+
+    ``source`` pins both cache reads and dispatch to that source. ``all_sources``
+    returns every held row per date (best-ranked first, one per source) and
+    never dispatches — comparison of what is held; a missing source is a
+    coverage gap to fill with a crawl policy, not a surprise fetch.
+    """
     check_applicability(session, concept_id, entity_type)
     # Defensive cap: each date may trigger a ranked network fetch; an unbounded
     # date list (e.g. 3 years of daily = ~730) can hold the MCP connection open
@@ -237,9 +251,21 @@ def read(
             len(dates), concept_id, entity_id, MAX_DATES,
         )
         dates = dates[:MAX_DATES]
+    if all_sources:
+        results = []
+        for d in dates:
+            rows = read_cache_all(session, concept_id, entity_type, entity_id, d)
+            for r in rows:
+                results.append({"date": d, "value": _coerce_value(r.value),
+                                "unit": r.unit, "source_used": r.source_used,
+                                "from_cache": True})
+            if not rows:
+                results.append({"date": d, "value": None, "error": "no source holds a value"})
+        return results
     results = []
     for d in dates:
-        r = dispatch_one(session, concept_id, entity_type, entity_id, d, requested_date)
+        r = dispatch_one(session, concept_id, entity_type, entity_id, d, requested_date,
+                         source=source)
         results.append(r or {"date": d, "value": None, "error": "no source succeeded"})
     return results
 

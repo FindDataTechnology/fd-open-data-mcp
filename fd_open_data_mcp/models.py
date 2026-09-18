@@ -381,8 +381,11 @@ class SemanticObservation(Base):
         # and a daily observation of a day inside it are DISTINCT rows, so
         # ON CONFLICT DO NOTHING never silently drops one cadence for another
         # (previously granularity was encoded in the day value: 12-31 / 01 / every day).
+        # source_used in the key (add-multi-source-observations): two sources' values
+        # for the same point coexist — never merged or overwritten across sources;
+        # reads pick the preferred source at query time via source_rankings.
         UniqueConstraint("concept_id", "entity_type", "entity_id", "date", "granularity",
-                         name="uq_sem_obs"),
+                         "source_used", name="uq_sem_obs"),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)

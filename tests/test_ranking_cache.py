@@ -97,13 +97,16 @@ def test_is_stale_historical_immutable():
 
 
 def test_write_cache_conflict_policy(session):
+    """Per-source conflict policy (add-multi-source-observations): each source
+    keeps its own attributed row; values are never merged or overwritten
+    across sources."""
     c = Concept(code="price.close", entity_type="stock", measure="", unit="currency", frequency="daily")
     session.add(c); session.flush()
     write_cache(session, c.id, "stock", 1, "2024-01-01", "100", "currency", "akshare")
     write_cache(session, c.id, "stock", 1, "2024-01-01", "200", "currency", "yfinance")
     rows = session.query(SemanticObservation).filter_by(
         concept_id=c.id, entity_type="stock", entity_id=1, date="2024-01-01",
-    ).all()
-    assert len(rows) == 1  # one row, no merge
-    assert rows[0].source_used == "yfinance"  # last writer
-    assert rows[0].value == "200"
+    ).order_by(SemanticObservation.source_used).all()
+    assert len(rows) == 2  # two sources coexist, no merge
+    assert (rows[0].source_used, rows[0].value) == ("akshare", "100")
+    assert (rows[1].source_used, rows[1].value) == ("yfinance", "200")

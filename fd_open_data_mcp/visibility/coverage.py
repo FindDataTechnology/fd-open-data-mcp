@@ -9,7 +9,7 @@ coverage evolves.
 """
 from __future__ import annotations
 
-from sqlalchemy import func
+from sqlalchemy import func, cast, String
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import Concept, SemanticObservation
@@ -20,17 +20,24 @@ def coverage_by_concept(
     concept_id: int | None = None,
     entity_type: str | None = None,
 ) -> list[dict]:
-    """Per-concept observation coverage: row count, latest observation date,
-    distinct sources used, most recent fetch.
+    """Per-concept observation coverage: observation-point count, latest
+    observation date, distinct sources used, most recent fetch.
 
+    ``rows`` counts DISTINCT observation points
+    ``(entity_type, entity_id, date, granularity)`` (add-multi-source-observations):
+    two sources' rows for the same point are one covered point, so coexistence
+    never inflates coverage. ``sources`` is the distinct ``source_used`` count.
     ``date`` is the canonical YYYY-MM-DD string, so ``max(date)`` is both
-    lexicographic and chronological. Ordered by row count descending.
+    lexicographic and chronological. Ordered by point count descending.
     Read-only: a plain aggregate, no table writes.
     """
     q = (
         session.query(
             SemanticObservation.concept_id.label("concept_id"),
-            func.count(SemanticObservation.id).label("rows"),
+            func.count(func.distinct(
+                SemanticObservation.entity_type + '|' + cast(SemanticObservation.entity_id, String)
+                + '|' + SemanticObservation.date + '|' + SemanticObservation.granularity,
+            )).label("rows"),
             func.max(SemanticObservation.date).label("latest_date"),
             func.max(SemanticObservation.fetched_at).label("last_fetch"),
             func.count(func.distinct(SemanticObservation.source_used)).label("sources"),
