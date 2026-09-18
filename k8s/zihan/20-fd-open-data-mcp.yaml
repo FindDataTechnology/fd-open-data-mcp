@@ -22,6 +22,26 @@ spec:
         app.kubernetes.io/name: fd-open-data-mcp
         app.kubernetes.io/part-of: finddata
     spec:
+      # Schema migration stage: alembic upgrade head must complete BEFORE the
+      # server starts (initContainers gate the main container). Serialized by
+      # a session-level Postgres advisory lock
+      # pg_advisory_lock(hashtext('fd_mcp_schema_migrate')) held for the
+      # whole run, so concurrent pod starts (rollout surge, scale-up) queue
+      # instead of racing; already-at-head is a no-op success (idempotent).
+      # A non-zero exit (bad URL, failed DDL) fails the pod: the new version
+      # never serves and the previous ReplicaSet keeps serving.
+      initContainers:
+        - name: migrate-schema
+          # Same image as the server: the chain it migrates (/app/alembic,
+          # COPYed by the Dockerfile) is the one this code was built with.
+          image: harbor.local/finddata/fd-open-data-mcp:sha-57cbe29
+          imagePullPolicy: IfNotPresent
+          # Same database-URL source as the server container:
+          # FD_OPEN_DATA_MCP_DATABASE_URL arrives via the fd-mcp-env Secret.
+          envFrom:
+            - secretRef:
+                name: fd-mcp-env
+          command: ["python", "-m", "fd_open_data_mcp.db.migrate_stage"]
       containers:
         - name: fd-open-data-mcp
           # Pinned to the <short-sha> tag pushed by .github/workflows/

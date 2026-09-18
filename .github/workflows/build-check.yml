@@ -27,3 +27,53 @@ jobs:
 
       - name: Check distribution
         run: twine check dist/*
+
+  # db-schema-lifecycle 4.5 + 6.5: catch model drift and vocabulary drift.
+  # 2026-09-16 incident root cause, other half: models changed with no
+  # revision ever noticing. `alembic check` compares the migrated empty
+  # database against Base.metadata — a model change without a matching
+  # revision fails here. The vocabulary step pins DB content naming to
+  # fd-open-data-protocol (design D8): every concepts.concept_code must
+  # resolve to a protocol concept family id.
+  schema:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:14
+        env:
+          POSTGRES_USER: fdtest
+          POSTGRES_DB: fd_schema_ci
+          POSTGRES_HOST_AUTH_METHOD: trust
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fdtest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      FD_OPEN_DATA_MCP_DATABASE_URL: postgresql+psycopg2://fdtest@localhost:5432/fd_schema_ci
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install package and test dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .[dev]
+
+      - name: Migrate empty database to head
+        run: alembic upgrade head
+
+      - name: Fail on model/revision drift (alembic check)
+        run: alembic check
+
+      - name: Vocabulary conformance (empty migrated DB must pass)
+        run: python scripts/check_vocabulary_conformance.py
+
+      - name: Vocabulary conformance tests
+        run: pytest tests/test_vocabulary_conformance.py -v

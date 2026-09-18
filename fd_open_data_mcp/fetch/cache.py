@@ -14,8 +14,9 @@ shard row per (concept, entity, date, granularity) key. The READ path
 shard rows are visible to dispatch; the WRITE path keeps targeting the base
 table (the view is read-only), so upserts are unaffected. On SQLite / a local
 DB without the view, reads transparently fall back to the base table. The view
-collapses sources per point (its dedup is not yet source-aware — see
-migrations/007 ops note), so view-path reads return the view's chosen row;
+collapses sources per point (its dedup is not yet source-aware — see the
+007 ops note in docs/migrations-archive/), so view-path reads return the
+view's chosen row;
 source-specific reads and ``all_sources`` query the base table directly.
 
 Historical immutability: an observation whose period has fully elapsed

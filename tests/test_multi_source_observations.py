@@ -7,10 +7,15 @@ preservation, planner watermark scoping, and coverage point-dedupe.
 """
 from __future__ import annotations
 
+import os
+import socket
+import subprocess
+import sys
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
 import pytest
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine, inspect, text
 
 from fd_open_data_mcp.fetch.cache import read_cache, read_cache_all, read_cache_range, write_cache
 from fd_open_data_mcp.models import (
@@ -168,65 +173,109 @@ def test_read_pinned_dispatch_scoped_to_source(session, dispatch_concept, monkey
     assert called == [] or set(called) <= {"cnstats"}  # never another source
 
 
-# --- migration: old-schema DB upgrades, data preserved -------------------------
+# --- migration: revision 0002 swaps the key, data preserved (PG) ----------------
+
+PG_HOST, PG_PORT, PG_USER = "127.0.0.1", 55432, "fdtest"
+PG_BIN = Path("/opt/homebrew/opt/postgresql@14/bin")
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+ALEMBIC_DIR = PROJECT_ROOT / "alembic"
+KEY_COLS = {"concept_id", "entity_type", "entity_id", "date", "granularity", "source_used"}
 
 
-_OLD_DDL = """
-CREATE TABLE semantic_observations (
-    id INTEGER NOT NULL PRIMARY KEY,
-    concept_id INTEGER NOT NULL,
-    entity_type VARCHAR(32) NOT NULL,
-    entity_id INTEGER NOT NULL,
-    date VARCHAR(64) NOT NULL,
-    granularity VARCHAR(8) NOT NULL DEFAULT 'day',
-    value VARCHAR(255),
-    unit VARCHAR(64),
-    source_used VARCHAR(64) NOT NULL,
-    fetched_at DATETIME NOT NULL,
-    CONSTRAINT uq_sem_obs UNIQUE (concept_id, entity_type, entity_id, date, granularity)
-)
-"""
+def _pg_reachable() -> bool:
+    try:
+        with socket.create_connection((PG_HOST, PG_PORT), timeout=1.0):
+            return True
+    except OSError:
+        return False
 
 
-def _old_engine(tmp_path):
-    eng = create_engine(f"sqlite:///{tmp_path}/old.db")
-    with eng.begin() as conn:
-        conn.execute(text(_OLD_DDL))
-        conn.execute(text(
-            "INSERT INTO semantic_observations (concept_id, entity_type, entity_id, date,"
-            " granularity, value, unit, source_used, fetched_at) VALUES"
-            " (1, 'country', 2, '2024-12-31', 'year', '42', 'USD', 'worldbank', '2025-01-01')"))
-    return eng
-
-
-def test_migrate_swaps_old_key_preserving_rows(tmp_path):
-    from fd_open_data_mcp.migrate import _swap_sem_obs_key, _sem_obs_key_is_source_aware
-
-    eng = _old_engine(tmp_path)
-    assert not _sem_obs_key_is_source_aware(eng)
-    assert _swap_sem_obs_key(eng)  # swap happened
-    assert _sem_obs_key_is_source_aware(eng)
-    # every original row survived with its source attribution
-    with eng.connect() as conn:
+def _uq_sem_obs_cols(engine) -> set:
+    with engine.connect() as conn:
         rows = conn.execute(text(
-            "SELECT concept_id, entity_type, entity_id, date, granularity, value,"
-            " source_used FROM semantic_observations")).fetchall()
-    assert len(rows) == 1 and rows[0][6] == "worldbank"
-    # the relaxed key admits a second source for the same point
-    with eng.begin() as conn:
-        conn.execute(text(
-            "INSERT INTO semantic_observations (concept_id, entity_type, entity_id, date,"
-            " granularity, value, unit, source_used, fetched_at) VALUES"
-            " (1, 'country', 2, '2024-12-31', 'year', '43', 'USD', 'cnstats', '2025-01-01')"))
-    with eng.connect() as conn:
-        assert conn.execute(text("SELECT count(*) FROM semantic_observations")).scalar() == 2
-    # re-run is a no-op
-    assert _swap_sem_obs_key(eng) == []
+            "SELECT a.attname FROM pg_constraint c "
+            "JOIN pg_class t ON t.oid = c.conrelid "
+            "CROSS JOIN LATERAL unnest(c.conkey) AS k(attnum) "
+            "JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum "
+            "WHERE c.conrelid = 'semantic_observations'::regclass "
+            "AND c.conname = 'uq_sem_obs'")).fetchall()
+    return {r[0] for r in rows}
 
 
-def test_fresh_create_all_gets_source_aware_key(session):
-    from fd_open_data_mcp.migrate import _sem_obs_key_is_source_aware
-    assert _sem_obs_key_is_source_aware(session.get_bind())
+@pytest.mark.skipif(not _pg_reachable(), reason="scratch PostgreSQL 14 at 127.0.0.1:55432 not running")
+def test_revision_swaps_old_key_preserving_rows(tmp_path):
+    """A database at the baseline (5-column key — the canonical state of
+    2026-09-18) upgrades to head: every row survives with its source
+    attribution, the key becomes source-aware, a second source for the same
+    point is admitted, and re-upgrading is a no-op."""
+    from sqlalchemy.orm import sessionmaker
+
+    from fd_open_data_mcp.models import Concept, SemanticObservation
+
+    dbname = f"fdsl_msobs_{os.urandom(4).hex()}"
+    subprocess.run(
+        [str(PG_BIN / "createdb"), "-h", PG_HOST, "-p", str(PG_PORT), "-U", PG_USER, dbname],
+        check=True, capture_output=True)
+    url = f"postgresql+psycopg2://{PG_USER}@{PG_HOST}:{PG_PORT}/{dbname}"
+    env = {**os.environ, "FD_OPEN_DATA_MCP_DATABASE_URL": url,
+           "FD_OPEN_DATA_MCP_ALEMBIC_DIR": str(ALEMBIC_DIR)}
+    eng = create_engine(url)
+    try:
+        # canonical-equivalent state: baseline only -> 5-column key
+        subprocess.run([sys.executable, "-m", "alembic", "upgrade", "0001_schema_baseline"],
+                       check=True, capture_output=True, env=env, cwd=PROJECT_ROOT)
+        assert "source_used" not in _uq_sem_obs_cols(eng)
+
+        s = sessionmaker(bind=eng)()
+        c = Concept(code="gdp", entity_type="country", frequency="yearly",
+                    unit="USD", verified=True)
+        s.add(c)
+        s.commit()
+        concept_id = c.id
+        s.add(SemanticObservation(
+            concept_id=concept_id, entity_type="country", entity_id=3, date="2024-12-31",
+            granularity="year", value="42", unit="USD", source_used="worldbank",
+            fetched_at=datetime.now(timezone.utc)))
+        s.commit()
+        s.close()
+
+        # upgrade to head applies the swap revision
+        subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
+                       check=True, capture_output=True, env=env, cwd=PROJECT_ROOT)
+        assert _uq_sem_obs_cols(eng) == KEY_COLS
+
+        s = sessionmaker(bind=eng)()
+        rows = s.query(SemanticObservation).all()
+        assert len(rows) == 1 and rows[0].source_used == "worldbank"
+        # the relaxed key admits a second source for the same point
+        s.add(SemanticObservation(
+            concept_id=concept_id, entity_type="country", entity_id=3, date="2024-12-31",
+            granularity="year", value="43", unit="USD", source_used="cnstats",
+            fetched_at=datetime.now(timezone.utc)))
+        s.commit()
+        assert s.query(SemanticObservation).count() == 2
+        s.close()
+
+        # re-upgrading is a no-op
+        subprocess.run([sys.executable, "-m", "alembic", "upgrade", "head"],
+                       check=True, capture_output=True, env=env, cwd=PROJECT_ROOT)
+        assert _uq_sem_obs_cols(eng) == KEY_COLS
+    finally:
+        eng.dispose()
+        subprocess.run(
+            [str(PG_BIN / "dropdb"), "--if-exists", "-h", PG_HOST, "-p", str(PG_PORT),
+             "-U", PG_USER, dbname], capture_output=True)
+
+
+def test_fresh_schema_gets_source_aware_key(session):
+    """The sqlite test builder (and any create_all from the current models)
+    carries the 6-column key by construction."""
+    insp = inspect(session.get_bind())
+    found = any(i.get("unique") and set(i.get("column_names") or ()) == KEY_COLS
+                for i in insp.get_indexes("semantic_observations"))
+    found = found or any(set(u.get("column_names") or ()) == KEY_COLS
+                         for u in insp.get_unique_constraints("semantic_observations"))
+    assert found
 
 
 # --- planner watermark scoping --------------------------------------------------

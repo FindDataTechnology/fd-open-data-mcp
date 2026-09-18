@@ -21,7 +21,18 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1
 
+WORKDIR /app
+
 COPY --from=builder /install /usr/local
+
+# Alembic migration chain, NOT part of the site-packages install. The
+# deploy-time migration stage (initContainer running
+# `python -m fd_open_data_mcp.db.migrate_stage`) and any manual `alembic`
+# invocation inside this image must see the exact chain the image's code was
+# built from; the stage resolves it via the cwd fallback -> /app/alembic
+# (WORKDIR above), override with FD_OPEN_DATA_MCP_ALEMBIC_DIR.
+COPY alembic/ /app/alembic/
+COPY alembic.ini /app/alembic.ini
 
 RUN useradd --create-home --uid 1000 appuser
 USER appuser

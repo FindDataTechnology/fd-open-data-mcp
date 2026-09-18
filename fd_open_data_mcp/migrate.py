@@ -1,194 +1,78 @@
-"""Idempotent schema bootstrap for fd-open-data-mcp.
+"""Schema migrations entry point for fd-open-data-mcp.
 
-Creates all ontology tables (with FKs + unique indexes) if absent. Safe to
-re-run - existing tables are left untouched (CREATE TABLE IF NOT EXISTS via
-SQLAlchemy create_all). Also adds new columns to existing tables that
-``create_all`` cannot alter (add-source-proxy-health: fetch_log.proxy_id +
-fetch_log.classification) via idempotent ADD COLUMN.
+The ``migrate`` CLI is the deploy-time migration stage: it delegates to
+``fd_open_data_mcp.db.migrate_stage`` — the same advisory-locked
+``alembic upgrade head`` the Deployment's initContainer runs — and nothing
+else. The parallel mechanisms it used to carry (``create_all`` bootstrap,
+idempotent ``_ALTER_COLUMNS``, the sem-obs key swap) were retired into the
+Alembic chain by the db-schema-lifecycle change: the baseline revision
+``0001_schema_baseline`` reproduces the verified schema snapshot and
+``0002_sem_obs_source_aware_key`` carries the swap. The manual SQL runbooks
+live on as history in ``docs/migrations-archive/``.
 
 Usage:
     python -m fd_open_data_mcp.migrate
     fd-open-data-mcp migrate
+
+PostgreSQL runs the migration chain. SQLite (local dev) has no chain — the
+startup gate exempts it and the baseline revision is PostgreSQL DDL — so its
+databases are bootstrapped from the models with create_all, which is exactly
+how the verified baseline snapshot was produced.
 """
 from __future__ import annotations
 
-from sqlalchemy import inspect, text
-from sqlalchemy.engine import Engine
+import os
 
-from fd_open_data_mcp.db import get_database
-from fd_open_data_mcp.models import Base
-
-
-# Columns create_all cannot add to an existing table; migrate them idempotently.
-# (dialect-aware: ADD COLUMN IF NOT EXISTS on postgres; check inspect on sqlite)
-_ALTER_COLUMNS = {
-    "fetch_log": [("proxy_id", "INTEGER"), ("classification", "VARCHAR(16)")],
-    # add-multi-cluster-master-db: per-cluster identity for runs + direct egress.
-    # Nullable FKs (SET NULL on cluster delete) so legacy rows survive.
-    "policy_runs": [("cluster_id", "INTEGER")],
-    "proxies": [("cluster_id", "INTEGER")],
-    # add-semantic-vocabulary-core: the Variable's concept-family reference.
-    "concepts": [("concept_code", "VARCHAR(128)")],
-}
-
-
-def _add_missing_columns(engine: Engine) -> list[str]:
-    """Add columns listed in _ALTER_COLUMNS if absent. Returns the list added."""
-    insp = inspect(engine)
-    if "fetch_log" not in insp.get_table_names():
-        return []
-    added: list[str] = []
-    for table, cols in _ALTER_COLUMNS.items():
-        existing = {c["name"] for c in insp.get_columns(table)}
-        for col_name, col_type in cols:
-            if col_name in existing:
-                continue
-            dialect = engine.dialect.name
-            if dialect == "sqlite":
-                stmt = f'ALTER TABLE {table} ADD COLUMN "{col_name}" {col_type}'
-            else:
-                stmt = f'ALTER TABLE {table} ADD COLUMN IF NOT EXISTS "{col_name}" {col_type}'
-            with engine.begin() as conn:
-                conn.execute(text(stmt))
-            added.append(f"{table}.{col_name}")
-    return added
-
-
-# --- uq_sem_obs source-aware key swap (add-multi-source-observations) --------
-# The observation unique key gains source_used. The relaxed key is a strict
-# superset of the old one, so every existing row satisfies it by construction
-# — the swap cannot fail on data. Postgres swaps online (CONCURRENTLY index
-# build, then a dictionary-only lock constraint swap); SQLite rebuilds the
-# table (its auto-indexes cannot be dropped in place).
-
-_SEM_OBS_SWAP_KEY_COLS = ("concept_id", "entity_type", "entity_id", "date",
-                          "granularity", "source_used")
-_ADVISORY_LOCK_KEY = "fd_mcp_uq_sem_obs_swap"
-
-
-def _sem_obs_key_is_source_aware(engine: Engine) -> bool:
-    """True when a unique index/constraint over the 6-col key already exists on
-    semantic_observations. Both forms are checked: on Postgres the swapped key
-    is a constraint-backed index (get_indexes); on SQLite a table-level UNIQUE
-    constraint is an auto-index the dialect only reports via
-    get_unique_constraints."""
-    insp = inspect(engine)
-    if "semantic_observations" not in insp.get_table_names():
-        return False  # nothing to migrate; create_all builds the new key
-    key_set = set(_SEM_OBS_SWAP_KEY_COLS)
-    for idx in insp.get_indexes("semantic_observations"):
-        if idx.get("unique") and set(idx.get("column_names") or ()) == key_set:
-            return True
-    for uq in insp.get_unique_constraints("semantic_observations"):
-        if set(uq.get("column_names") or ()) == key_set:
-            return True
-    return False
-
-
-def _swap_sem_obs_key_postgres(engine: Engine) -> str:
-    """Online swap on Postgres: CONCURRENTLY-build the 6-col unique index,
-    then attach it as the uq_sem_obs constraint (dictionary-lock only)."""
-    swap_sql = f"""
-        CREATE UNIQUE INDEX CONCURRENTLY uq_sem_obs_src
-            ON semantic_observations ({', '.join(_SEM_OBS_SWAP_KEY_COLS)});
-        DROP INDEX IF EXISTS uq_sem_obs;
-        ALTER TABLE semantic_observations DROP CONSTRAINT IF EXISTS uq_sem_obs;
-        ALTER TABLE semantic_observations
-            ADD CONSTRAINT uq_sem_obs UNIQUE USING INDEX uq_sem_obs_src;
-    """
-    # CONCURRENTLY cannot run inside a transaction block: use an autocommit
-    # connection and execute statement-by-statement. The advisory lock keeps
-    # two migrators (or migrate + the 007 runbook script) from racing.
-    with engine.connect().execution_options(isolation_level="AUTOCOMMIT") as conn:
-        conn.exec_driver_sql(f"SELECT pg_advisory_lock(hashtext('{_ADVISORY_LOCK_KEY}'))")
-        try:
-            # A previous failed build may have left an INVALID uq_sem_obs_src
-            # (CONCURRENTLY leaves the index behind on error); drop it so the
-            # rebuild below actually happens.
-            invalid = conn.exec_driver_sql(
-                "SELECT 1 FROM pg_index i JOIN pg_class c ON c.oid = i.indexrelid "
-                "WHERE c.relname = 'uq_sem_obs_src' AND NOT i.indisvalid"
-            ).scalar()
-            if invalid:
-                conn.exec_driver_sql("DROP INDEX CONCURRENTLY IF EXISTS uq_sem_obs_src")
-            for stmt in filter(None, (s.strip() for s in swap_sql.split(";"))):
-                if "CREATE UNIQUE INDEX CONCURRENTLY" in stmt:
-                    exists = conn.exec_driver_sql(
-                        "SELECT 1 FROM pg_class WHERE relname = 'uq_sem_obs_src'"
-                    ).scalar()
-                    if exists:
-                        continue  # valid index from an interrupted prior run
-                conn.exec_driver_sql(stmt)
-        finally:
-            conn.exec_driver_sql(
-                f"SELECT pg_advisory_unlock(hashtext('{_ADVISORY_LOCK_KEY}'))")
-    return "uq_sem_obs swapped to source-aware key (concurrent build)"
-
-
-def _swap_sem_obs_key_sqlite(engine: Engine) -> str:
-    """SQLite rebuild: the old table-level UNIQUE constraint backs an auto-index
-    that cannot be dropped, so recreate the table from the current model DDL and
-    copy rows across (the relaxed key admits every existing row)."""
-    from sqlalchemy.schema import CreateTable, CreateIndex
-    from fd_open_data_mcp.models import SemanticObservation
-
-    tbl = SemanticObservation.__table__
-    cols = ", ".join(f'"{c.name}"' for c in tbl.columns)
-    with engine.begin() as conn:
-        conn.exec_driver_sql('ALTER TABLE semantic_observations RENAME TO semantic_observations_old_uq')
-        try:
-            ddl = str(CreateTable(tbl).compile(engine))
-            conn.exec_driver_sql(ddl)
-            for idx in tbl.indexes:
-                conn.exec_driver_sql(str(CreateIndex(idx).compile(engine)))
-            conn.exec_driver_sql(
-                f'INSERT INTO semantic_observations ({cols}) SELECT {cols} '
-                'FROM semantic_observations_old_uq')
-            conn.exec_driver_sql('DROP TABLE semantic_observations_old_uq')
-        except Exception:
-            # Put the original table back so a failed migrate is recoverable.
-            conn.exec_driver_sql('DROP TABLE IF EXISTS semantic_observations')
-            conn.exec_driver_sql(
-                'ALTER TABLE semantic_observations_old_uq RENAME TO semantic_observations')
-            raise
-    return "uq_sem_obs rebuilt source-aware (sqlite table rebuild)"
-
-
-def _swap_sem_obs_key(engine: Engine) -> list[str]:
-    if _sem_obs_key_is_source_aware(engine):
-        return []
-    if engine.dialect.name == "sqlite":
-        return [_swap_sem_obs_key_sqlite(engine)]
-    return [_swap_sem_obs_key_postgres(engine)]
+from sqlalchemy import create_engine, inspect
 
 
 def migrate() -> dict:
-    """Create all tables if absent, add new columns to existing tables, swap the
-    observation unique key to its source-aware form, return summary."""
-    db = get_database()
-    Base.metadata.create_all(db.engine)
-    added_columns = _add_missing_columns(db.engine)
-    key_swaps = _swap_sem_obs_key(db.engine)
-    insp = inspect(db.engine)
-    tables = sorted(insp.get_table_names())
+    """Upgrade the database to the code's schema, return a summary.
+
+    PostgreSQL: delegates to the deploy-time migration stage
+    (advisory-locked ``alembic upgrade head``). SQLite: bootstraps from the
+    models. Deliberately does not touch the application ``Database``
+    singleton: its startup gate would refuse the very PostgreSQL databases
+    this CLI exists to upgrade.
+    """
+    from fd_open_data_mcp.db import Database
+
+    database_url = os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL") or Database().database_url
+
+    if database_url.startswith("sqlite"):
+        from fd_open_data_mcp.models import Base
+
+        engine = create_engine(database_url)
+        try:
+            Base.metadata.create_all(engine)
+            tables = sorted(inspect(engine).get_table_names())
+        finally:
+            engine.dispose()
+        return {
+            "database_url": database_url,
+            "tables": tables,
+            "table_count": len(tables),
+        }
+
+    from fd_open_data_mcp.db.migrate_stage import run as run_migration_stage
+
+    run_migration_stage()
+
+    engine = create_engine(database_url)
+    try:
+        tables = sorted(inspect(engine).get_table_names())
+    finally:
+        engine.dispose()
     return {
-        "database_url": db.database_url,
+        "database_url": database_url,
         "tables": tables,
         "table_count": len(tables),
-        "added_columns": added_columns,
-        "key_swaps": key_swaps,
     }
 
 
 if __name__ == "__main__":
     result = migrate()
-    print(f"Initialized {result['table_count']} tables at {result['database_url']}:")
-    for name in result["tables"]:
-        print(f"  - {name}")
-    if result["added_columns"]:
-        print("Added columns:")
-        for c in result["added_columns"]:
-            print(f"  + {c}")
+    print(f"Migrated to head: {result['table_count']} tables at {result['database_url']}")
 
 
 # astock_daily column -> (concept code, unit) for System-B stock concepts.
@@ -237,13 +121,13 @@ def migrate_astock_daily(session, symbols: list[str] | None = None) -> dict:
     migrate only those symbols (used for testing / targeted backfill); otherwise
     migrate all astock_daily rows for symbols that map to a ``stock`` entity.
     """
-    from sqlalchemy import text
-
     code_to_id = _stock_concept_ids(session)
     expected = {c for c, _ in ASTOCK_CONCEPT_MAP.values()}
     missing = expected - set(code_to_id)
     if missing:
         raise ValueError(f"missing canonical stock concepts: {sorted(missing)}")
+
+    from sqlalchemy import text
 
     sym_filter = "AND a.symbol = ANY(:symbols)" if symbols else ""
     params: dict = {"symbols": symbols} if symbols else {}

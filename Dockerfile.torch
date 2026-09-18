@@ -27,5 +27,15 @@ ENV HF_ENDPOINT=https://hf-mirror.com
 RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 ENV HF_HOME=/home/appuser/.cache/huggingface
+
+# Alembic migration chain, not part of the site-packages install; same
+# rationale as the plain Dockerfile — the deploy-time migration stage
+# (python -m fd_open_data_mcp.db.migrate_stage) resolves /app/alembic via
+# its cwd fallback (WORKDIR /app), override with FD_OPEN_DATA_MCP_ALEMBIC_DIR.
+# Last so chain edits don't invalidate the heavy model-download layer.
+WORKDIR /app
+COPY alembic/ /app/alembic/
+COPY alembic.ini /app/alembic.ini
+
 EXPOSE 8899
 ENTRYPOINT ["fd-open-data-mcp", "serve", "--transport", "http", "--host", "0.0.0.0", "--port", "8899"]
