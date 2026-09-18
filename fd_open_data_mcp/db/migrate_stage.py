@@ -25,9 +25,10 @@ Behaviour contract (k8s/zihan/20-fd-open-data-mcp.yaml):
 * Idempotent: when the database is already at head, alembic applies nothing
   and the stage exits 0.
 
-PostgreSQL only: the baseline revision executes a pg_dump snapshot, and the
-advisory lock is Postgres-specific. SQLite consumers build their schema with
-create_all(), not with this stage.
+PostgreSQL runs the Alembic chain under the advisory lock. SQLite (no chain;
+the startup gate exempts it — e.g. a hostPath daas.db deployment) is
+bootstrapped from the models with create_all — the same operation the
+verified baseline snapshot was generated from — and the stage succeeds.
 """
 from __future__ import annotations
 
@@ -103,11 +104,22 @@ def run() -> None:
     if not database_url:
         raise RuntimeError(f"{DATABASE_URL_ENV} is not set; cannot migrate")
     if database_url.startswith("sqlite"):
-        raise RuntimeError(
-            "the migration stage is PostgreSQL-only "
-            "(baseline revision is a pg_dump snapshot; advisory locks are "
-            "Postgres-specific); SQLite consumers use create_all()"
+        # SQLite deployments have no migration chain: the baseline revision
+        # is PostgreSQL DDL and the startup gate exempts sqlite. Bootstrap
+        # from the models instead — the same operation the verified baseline
+        # snapshot was generated from — so a fresh dev database works and an
+        # existing one is a no-op (create_all never alters).
+        from fd_open_data_mcp.models import Base
+
+        engine = create_engine(database_url)
+        try:
+            Base.metadata.create_all(engine)
+        finally:
+            engine.dispose()
+        LOGGER.info(
+            "sqlite database: schema bootstrapped from models (no migration chain)"
         )
+        return
 
     alembic_dir = _resolve_alembic_dir()
     engine = _lock_engine(database_url)
