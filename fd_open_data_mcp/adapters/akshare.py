@@ -71,19 +71,21 @@ def _normalize_date(value: Any) -> str:
     return s
 
 
-def _row_for_date(df, date_col: Optional[str], requested: str):
+def _row_for_date(df, date_col: Optional[str], requested: str, norm=_normalize_date):
     """Return the row (``pd.Series``) whose date matches ``requested``, or None.
 
     ``date_col`` is the column holding the date; when it is None, or when the
     declared column is absent from the DataFrame, the DataFrame index is treated
     as the date axis (e.g. some akshare versions return date as the index).
-    Matching tolerates 'YYYY-MM-DD' vs 'YYYYMMDD' on both sides.
+    Matching tolerates 'YYYY-MM-DD' vs 'YYYYMMDD' on both sides. ``norm`` is the
+    cell normalizer — adapters with non-ISO date axes (Chinese '2026年08月份')
+    pass their own.
     """
     if date_col is not None and date_col in df.columns:
-        values = [_normalize_date(v) for v in df[date_col].tolist()]
+        values = [norm(v) for v in df[date_col].tolist()]
     else:
-        values = [_normalize_date(v) for v in df.index.tolist()]
-    target = _normalize_date(requested)
+        values = [norm(v) for v in df.index.tolist()]
+    target = norm(requested)
     for key in (target, target.replace("-", "")):
         if key in values:
             return df.iloc[values.index(key)]
@@ -122,9 +124,12 @@ class _AkshareBase:
                        resolves on functions that return English columns (close);
       ``_TIMEOUT``   - native akshare ``timeout`` kwarg, or None when the function's
                        signature has no ``timeout`` parameter;
-      ``_RETRIES``/``_RETRY_DELAY`` - retry tuning for the optional ``call``.
+      ``_RETRIES``/``_RETRY_DELAY`` - retry tuning for the optional ``call``;
+      ``_norm``      - date-cell normalizer for the date axis; override when the
+                       frame's dates are not ISO (Chinese '2026年08月份').
     """
 
+    _norm = staticmethod(_normalize_date)
     _DATE_COL: Optional[str] = None
     _ALIASES: dict[str, str] = {}
     _TIMEOUT: Optional[float] = None
@@ -141,7 +146,7 @@ class _AkshareBase:
 
         if not isinstance(result, pd.DataFrame) or result.empty:
             return None
-        row = _row_for_date(result, self._DATE_COL, date)
+        row = _row_for_date(result, self._DATE_COL, date, self._norm)
         if row is None:
             return None
         # resolve the requested column: exact name first, then alias, else give up
@@ -179,9 +184,9 @@ class _AkshareBase:
         if col is None or col not in result.columns:
             return {}
         if self._DATE_COL is not None and self._DATE_COL in result.columns:
-            dates = [_normalize_date(v) for v in result[self._DATE_COL].tolist()]
+            dates = [self._norm(v) for v in result[self._DATE_COL].tolist()]
         else:
-            dates = [_normalize_date(v) for v in result.index.tolist()]
+            dates = [self._norm(v) for v in result.index.tolist()]
         out: dict[str, Any] = {}
         values = result[col].tolist()
         for d, val in zip(dates, values):
@@ -759,25 +764,58 @@ class StockInfoBjNameCodeAdapter(_FundRankFrameAdapter):
     _ALIASES = {"代码": "证券代码", "名称": "证券简称"}
 
 
-class MacroChinaSeriesAdapter(_AkshareBase):
-    """No-argument China macro series (macro_china_cpi_yearly et al.).
+class _NoArgSeriesAdapter(_AkshareBase):
+    """No-argument series function: the frame IS the indicator's history.
 
-    Signature: ``()`` - the frame IS the indicator's full publication history
-    (columns 商品/日期/今值/预测值/前值). One call serves any date range, so
-    params stay empty and the identifier is unused (the series is China's by
-    construction — only the 中国 entity carries an akshare identifier).
+    Params stay empty and the identifier is unused — the series belongs to the
+    single entity the function covers (macro functions are country-specific by
+    construction; the catalog maps only that country to an akshare identifier).
+    """
 
-    The 日期 axis carries PUBLICATION days (2025-07-09), not month starts,
-    and shifted regime mid-history (older rows are month starts) — per-date
-    expansion with month-first keys misses recent rows entirely. Serve these
-    functions in series mode: one call, extract_series returns every date the
-    frame actually holds.
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {}
+
+
+class MacroChinaSeriesAdapter(_NoArgSeriesAdapter):
+    """JIN10-shaped China macro series (macro_china_cpi_yearly et al.).
+
+    Columns 商品/日期/今值/预测值/前值. The 日期 axis carries PUBLICATION days
+    (2025-07-09), not month starts, and shifted regime mid-history (older rows
+    are month starts) — per-date expansion with month-first keys misses recent
+    rows entirely. Serve these functions in series mode: one call, extract_series
+    returns every date the frame actually holds.
     """
 
     _DATE_COL = "日期"
 
-    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
-        return {}
+
+class MacroMonthStatAdapter(_NoArgSeriesAdapter):
+    """月份-keyed China macro tables (macro_china_money_supply, shrzgm).
+
+    One call returns the full monthly table; catalog column names are the
+    frame's physical column names (货币和准货币(M2)-同比增长, ...). 月份 is
+    Chinese ('2026年08月份') — normalize to the month start so observations
+    and date windows stay ISO.
+    """
+
+    _DATE_COL = "月份"
+    _MONTH_RE = __import__("re").compile(r"(\d{4})年(\d{1,2})月")
+
+    def _norm(self, value: Any) -> str:
+        m = self._MONTH_RE.search(str(value))
+        if m:
+            return f"{m.group(1)}-{int(m.group(2)):02d}-01"
+        return _normalize_date(value)
+
+
+class MacroTradeDateAdapter(_NoArgSeriesAdapter):
+    """TRADE_DATE-keyed China macro frames (macro_china_lpr).
+
+    LPR rates are published monthly (day 20); TRADE_DATE is a date object and
+    needs no special normalization.
+    """
+
+    _DATE_COL = "TRADE_DATE"
 
 
 # --- bulk-snapshot cross-sections (fix-silent-zero-yield-crawls D6) ---------------
@@ -853,12 +891,14 @@ def register_all() -> None:
     register("akshare", "fund_open_fund_info_em", FundOpenFundInfoEmAdapter())
     register("akshare", "fund_etf_spot_em", FundEtfSpotEmAdapter())
     register("akshare", "stock_info_bj_name_code", StockInfoBjNameCodeAdapter())
-    # no-arg China macro series (country/monthly concepts: CPI/PPI/PMI)
+    # no-arg China macro series (country/monthly concepts: CPI/PPI/PMI/M2/LPR)
     _macro = MacroChinaSeriesAdapter()
     register("akshare", "macro_china_cpi_yearly", _macro)
     register("akshare", "macro_china_cpi_monthly", _macro)
     register("akshare", "macro_china_ppi_yearly", _macro)
     register("akshare", "macro_china_pmi_yearly", _macro)
+    register("akshare", "macro_china_money_supply", MacroMonthStatAdapter())
+    register("akshare", "macro_china_lpr", MacroTradeDateAdapter())
     register("akshare", "fund_etf_hist_em", FundEtfHistEmAdapter())
     register("akshare", "fund_lof_hist_em", FundLofHistEmAdapter())
     register("akshare", "fund_etf_hist_sina", FundEtfHistSinaAdapter())
