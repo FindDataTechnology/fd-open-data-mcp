@@ -759,6 +759,27 @@ class StockInfoBjNameCodeAdapter(_FundRankFrameAdapter):
     _ALIASES = {"代码": "证券代码", "名称": "证券简称"}
 
 
+class MacroChinaSeriesAdapter(_AkshareBase):
+    """No-argument China macro series (macro_china_cpi_yearly et al.).
+
+    Signature: ``()`` - the frame IS the indicator's full publication history
+    (columns 商品/日期/今值/预测值/前值). One call serves any date range, so
+    params stay empty and the identifier is unused (the series is China's by
+    construction — only the 中国 entity carries an akshare identifier).
+
+    The 日期 axis carries PUBLICATION days (2025-07-09), not month starts,
+    and shifted regime mid-history (older rows are month starts) — per-date
+    expansion with month-first keys misses recent rows entirely. Serve these
+    functions in series mode: one call, extract_series returns every date the
+    frame actually holds.
+    """
+
+    _DATE_COL = "日期"
+
+    def build_params(self, fn, identifier: str, date: str, binding=None) -> dict:
+        return {}
+
+
 # --- bulk-snapshot cross-sections (fix-silent-zero-yield-crawls D6) ---------------
 # One call returns the FULL entity cross-section for one date, on hosts verified
 # reachable from the crawl cluster (datacenter.eastmoney.com / fund.eastmoney.com
@@ -832,6 +853,12 @@ def register_all() -> None:
     register("akshare", "fund_open_fund_info_em", FundOpenFundInfoEmAdapter())
     register("akshare", "fund_etf_spot_em", FundEtfSpotEmAdapter())
     register("akshare", "stock_info_bj_name_code", StockInfoBjNameCodeAdapter())
+    # no-arg China macro series (country/monthly concepts: CPI/PPI/PMI)
+    _macro = MacroChinaSeriesAdapter()
+    register("akshare", "macro_china_cpi_yearly", _macro)
+    register("akshare", "macro_china_cpi_monthly", _macro)
+    register("akshare", "macro_china_ppi_yearly", _macro)
+    register("akshare", "macro_china_pmi_yearly", _macro)
     register("akshare", "fund_etf_hist_em", FundEtfHistEmAdapter())
     register("akshare", "fund_lof_hist_em", FundLofHistEmAdapter())
     register("akshare", "fund_etf_hist_sina", FundEtfHistSinaAdapter())
