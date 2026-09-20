@@ -113,9 +113,13 @@ def _resolve_alembic_dir() -> Path:
     """Locate the alembic script directory shipped with this code.
 
     Resolution order: ``FD_OPEN_DATA_MCP_ALEMBIC_DIR`` env var, ``$PWD/alembic``
-    (running from a source checkout), then the package-relative ``alembic/``
-    (source-tree layout). A missing directory is an operations problem, not
-    something to silently skip.
+    (running from a source checkout), the package-internal ``alembic/``
+    (wheel installs — the build copies the chain in as package data), then the
+    source-tree layout one level above the package. A candidate is accepted
+    only when it actually contains ``versions/``: the bare name ``alembic`` on
+    the path also matches the alembic library's own package directory, and
+    choosing that collision is what produced the historical
+    "contains no revisions; the image is broken" failure.
     """
     env_dir = os.environ.get(_ALEMBIC_DIR_ENV)
     if env_dir:
@@ -126,15 +130,18 @@ def _resolve_alembic_dir() -> Path:
                 "determine the required schema revision"
             )
         return path
+    here = Path(__file__).resolve()
     for candidate in (
         Path.cwd() / "alembic",
-        Path(__file__).resolve().parents[2] / "alembic",
+        here.parent.parent / "alembic",  # fd_open_data_mcp/alembic (wheel)
+        here.parents[2] / "alembic",     # repo-root alembic (source tree)
     ):
-        if candidate.is_dir():
+        if candidate.is_dir() and (candidate / "versions").is_dir():
             return candidate
     raise SchemaGateError(
-        "no alembic script directory found (tried $PWD/alembic and the "
-        "package-relative alembic/); the image does not ship the alembic "
+        "no alembic script directory with a versions/ subdirectory found "
+        "(tried $PWD/alembic, the package-internal alembic/, and the "
+        "source-tree alembic/); the image does not ship the alembic "
         "scripts needed to determine the required schema revision - set "
         f"{_ALEMBIC_DIR_ENV} to the directory containing versions/ or fix the "
         "image packaging"

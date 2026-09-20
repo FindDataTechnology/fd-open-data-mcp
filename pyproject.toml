@@ -58,6 +58,13 @@ data = [
     "playwright>=1.40",
 ]
 dev = ["pytest>=8.0"]
+# Semantic search (ai_search / semantic_search). torch is sentence-transformers'
+# backend; CN builds take the CPU wheel from the Aliyun pytorch-wheels mirror
+# (the default PyPI linux wheel is the multi-GB CUDA build) or sit on the
+# fd-open-data-mcp:torch image, which bakes both the package and the model.
+search = [
+    "sentence-transformers>=2.7",
+]
 
 [project.scripts]
 fd-open-data-mcp = "fd_open_data_mcp.cli:cli"

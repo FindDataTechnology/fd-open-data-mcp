@@ -56,20 +56,25 @@ def _resolve_alembic_dir() -> Path:
 
     Resolution order: ``FD_OPEN_DATA_MCP_ALEMBIC_DIR`` -> ``<cwd>/alembic``
     (the image sets WORKDIR /app and COPYs the chain to /app/alembic) ->
-    ``<repo root>/alembic`` relative to this file (source checkout).
+    the package-internal ``alembic/`` (wheel installs) -> ``<repo
+    root>/alembic`` relative to this file (source checkout). A candidate
+    counts only when it contains ``versions/`` — the bare name also matches
+    the alembic library's own package directory, which is not a chain.
     """
     candidates = []
     env_dir = os.environ.get(ALEMBIC_DIR_ENV)
     if env_dir:
         candidates.append(Path(env_dir))
+    here = Path(__file__).resolve()
     candidates.append(Path.cwd() / "alembic")
-    candidates.append(Path(__file__).resolve().parents[2] / "alembic")
+    candidates.append(here.parent.parent / "alembic")  # package-internal (wheel)
+    candidates.append(here.parents[2] / "alembic")     # repo root (source tree)
     for candidate in candidates:
-        if candidate.is_dir():
+        if candidate.is_dir() and (candidate / "versions").is_dir():
             return candidate.resolve()
     tried = ", ".join(str(c) for c in candidates)
     raise RuntimeError(
-        f"alembic script directory not found (tried: {tried}); "
+        f"alembic script directory with versions/ not found (tried: {tried}); "
         f"set {ALEMBIC_DIR_ENV} or run with cwd at the project root"
     )
 

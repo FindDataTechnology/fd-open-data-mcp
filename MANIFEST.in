@@ -2,3 +2,9 @@ include .env.example
 recursive-include fd_open_data_mcp/catalog/seeds *.json
 recursive-include fd_open_data_mcp/panel/templates *.html
 recursive-include fd_open_data_mcp/panel/static *
+# The alembic chain. The sdist must carry it because `python -m build` builds
+# the wheel *from the sdist*, and the wheel ships the revisions as package data
+# (the startup schema gate resolves them from there when no source checkout is
+# present — see setup.py).
+recursive-include alembic *.py *.sql *.mako
+include alembic.ini
