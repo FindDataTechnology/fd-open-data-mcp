@@ -178,17 +178,22 @@ def test_data_stats_tool_registered_and_matches_coverage(session):
     from fd_open_data_mcp.server import mcp
     assert "data_stats" in _list_tool_names()
 
+    # Default is the aggregate summary (mcp-read-surface-gaps): no per-concept
+    # array sized by the catalog; the listing moved behind the filters.
     payload = _unwrap(asyncio.run(mcp.call_tool("data_stats", {})))
-    direct = coverage_by_concept(session)
-    assert [r["rows"] for r in payload["concepts"]] == [r["rows"] for r in direct]
-    assert payload["concepts"][0]["latest_date"] == "2026-08-27"
+    assert "concepts" not in payload
+    assert payload["total_concepts"] == session.query(Concept).count()
+    assert payload["total_stored_rows"] == session.query(SemanticObservation).count()
     # stores section present (read-only: no census rows -> empty list)
     assert payload["stores"] == []
 
     fpayload = _unwrap(asyncio.run(mcp.call_tool(
         "data_stats", {"entity_type": "country"})))
+    direct = coverage_by_concept(session, entity_type="country")
+    assert [r["rows"] for r in fpayload["concepts"]] == [r["rows"] for r in direct]
     assert len(fpayload["concepts"]) == 1
     assert fpayload["concepts"][0]["code"] == "gdp.nominal"
+    assert fpayload["concepts"][0]["latest_date"] == "2026-06-30"
 
 
 def test_crawl_status_tool_includes_next_runs(session, monkeypatch):

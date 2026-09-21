@@ -32,7 +32,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
 
-from sqlalchemy import text
+from sqlalchemy import or_, text
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import SemanticObservation
@@ -74,6 +74,46 @@ def _period_final(obs_date: Optional[str], granularity: Optional[str], today_str
     if g in ("year", "yearly"):
         return obs_date[:4] < today_str[:4]       # a prior year
     return obs_date < today_str                    # day (default) + any other
+
+
+def period_prefixes(date: str, frequency: Optional[str]) -> Optional[list[str]]:
+    """LIKE prefixes covering the period ``date`` falls in, or None for exact match.
+
+    Stored observation dates are not normalized: a yearly row may be the bare
+    ``"2021"`` while a monthly row is ``"2005-02-01"``. Matching by period
+    prefix (``2021%``, ``2005-02%``) is therefore robust to both conventions,
+    where exact-date equality silently missed every off-anchor request.
+
+    Returns None for daily/weekly/irregular/unknown frequencies — those keep
+    exact-date semantics (their period IS the date).
+    """
+    f = (frequency or "").lower()
+    if len(date) < 4:
+        return None
+    if f in ("yearly", "annual", "year"):
+        return [date[:4]]
+    if len(date) < 7:
+        return None
+    if f in ("monthly", "month"):
+        return [date[:7]]
+    if f in ("quarterly", "quarter"):
+        year, month = int(date[:4]), int(date[5:7])
+        first = ((month - 1) // 3) * 3 + 1
+        return [f"{year:04d}-{first + i:02d}" for i in range(3)]
+    return None
+
+
+def _pick_period_date(rows, date: str) -> Optional[str]:
+    """The stored date to serve for a request inside its period.
+
+    Prefer the row closest at-or-before the requested date (the value as known
+    at that point in the period); if every row lies after it, the earliest.
+    """
+    if not rows:
+        return None
+    dates = sorted({r.date for r in rows})
+    before = [d for d in dates if d <= date]
+    return before[-1] if before else dates[0]
 
 
 def is_stale(obs, frequency: Optional[str]) -> bool:
@@ -189,7 +229,7 @@ def _prefer(candidates: list, concept_id: int, order: dict[str, int]):
 
 def read_cache(
     session: Session, concept_id: int, entity_type: str, entity_id: int, date: str,
-    source: Optional[str] = None,
+    source: Optional[str] = None, frequency: Optional[str] = None,
 ) -> Optional[CachedObs]:
     """Read one cached observation for the dispatch (read) path.
 
@@ -199,21 +239,40 @@ def read_cache(
     Without ``source``, the highest-ranked source's row wins (base path; the
     view path returns the view's pre-deduped row — see module docstring).
     """
+    prefixes = period_prefixes(date, frequency)
     if source is not None:
-        return _read_base(session, concept_id, entity_type, entity_id, date, source=source)
+        rows = _read_base_period(session, concept_id, entity_type, entity_id, date,
+                                 prefixes, source=source)
+        chosen = _pick_period_date(rows, date)
+        return next((r for r in rows if r.date == chosen), None) if chosen else None
     if _use_view(session):
+        if prefixes:
+            clause = " OR ".join(f"date LIKE '{p}%'" for p in prefixes)  # literal prefixes, no user input
+            rows = session.execute(text(
+                f"SELECT {_READ_COLS} FROM semantic_observations_read "
+                f"WHERE concept_id=:c AND entity_type=:t AND entity_id=:e AND ({clause})"
+            ), {"c": concept_id, "t": entity_type, "e": entity_id}).all()
+            if not rows:
+                return None
+            wrapped = [_ReadRow(r) for r in rows]
+            chosen = _pick_period_date(wrapped, date)
+            return next((r for r in wrapped if r.date == chosen), None)
         row = session.execute(text(
             f"SELECT {_READ_COLS} FROM semantic_observations_read "
             "WHERE concept_id=:c AND entity_type=:t AND entity_id=:e AND date=:d "
             "LIMIT 1"
         ), {"c": concept_id, "t": entity_type, "e": entity_id, "d": date}).first()
         return _ReadRow(row) if row else None
-    rows = _read_base_all(session, concept_id, entity_type, entity_id, date)
+    rows = _read_base_period(session, concept_id, entity_type, entity_id, date, prefixes)
     if not rows:
         return None
     if len(rows) == 1:
         return rows[0]
-    return _prefer(rows, concept_id, _source_order(session, concept_id))
+    chosen = _pick_period_date(rows, date)
+    same = [r for r in rows if r.date == chosen]
+    if len(same) == 1:
+        return same[0]
+    return _prefer(same, concept_id, _source_order(session, concept_id))
 
 
 def read_cache_all(
@@ -297,6 +356,23 @@ def _read_base_all(
     return session.query(SemanticObservation).filter_by(
         concept_id=concept_id, entity_type=entity_type, entity_id=entity_id, date=date,
     ).all()
+
+
+def _read_base_period(
+    session: Session, concept_id: int, entity_type: str, entity_id: int, date: str,
+    prefixes: Optional[list[str]] = None, source: Optional[str] = None,
+) -> list[SemanticObservation]:
+    """Base-table lookup by period prefix (exact date when ``prefixes`` is None)."""
+    q = session.query(SemanticObservation).filter_by(
+        concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
+    )
+    if prefixes:
+        q = q.filter(or_(*[SemanticObservation.date.like(f"{p}%") for p in prefixes]))
+    else:
+        q = q.filter(SemanticObservation.date == date)
+    if source is not None:
+        q = q.filter(SemanticObservation.source_used == source)
+    return q.all()
 
 
 def _read_base_range(

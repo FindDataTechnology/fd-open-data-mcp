@@ -291,30 +291,45 @@ def propose_bindings() -> dict:
 @mcp.tool
 def list_concepts(
     entity_type: str | None = None, concept_family: str | None = None,
+    limit: int = 500, offset: int = 0,
 ) -> list[dict]:
     """List concepts (Variables) with their concept family; optionally filtered.
+
+    Paginated: rows are ordered by (entity_type, code, id) and a page returns at
+    most ``limit`` rows (clamped to 1000). Page with increasing ``offset`` until
+    a page comes back shorter than ``limit`` — that enumerates the full catalog
+    even when one entity type exceeds the per-call cap.
 
     Args:
         entity_type: restrict to one entity type (country, stock, ...)
         concept_family: restrict to one concept family id (GDP, Population, ...)
+        limit: page size, 1..1000 (default 500)
+        offset: rows to skip (default 0)
     """
     from fd_open_data_mcp.semantic.concepts import list_concepts_with_family
 
     s = _session()
     try:
-        return list_concepts_with_family(s, entity_type=entity_type, concept_family=concept_family)
+        return list_concepts_with_family(
+            s, entity_type=entity_type, concept_family=concept_family,
+            limit=limit, offset=offset,
+        )
     finally:
         s.close()
 
 
 @mcp.tool
-def list_concept_families() -> list[dict]:
-    """List the concept families (the curated semantic vocabulary) + variable counts."""
+def list_concept_families(limit: int = 500, offset: int = 0) -> list[dict]:
+    """List the concept families (the curated semantic vocabulary) + variable counts.
+
+    Paginated with the same ``limit`` (1..1000) / ``offset`` semantics as
+    ``list_concepts``, ordered by family code.
+    """
     from fd_open_data_mcp.semantic.concepts import list_concept_families as _list
 
     s = _session()
     try:
-        return _list(s)
+        return _list(s, limit=limit, offset=offset)
     finally:
         s.close()
 
@@ -861,6 +876,62 @@ def read(concept_id: int, entity_type: str, entity_id: int, dates: list[str],
     try:
         return _read(s, concept_id, entity_type, entity_id, dates,
                      source=source, all_sources=all_sources)
+    finally:
+        s.close()
+
+
+MAX_SERIES_ROWS = 5000
+
+
+@mcp.tool
+def read_series(concept_id: int, entity_type: str, entity_id: int,
+                start: str, end: str) -> dict:
+    """Read a stored series (cache only) for one concept x entity over [start, end].
+
+    The bulk counterpart to ``read``: returns every observation already held,
+    highest-ranked source per point, ordered by date. It NEVER dispatches
+    upstream — an empty window is a coverage fact reported as such, not a
+    failure. Use ``read`` for a point read (cache + live dispatch) or ``fetch``
+    to force a refresh of one point.
+
+    Args:
+        concept_id: concept to read
+        entity_type: entity type (country, stock, fund, ...)
+        entity_id: entity id
+        start: window start, inclusive ('YYYY-MM-DD'; a bare 'YYYY' works for yearly concepts)
+        end: window end, inclusive
+    """
+    from fd_open_data_mcp.entities.resolver import check_applicability
+    from fd_open_data_mcp.fetch.cache import read_cache_range
+    from fd_open_data_mcp.fetch.dispatch import _coerce_value
+
+    if not start or not end:
+        raise ValueError("start and end are required (e.g. '2020-01-01')")
+    if start > end:
+        raise ValueError(f"start ({start}) is after end ({end})")
+
+    s = _session()
+    try:
+        check_applicability(s, concept_id, entity_type)
+        rows = read_cache_range(s, concept_id, entity_type, entity_id, start, end)
+        truncated = len(rows) > MAX_SERIES_ROWS
+        kept = rows[-MAX_SERIES_ROWS:] if truncated else rows
+        points = [
+            {"date": r.date, "value": _coerce_value(r.value),
+             "unit": r.unit, "source_used": r.source_used}
+            for r in kept
+        ]
+        out: dict = {
+            "concept_id": concept_id, "entity_type": entity_type, "entity_id": entity_id,
+            "start": start, "end": end, "count": len(points), "points": points,
+        }
+        if not points:
+            out["note"] = ("no cached observations in this window — a coverage gap, "
+                           "not a failure; no upstream fetch was attempted")
+        elif truncated:
+            out["note"] = (f"window holds more than {MAX_SERIES_ROWS} points; returned the most "
+                           f"recent {MAX_SERIES_ROWS} — narrow the window for the rest")
+        return out
     finally:
         s.close()
 

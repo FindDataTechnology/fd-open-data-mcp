@@ -161,19 +161,33 @@ def dispatch_one(
     if concept is None:
         return None
 
-    obs = read_cache(session, concept_id, entity_type, entity_id, date, source=source)
+    obs = read_cache(session, concept_id, entity_type, entity_id, date, source=source,
+                     frequency=concept.frequency)
     if obs is not None and not is_stale(obs, concept.frequency):
         return {"date": date, "value": obs.value, "unit": obs.unit,
                 "source_used": obs.source_used, "from_cache": True}
+
+    # Why a read can come back empty, kept distinct so callers can act:
+    # "no source succeeded" (sources were tried and failed) is a different fact
+    # from "no eligible source" (nothing to try — the concept has no confirmed
+    # binding) and from "no identifier" (the entity is unmapped for every
+    # candidate source). The generic message used to cover all three, which read
+    # as a transient failure for what is actually a coverage gap.
+    candidates_seen = 0
+    identifiers_resolved = 0
+    attempts = 0
 
     for cand in rank_sources_for_concept(session, concept_id, requested_date):
         cand_source = cand["source"]
         if source is not None and cand_source != source:
             continue  # source-pinned read: never fetch from another source
+        candidates_seen += 1
         identifier = resolve_identifier(session, entity_type, entity_id, cand_source)
         if identifier is None:
             continue  # graceful degradation: no per-source id for this entity
+        identifiers_resolved += 1
         for binding, fn in _bindings_for_source(session, concept_id, cand_source):
+            attempts += 1
             params = _build_params(fn, identifier, date, binding)
 
             # Get real_sources for this function (if declared)
@@ -223,6 +237,16 @@ def dispatch_one(
                             str(value), concept.unit, cand_source)
                 return {"date": date, "value": value, "unit": concept.unit,
                         "source_used": cand_source, "real_source_used": real_source, "from_cache": False}
+
+    if candidates_seen == 0:
+        return {"date": date, "value": None, "error": "no eligible source",
+                "detail": "no confirmed binding for this concept (bind it, or run propose_bindings/confirm_binding)"}
+    if identifiers_resolved == 0:
+        return {"date": date, "value": None, "error": "no source could resolve an identifier for this entity",
+                "detail": "entity has no per-source identifier for any candidate source (see entity_source_identifiers)"}
+    if attempts == 0:
+        return {"date": date, "value": None, "error": "no dispatchable binding",
+                "detail": "candidate sources resolved identifiers but hold no verified binding for this concept"}
     return None
 
 

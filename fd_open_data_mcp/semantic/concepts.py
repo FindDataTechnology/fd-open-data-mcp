@@ -207,13 +207,36 @@ def _family_labels(session: Session) -> dict[str, str]:
     }
 
 
+LIST_MAX_LIMIT = 1000
+LIST_DEFAULT_LIMIT = 500
+
+
+def _clamp_limit(limit: int) -> int:
+    """Clamp a page size into [1, LIST_MAX_LIMIT]."""
+    try:
+        n = int(limit)
+    except (TypeError, ValueError):
+        return LIST_DEFAULT_LIMIT
+    return max(1, min(n, LIST_MAX_LIMIT))
+
+
 def list_concepts_with_family(
     session: Session,
     entity_type: Optional[str] = None,
     concept_family: Optional[str] = None,
-    limit: int = 500,
+    limit: int = LIST_DEFAULT_LIMIT,
+    offset: int = 0,
 ) -> list[dict]:
-    """Variables with their family identifier + label, optionally filtered."""
+    """Variables with their family identifier + label, optionally filtered.
+
+    Paginated: ``limit`` is clamped to [1, LIST_MAX_LIMIT] and ``offset`` to
+    >= 0, ordered deterministically by (entity_type, code, id) so offset paging
+    neither skips nor duplicates rows within a catalog version. A caller pages
+    until a page returns fewer than ``limit`` rows — no total is returned, so
+    the result shape stays a plain list.
+    """
+    limit = _clamp_limit(limit)
+    offset = max(0, int(offset))
     q = session.query(Concept)
     if entity_type:
         q = q.filter(Concept.entity_type == entity_type)
@@ -222,21 +245,42 @@ def list_concepts_with_family(
 
     labels = _family_labels(session)
     out = []
-    for c in q.limit(limit).all():
+    rows = (
+        q.order_by(Concept.entity_type, Concept.code, Concept.id)
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
+    for c in rows:
         row = c.toDict()
         row["concept_family_label"] = labels.get(c.concept_code or "")
         out.append(row)
     return out
 
 
-def list_concept_families(session: Session) -> list[dict]:
-    """Every concept family with the number of Variables assigned to it."""
+def list_concept_families(
+    session: Session, limit: int = LIST_DEFAULT_LIMIT, offset: int = 0
+) -> list[dict]:
+    """Concept families with the number of Variables assigned to each, paginated.
+
+    Same ``limit``/``offset`` semantics as ``list_concepts_with_family``
+    (ordered by family code).
+    """
+    limit = _clamp_limit(limit)
+    offset = max(0, int(offset))
     counts = dict(
         session.query(Concept.concept_code, func.count(Concept.id))
         .group_by(Concept.concept_code)
         .all()
     )
+    families = (
+        session.query(ConceptFamily)
+        .order_by(ConceptFamily.code)
+        .offset(offset)
+        .limit(limit)
+        .all()
+    )
     return [
         {**f.toDict(), "variable_count": counts.get(f.code, 0)}
-        for f in session.query(ConceptFamily).order_by(ConceptFamily.code).all()
+        for f in families
     ]

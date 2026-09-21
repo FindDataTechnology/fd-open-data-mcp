@@ -4,7 +4,7 @@ The `data_stats` reporting shape: a fast aggregate summary by default, with the 
 ## ADDED Requirements
 
 ### Requirement: Fast summary by default
-Calling `data_stats` with no arguments SHALL return an aggregate summary (total concepts, covered concepts, total observation points, per-entity-type rollup, store census) computed without materializing per-concept rows. The default call SHALL complete in seconds at the current production volume (~6.3M observations, ~2.7k concepts).
+Calling `data_stats` with no arguments SHALL return an aggregate summary computed without materializing per-concept rows: the catalog size (`total_concepts`), the covered-concept count (`covered_concepts`), the raw distinct-concept count holding rows (`concepts_with_observations`), the stored-row total (`total_stored_rows`), the gap and stale figures, a per-entity-type rollup, and the store census. `total_stored_rows` counts stored rows — multi-source rows for one point count separately — and its name SHALL carry that unit, because "observations" elsewhere in the tool surface means distinct observation points. `total_concepts` and `covered_concepts` SHALL come from the same coverage aggregation that `coverage_report` reports, so the two agree by construction. The default call SHALL complete in seconds at the current production volume (~6.3M stored rows, ~2.1k concepts).
 
 #### Scenario: Default call returns quickly
 - **WHEN** a client calls `data_stats` with no arguments against the production database

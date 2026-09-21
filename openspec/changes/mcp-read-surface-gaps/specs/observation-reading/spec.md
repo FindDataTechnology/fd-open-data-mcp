@@ -29,9 +29,28 @@ A `read_series` tool SHALL expose the internal range read: given concept, entity
 - **WHEN** the window contains no cached rows for the pair
 - **THEN** an empty series is returned with an explicit note (not an error), because this is a coverage fact, not a failure
 
-#### Scenario: Window bounds are validated
-- **WHEN** start is after end or the window exceeds a server-side maximum span
+#### Scenario: Inverted window is rejected
+- **WHEN** start is after end
 - **THEN** the tool returns a readable validation error
+
+#### Scenario: Oversized window is bounded and reported
+- **WHEN** the window holds more points than the server-side row cap
+- **THEN** the response carries the most recent points up to the cap plus an explicit truncation note telling the caller to narrow the window (never a silent truncation, never a transport-breaking body)
+
+### Requirement: Diagnostic error rows name the cause
+When a read cannot return a value, the per-date error row SHALL distinguish the cause: no eligible source (the concept has no confirmed binding), no resolvable identifier for the entity, no dispatchable binding, or sources were attempted and all failed. A caller SHALL be able to tell a coverage gap apart from a transient failure without reading server logs.
+
+#### Scenario: Concept without a binding
+- **WHEN** a read targets a concept that has no confirmed binding and no cached row
+- **THEN** the error row names the missing binding as the cause (not "no source succeeded")
+
+#### Scenario: Entity unmapped for every candidate source
+- **WHEN** candidate sources exist but none can resolve an identifier for the entity
+- **THEN** the error row names the identifier gap
+
+#### Scenario: Sources attempted and failed
+- **WHEN** at least one source was attempted and every attempt failed
+- **THEN** the error row reports the failed attempts (the previous generic message remains correct only for this case)
 
 ### Requirement: read_series respects entity applicability
 `read_series` SHALL apply the same entity-type applicability check as `read`, rejecting a concept/entity-type mismatch rather than returning empty data for an inapplicable pair.

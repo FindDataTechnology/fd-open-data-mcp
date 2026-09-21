@@ -22,6 +22,61 @@ from fd_open_data_mcp.refresh.reconciler import (
 )
 
 
+def _observation_summary(session) -> dict:
+    """Aggregate summary over ``semantic_observations`` for ``data_stats``.
+
+    Two cheap reads, no per-concept materialization:
+
+      * one ``GROUP BY (entity_type, concept_id)`` — ~270 rows at production
+        volume, versus the 6.3M-row full scan a ``COUNT(DISTINCT ...)``
+        rollup costs — yields the stored-row totals, the per-entity-type
+        rollup, and the set of concepts holding rows;
+      * ``coverage_summary``, the same aggregation ``coverage_report`` leads
+        with, yields the catalog size and the covered/gap/stale figures — so
+        the two tools agree by construction rather than by coincidence.
+
+    ``total_stored_rows`` counts stored ROWS: sources coexist per point, so
+    two sources on one point count twice. The name carries the unit on
+    purpose — "observations" elsewhere in this codebase means distinct
+    observation points (see ``coverage_by_concept``). ``covered_concepts`` is
+    the ``coverage_report`` figure (routable AND crawled);
+    ``concepts_with_observations`` is the raw distinct-concept count in the
+    store, which also counts concepts holding rows but not currently routable
+    (the unbound-concept case: data present, nothing dispatchable).
+    """
+    from sqlalchemy import func
+
+    from fd_open_data_mcp.coverage.inventory import coverage_summary
+    from fd_open_data_mcp.models import SemanticObservation
+
+    per_type: dict[str, dict] = {}
+    observed: set[int] = set()
+    total_rows = 0
+    for entity_type, concept_id, rows in (
+        session.query(SemanticObservation.entity_type,
+                      SemanticObservation.concept_id,
+                      func.count().label("stored_rows"))
+        .group_by(SemanticObservation.entity_type, SemanticObservation.concept_id)
+        .all()
+    ):
+        agg = per_type.setdefault(entity_type, {"stored_rows": 0, "concepts": 0})
+        agg["stored_rows"] += int(rows)
+        agg["concepts"] += 1
+        observed.add(concept_id)
+        total_rows += int(rows)
+
+    cov = coverage_summary(session)
+    return {
+        "total_concepts": cov["total_concepts"],
+        "covered_concepts": cov["covered"],
+        "concepts_with_observations": len(observed),
+        "total_stored_rows": total_rows,
+        "gap_concepts": cov["gap"],
+        "stale_concepts": cov["stale"],
+        "per_entity_type": dict(sorted(per_type.items())),
+    }
+
+
 def register_policy_tools(mcp: FastMCP) -> None:
     """Attach the policy tools to the given FastMCP instance."""
 
@@ -309,30 +364,47 @@ def register_policy_tools(mcp: FastMCP) -> None:
     def data_stats(
         concept_id: int | None = None,
         entity_type: str | None = None,
+        detail: bool = False,
     ) -> dict:
-        """Per-concept observation coverage + per-store data census.
+        """Observation coverage: a fast aggregate summary, or per-concept detail.
 
-        Answers "how much data do we have and how fresh is it": per concept —
-        row count, latest observation date, distinct sources, most recent
-        fetch (local master table); plus a ``stores`` section from the latest
-        data census (local master exact + each shard's catalog-based
-        estimate, chunk count, data time-range end). Read-only: census rows
-        are READ, never collected (refresh via the panel action or the
-        ``census`` CLI). The same data powers the panel's ``/panel/data`` page.
+        Default (no arguments): an aggregate summary — ``total_concepts``
+        (catalog size), ``covered_concepts`` (routable and crawled, the same
+        figure ``coverage_report`` reports), ``concepts_with_observations``
+        (raw distinct concepts holding rows), ``total_stored_rows``,
+        ``gap_concepts`` / ``stale_concepts``, and a per-entity-type rollup —
+        plus a ``stores`` section from the latest data census (local master
+        exact + each shard's catalog-based estimate, chunk count, data
+        time-range end). ``total_stored_rows`` counts stored ROWS: sources
+        coexist per point, so two sources on one point count twice; the
+        per-concept listing below counts distinct observation points instead.
+
+        The per-concept listing (point count, latest date, distinct sources,
+        most recent fetch) is returned only when narrowed — pass ``concept_id``
+        or ``entity_type`` for a filtered listing, or ``detail=True`` for the
+        unfiltered one. That listing sweeps the observations table and is
+        deliberately not the default.
+
+        Read-only: census rows are READ, never collected (refresh via the panel
+        action or the ``census`` CLI). The same data powers the panel's
+        ``/panel/data`` page.
 
         Args:
             concept_id: Restrict the per-concept listing to one concept.
             entity_type: Restrict the per-concept listing to one entity type.
+            detail: Return the full per-concept listing even without filters.
         """
         from fd_open_data_mcp.visibility.coverage import coverage_by_concept
         from fd_open_data_mcp.visibility.census import latest_census
 
         s = _session()
         try:
-            return {
-                "concepts": coverage_by_concept(s, concept_id=concept_id,
-                                                entity_type=entity_type),
-                "stores": latest_census(s),
-            }
+            if concept_id is not None or entity_type is not None or detail:
+                return {
+                    "concepts": coverage_by_concept(s, concept_id=concept_id,
+                                                    entity_type=entity_type),
+                    "stores": latest_census(s),
+                }
+            return {**_observation_summary(s), "stores": latest_census(s)}
         finally:
             s.close()
