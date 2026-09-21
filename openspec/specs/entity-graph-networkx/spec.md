@@ -1,7 +1,7 @@
 # entity-graph-networkx Specification
 
 ## Purpose
-TBD - created by archiving change networkx-graph-search. Update Purpose after archive.
+Expose the entity relationship graph for traversal and analysis: entities and their relationships are loaded into an in-memory NetworkX graph, so callers can walk neighbourhoods (BFS/DFS), find shortest paths, extract subgraphs, and read connectivity statistics through one MCP tool.
 ## Requirements
 ### Requirement: Graph manager with NetworkX
 The system SHALL provide a graph manager that uses NetworkX to load entities and relationships from the database and perform graph operations.

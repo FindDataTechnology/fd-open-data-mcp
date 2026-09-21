@@ -1,7 +1,7 @@
 # wbgapi-datasource Specification
 
 ## Purpose
-TBD - created by archiving change broaden-crawl-scope. Update Purpose after archive.
+Let the crawl executor actually reach the World Bank's WDI API: an import-time-registered adapter builds the {economy, indicator, date} params run_wbgapi expects instead of the legacy {symbol, date} fallback it rejects, with third-party imports deferred to call time so the adapters package still loads where wbgapi is not installed.
 ## Requirements
 ### Requirement: wbgapi adapter registered at adapters import
 

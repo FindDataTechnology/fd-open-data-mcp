@@ -1,7 +1,7 @@
 # database-adapter Specification
 
 ## Purpose
-TBD - created by archiving change sqlite-compatibility-for-sync. Update Purpose after archive.
+Let one codebase run against both PostgreSQL in production and SQLite locally or in tests: the adapter, chosen automatically from the database URL scheme, hides dialect differences — JSON column types, schema DDL, and batch upsert syntax — behind a single interface, so calling code stays database-agnostic.
 ## Requirements
 ### Requirement: Database adapter abstraction layer
 

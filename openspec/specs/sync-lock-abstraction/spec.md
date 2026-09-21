@@ -1,7 +1,7 @@
 # sync-lock-abstraction Specification
 
 ## Purpose
-TBD - created by archiving change sqlite-compatibility-for-sync. Update Purpose after archive.
+Keep concurrent entity syncs from corrupting each other on either database backend: one lock interface selects PostgreSQL advisory locks or file locks from the database type, with a configurable timeout and lock directory, so callers never need to know which mechanism is underneath.
 ## Requirements
 ### Requirement: Lock abstraction layer
 The system SHALL provide a lock abstraction layer that automatically selects the appropriate locking mechanism based on the database type.

@@ -1,7 +1,7 @@
 # entity-semantic-search Specification
 
 ## Purpose
-TBD - created by archiving change networkx-graph-search. Update Purpose after archive.
+Make entities and concepts findable by meaning rather than by exact code: sentence-transformer embeddings are generated, cached in memory, and compared by cosine similarity, so a natural-language query returns the closest entities and concepts — searched together when the caller does not narrow the type.
 ## Requirements
 ### Requirement: Entity embedding generation
 The system SHALL generate vector embeddings for all entities using a sentence transformer model.
