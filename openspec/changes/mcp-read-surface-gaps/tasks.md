@@ -13,16 +13,16 @@
 
 ## 3. read_series tool
 
-- [ ] 3.1 Add the `read_series` tool: cache-only range read (`read_cache_range`) + `check_applicability` + window validation (start ≤ end, bounded max span), returning date/value/unit/source rows plus an explicit coverage note on empty windows. No upstream dispatch anywhere in its path. Verify: a covered pair returns every stored point in the window; an uncovered pair returns an empty series with the note; an inverted window returns a validation error; a type-mismatched pair raises the applicability error.
-- [ ] 3.2 Unit tests for the tool wrapper (validation, applicability, cache-only behavior with the dispatch layer mocked to fail loudly if called).
+- [x] 3.1 Add the `read_series` tool: cache-only range read (`read_cache_range`) + `check_applicability` + window validation (start ≤ end, bounded max span), returning date/value/unit/source rows plus an explicit coverage note on empty windows. No upstream dispatch anywhere in its path. Verify: a covered pair returns every stored point in the window; an uncovered pair returns an empty series with the note; an inverted window returns a validation error; a type-mismatched pair raises the applicability error.
+- [x] 3.2 Unit tests for the tool wrapper (validation, applicability, cache-only behavior with the dispatch layer mocked to fail loudly if called).
 
 ## 4. data_stats summary
 
 - [x] 4.1 Change `data_stats` default to the summary shape (design D4: total concepts, covered concepts, total points, per-entity-type rollup, stores census); keep the per-concept listing behind the existing `concept_id`/`entity_type` filters. Verify: unfiltered call against the canonical DB completes < 5 s and agrees with `coverage_report` on shared figures; a `concept_id` call still returns the per-concept row.
-- [ ] 4.2 End-to-end check through the public edge: `data_stats` default over `https://www.finddatatech.cloud/mcp` returns the full body with no transport error (the previous unfiltered call reset the stream).
+- [x] 4.2 End-to-end check through the public edge: `data_stats` default over `https://www.finddatatech.cloud/mcp` returns the full body with no transport error (the previous unfiltered call reset the stream).
 
 ## 5. Verify + ship
 
 - [x] 5.1 Full verification against a dev database (or read-only canonical connection): all new tool scenarios from the three spec files exercised once each. Verify: each scenario's WHEN/THEN observed directly.
-- [ ] 5.2 Build and roll the image via the established path (Jenkins/Gitee → Harbor → k3s rollout; migrate-schema gate is a no-op). Verify: pod Ready; post-rollout spot checks — `list_concepts` paging total = 2,105, off-peak cached read, `data_stats` default < 5 s through the public endpoint.
-- [ ] 5.3 Record the Q1 diagnosis outcome in this change's design.md (fixed here, or filed as follow-up). Verify: design.md updated with the finding and its disposition.
+- [x] 5.2 Build and roll the image via the established path (Jenkins/Gitee → Harbor → k3s rollout; migrate-schema gate is a no-op). Verify: pod Ready; post-rollout spot checks — `list_concepts` paging total = 2,105, off-peak cached read, `data_stats` default < 5 s through the public endpoint.
+- [x] 5.3 Record the Q1 diagnosis outcome in this change's design.md (fixed here, or filed as follow-up). Verify: design.md updated with the finding and its disposition.
