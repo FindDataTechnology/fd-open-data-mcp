@@ -1,8 +1,4 @@
-# wbgapi-datasource Specification
-
-## Purpose
-Let the crawl executor actually reach the World Bank's WDI API: an import-time-registered adapter builds the {economy, indicator, date} params run_wbgapi expects instead of the legacy {symbol, date} fallback it rejects, with third-party imports deferred to call time so the adapters package still loads where wbgapi is not installed.
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: wbgapi adapter registered at adapters import
 The `fd_open_data_mcp.adapters` package SHALL register a `get_indicator_data` adapter at import time so the scraw `fetch_handler` builds the params `{economy, indicator, date}` (economy <- resolved entity identifier, indicator <- the binding column name = WDI series code, date <- the requested year) instead of the legacy `{symbol, date}` fallback that `run_wbgapi` rejects.
@@ -23,6 +19,9 @@ The `fd_open_data_mcp.adapters` package SHALL register a `get_indicator_data` ad
 - **THEN** no `ModuleNotFoundError` is raised
 - **AND** the `get_indicator_data` adapter is registered (lazy imports defer
   the `wbgapi` dependency to call time)
+
+## ADDED Requirements
+
 ### Requirement: Adapter registration is environment-independent
 The adapter registration SHALL be unconditional: the adapter module SHALL have no top-level third-party imports, with `pandas` and `wbgapi` imported lazily inside the extract methods, so registration succeeds in every environment that imports the adapters package — including the scraw worker image before the `data` extra is installed.
 

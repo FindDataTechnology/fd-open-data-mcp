@@ -1,9 +1,4 @@
-# stats-reporting Specification
-
-## Purpose
-The `data_stats` reporting shape: a fast aggregate summary by default, with the per-concept coverage detail available only on explicit request — so the tool stays usable as the observation volume grows.
-
-## Requirements
+## MODIFIED Requirements
 
 ### Requirement: Fast summary by default
 Calling `data_stats` with no arguments SHALL return an aggregate summary computed without materializing per-concept rows: the catalog size (`total_concepts`), covered concepts (`covered_concepts`), the distinct-concept count holding rows (`concepts_with_observations`), the stored-row total (`total_stored_rows`), gap and stale figures, a per-entity-type rollup, and the store census. The default call SHALL complete in seconds at the current production volume (~6.3M stored rows, ~2.1k concepts).
@@ -15,12 +10,16 @@ Calling `data_stats` with no arguments SHALL return an aggregate summary compute
 #### Scenario: Summary totals are consistent with coverage_report
 - **WHEN** both `data_stats` (summary) and `coverage_report` are called against an unchanged database
 - **THEN** their shared figures (total concepts, covered concepts) agree
+
+## ADDED Requirements
+
 ### Requirement: Summary figures come from the coverage aggregation
 `total_concepts` and `covered_concepts` SHALL be read from the same coverage aggregation that `coverage_report` reports, not counted by a second, independent path, so the two tools cannot drift apart.
 
 #### Scenario: Figures track the aggregation across a state change
 - **WHEN** a concept gains its first stored observation and becomes covered
 - **THEN** the next summary call reports the higher `covered_concepts`, equal to what `coverage_report` reports for the same database
+
 ### Requirement: Stored-row count is named for its unit
 `total_stored_rows` SHALL count stored rows — multi-source rows for one observation point count separately — and its name SHALL carry that unit, because "observations" elsewhere in the tool surface means distinct observation points.
 
@@ -28,19 +27,3 @@ Calling `data_stats` with no arguments SHALL return an aggregate summary compute
 - **WHEN** two sources hold a row for the same observation point of a concept
 - **THEN** `total_stored_rows` counts both rows
 - **AND** the per-concept listing counts that point once, with its distinct-source count of two
-### Requirement: Per-concept detail on explicit request
-The per-concept coverage listing SHALL be returned only when narrowed — via the existing `concept_id` filter, an `entity_type` filter, or an explicit detail flag with pagination — never as part of the unfiltered default response.
-
-#### Scenario: Single-concept detail
-- **WHEN** `data_stats` is called with a `concept_id`
-- **THEN** the per-concept coverage row (point count, latest date, distinct sources, last fetch) is returned
-
-#### Scenario: Unfiltered response stays small
-- **WHEN** `data_stats` is called with no arguments
-- **THEN** the response does not contain a per-concept array sized by the catalog
-### Requirement: Response streams survive the public edge
-The unfiltered summary response SHALL be small enough to transfer through the public HTTPS edge without the stream being reset (the previous unfiltered response broke HTTP/2 transfer at ~16 s / large body).
-
-#### Scenario: Default call succeeds end to end through /mcp
-- **WHEN** a client calls `data_stats` (no arguments) through the public `/mcp` endpoint
-- **THEN** the complete response body arrives without a transport error
