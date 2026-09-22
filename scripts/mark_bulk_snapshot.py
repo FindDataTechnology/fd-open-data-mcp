@@ -26,48 +26,7 @@ from __future__ import annotations
 
 import sys
 
-from fd_open_data_mcp.db import get_database
-from fd_open_data_mcp.models import Function, Source
-
-SNAPSHOT_COMMANDS = [
-    "stock_zcfz_em",
-    "stock_lrb_em",
-    "stock_yjbb_em",
-    "stock_fhps_em",
-    "fund_open_fund_daily_em",
-    "fund_open_fund_rank_em",
-    "fund_rating_all",
-    "fund_manager_em",
-]
-
-
-def main() -> int:
-    args = sys.argv[1:]
-    dry = "--dry-run" in args
-    session = get_database().get_session()
-    try:
-        marked = skipped = 0
-        q = (session.query(Function)
-             .join(Source, Function.source_id == Source.id)
-             .filter(Function.command.in_(SNAPSHOT_COMMANDS),
-                     Source.name == "akshare"))
-        for fn in q.all():
-            if fn.bulk_snapshot:
-                skipped += 1
-                continue
-            print(f"mark {fn.command} (function {fn.id}) bulk_snapshot=True"
-                  f"{'  [dry-run]' if dry else ''}")
-            if not dry:
-                fn.bulk_snapshot = True
-            marked += 1
-        if not dry:
-            session.commit()
-        print(f"marked={marked} already-flagged={skipped} "
-              f"(commands without a registry row are NOT created here — seed "
-              f"bindings separately)")
-        return 0
-    finally:
-        session.close()
+from fd_open_data_mcp.scripts.mark_bulk_snapshot import main
 
 
 if __name__ == "__main__":
