@@ -1,8 +1,9 @@
 """Mark bulk_snapshot functions in the registry (task 6.4,
 fix-silent-zero-yield-crawls).
 
-Sets functions.bulk_snapshot = True for the cross-section endpoints verified
-reachable from the crawl cluster (single calls returning 3,653–23,897 rows):
+Sets functions.bulk_snapshot = True for cross-section endpoints verified
+reachable from the crawl cluster. A snapshot is identified by its full
+cross-section response shape, not by a fixed maximum row count:
 
     stock_zcfz_em              datacenter.eastmoney.com   5,166 rows
     stock_lrb_em               datacenter.eastmoney.com   5,236 rows
@@ -11,6 +12,7 @@ reachable from the crawl cluster (single calls returning 3,653–23,897 rows):
     fund_open_fund_daily_em    fund.eastmoney.com        23,897 rows
     fund_open_fund_rank_em     fund.eastmoney.com        20,176 rows
     fund_rating_all            fund.eastmoney.com        18,070 rows
+    fund_manager_em            fund.eastmoney.com        ~35,000 rows
 
 With the flag set, the planner collapses a concept bound to one of these to a
 single cell per date (snapshot-first, design D6) instead of one cell per
@@ -35,6 +37,7 @@ SNAPSHOT_COMMANDS = [
     "fund_open_fund_daily_em",
     "fund_open_fund_rank_em",
     "fund_rating_all",
+    "fund_manager_em",
 ]
 
 

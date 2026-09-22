@@ -18,11 +18,11 @@ from fd_open_data_mcp.crawl.planner import plan_crawl
 from fd_open_data_mcp.models import Concept, EntitySourceIdentifier, Function
 
 
-def _register(session) -> tuple[int, str]:
+def _register(session, command: str = "get_hist") -> tuple[int, str]:
     register_datasource(DatasourceManifest(
         name="test-src", label="Test Src",
         functions=[FunctionSpec(
-            command="get_hist", frequency="daily",
+            command=command, frequency="daily",
             parameters=[],
             columns=[ColumnSpec(name="close", type="float", frequency="daily")],
         )],
@@ -79,6 +79,20 @@ def test_bulk_snapshot_collapses_and_flags(session):
     assert ps.bulk_snapshot is True
     # one cell per date regardless of entity count
     assert plan.plan_cells == 3
+
+
+def test_fund_manager_snapshot_collapses_full_scope_to_ten_cells(session):
+    cid, _ = _register(session, command="fund_manager_em")
+    fn = session.query(Function).filter_by(command="fund_manager_em").one()
+    fn.bulk_snapshot = True
+    session.commit()
+    plan = plan_crawl(
+        session, [cid], EntityScope(entity_type="stock"),
+        DateRange(start="2026-09-10", end="2026-09-19", frequency="daily"),
+    )
+    ps = plan.wanted_concepts[0].ranked_sources[0]
+    assert ps.bulk_snapshot is True
+    assert plan.plan_cells == 10
 
 
 def test_wider_explicit_scope_keeps_fanout(session):
