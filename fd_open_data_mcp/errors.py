@@ -13,18 +13,3 @@ class FetchError(Exception):
         if self.source and self.command:
             return f"{self.source}.{self.command}: {super().__str__()}"
         return super().__str__()
-
-
-class SourceNotFoundError(FetchError):
-    """Raised when the specified data source is not registered."""
-    pass
-
-
-class CommandNotFoundError(FetchError):
-    """Raised when the specified command doesn't exist in the source."""
-    pass
-
-
-class RateLimitError(FetchError):
-    """Raised when rate limiting is encountered."""
-    pass

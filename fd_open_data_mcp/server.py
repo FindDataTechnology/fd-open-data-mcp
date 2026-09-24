@@ -1060,21 +1060,6 @@ def enumerate_wbgapi_indicators(database: str | None = None) -> dict:
 
 
 @mcp.tool
-def register_datasource(path: str) -> dict:
-    """Load a manifest (YAML/JSON/Python) via fd-open-data-protocol and register it."""
-    from fd_open_data_protocol.loader import load_catalog
-
-    from fd_open_data_mcp.catalog.register import register_datasource as _register
-
-    manifest = load_catalog(path)
-    s = _session()
-    try:
-        return _register(manifest, s)
-    finally:
-        s.close()
-
-
-@mcp.tool
 def register_discovered() -> dict:
     """Auto-discover + register manifests from entry points + a datasources/ dir."""
     from fd_open_data_mcp.catalog.register import discover_datasources
