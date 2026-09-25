@@ -21,8 +21,11 @@ from sqlalchemy import func
 
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.models import (
-    BanRule, Cluster, Concept, CrawlPolicy, FetchLog, PolicyRun, Proxy,
-    SourceProxyHealth, SourceRateLimit,
+    BanRule, Cluster, Concept, CrawlPolicy, CrawlRun, CrawlSite, CrawlSource,
+    FetchLog, PendingRun, PolicyRun, Proxy, SourceProxyHealth, SourceRateLimit,
+)
+from fd_open_data_mcp.platform_tools import (
+    cancel_pending_run, cancel_platform_run, trigger_platform_run,
 )
 from fd_open_data_mcp.visibility import snapshot as _snapshot
 
@@ -645,7 +648,11 @@ def create_app() -> FastAPI:
             runs_rows = q.order_by(PolicyRun.started_at.desc()).limit(200).all()
             policies = {p.id: p.name for p in s.query(CrawlPolicy).all()}
             rendered = [_run_row_dict(s, r, policies) for r in runs_rows]
-            ctx = {"runs": rendered, "status": status, "policies": policies}
+            # crawl-platform: platform runs (crawl_runs) shown side by side
+            # with policy_runs — the policy columns above stay untouched.
+            platform = _snapshot.platform_runs(s, limit=50)
+            ctx = {"runs": rendered, "status": status, "policies": policies,
+                   "platform_runs": platform}
             # status chips / policy filter swap just the results region
             if request.headers.get("hx-request") == "true":
                 return templates.TemplateResponse(
@@ -724,6 +731,196 @@ def create_app() -> FastAPI:
         finally:
             s.close()
         return RedirectResponse("/panel", status_code=303)
+
+    # ── platform sources & control (crawl-platform 4.1/4.2) ──────────────────
+    # Same tables as the platform_* MCP tools (crawl_sources / crawl_runs /
+    # pending_runs); the write operations are the shared functions from
+    # platform_tools so the two entrances enforce identical guardrails.
+    PLATFORM_HEALTH_FILTERS = ("stalled", "lit", "unlit")
+
+    def _source_row_response(request: Request, s, source: str):
+        row = next((r for r in _snapshot.platform_sources(s)
+                    if r["source"] == source), None)
+        if row is None:
+            return None
+        return templates.TemplateResponse(
+            request, "_source_row.html", {"s": row})
+
+    def _platform_run_row_response(request: Request, s, run_id: int):
+        row = next((r for r in _snapshot.platform_runs(s, limit=500)
+                    if r["id"] == run_id), None)
+        if row is None:
+            return None
+        return templates.TemplateResponse(
+            request, "_platform_run_row.html", {"r": row})
+
+    def _pending_row_response(request: Request, s, pending_id: int):
+        p = s.get(PendingRun, pending_id)
+        if p is None:
+            return None
+        return templates.TemplateResponse(
+            request, "_pending_row.html", {"p": p.toDict()})
+
+    @app.get("/panel/sources", response_class=HTMLResponse)
+    def platform_sources_page(request: Request, site: str = "",
+                              health: str = ""):
+        """Platform source inventory: every crawl_sources row with site,
+        schedule (未点亮 when NULL), enabled, latest crawl_runs fact, active
+        pending count, trigger button. Filters: site / health state."""
+        s = _session()
+        try:
+            rows = _snapshot.platform_sources(s, site=site or None)
+            if health == "stalled":
+                rows = [r for r in rows if r["stalled"]]
+            elif health == "lit":
+                rows = [r for r in rows if r["schedule"]]
+            elif health == "unlit":
+                rows = [r for r in rows if not r["schedule"]]
+            sites = [r[0] for r in s.query(CrawlSite.id).order_by(CrawlSite.id).all()]
+            ctx = {"sources": rows, "site": site, "health": health,
+                   "sites": sites}
+            # health chips / site filter swap just the results region
+            if request.headers.get("hx-request") == "true":
+                return templates.TemplateResponse(
+                    request, "partial_sources_results.html", ctx)
+            return templates.TemplateResponse(request, "sources.html", ctx)
+        finally:
+            s.close()
+
+    @app.get("/panel/sources/{source}", response_class=HTMLResponse)
+    def platform_source_detail(request: Request, source: str):
+        s = _session()
+        try:
+            src = s.get(CrawlSource, source)
+            if src is None:
+                raise HTTPException(404, f"source {source} not found")
+            row = next((r for r in _snapshot.platform_sources(s)
+                        if r["source"] == source), None)
+            runs = _snapshot.platform_runs(s, source=source, limit=20)
+            pending = [
+                p.toDict() for p in (
+                    s.query(PendingRun)
+                    .filter(PendingRun.source == source,
+                            PendingRun.status.in_(("pending", "claimed")))
+                    .order_by(PendingRun.id.desc()).all())
+            ]
+            return templates.TemplateResponse(
+                request, "source_detail.html",
+                {"src": src.toDict(), "health": row,
+                 "runs": runs, "pending": pending})
+        finally:
+            s.close()
+
+    @app.post("/panel/sources/{source}/trigger")
+    def platform_source_trigger(source: str, request: Request):
+        """Queue an immediate run: insert pending_runs (requested_by='panel').
+        Validation is the shared platform_tools.trigger_platform_run —
+        unregistered / disabled / single-flight refusals carry clear text."""
+        hx = request.headers.get("hx-request") == "true"
+        s = _session()
+        try:
+            out = trigger_platform_run(s, source, requested_by="panel")
+            if out["status"] == "triggered":
+                msg = (f"{source} 已触发 queued: pending #{out['pending_id']} "
+                       f"(site {out.get('site') or '—'})")
+                if hx:
+                    return _toast(_source_row_response(request, s, source), msg)
+                return RedirectResponse(f"/panel/sources/{source}",
+                                        status_code=303)
+            msg = f"{source} 未触发 not triggered: {out['reason']}"
+            if out["status"] == "not_found":
+                if hx:
+                    return _toast(HTMLResponse(""), msg, "err")
+                raise HTTPException(404, out["reason"])
+            # refused (disabled / single-flight) or a rejected insert
+            if hx:
+                return _toast(_source_row_response(request, s, source) or
+                              HTMLResponse(""), msg, "err")
+            if out["status"] == "error":
+                raise HTTPException(400, out["reason"])
+            raise HTTPException(409, out["reason"])
+        finally:
+            s.close()
+
+    @app.post("/panel/runs/platform/{run_id}/cancel")
+    def platform_run_cancel(run_id: int, request: Request):
+        """Request cancellation of a RUNNING platform run: CAS-set
+        cancel_requested; the runner closes its own row as cancelled."""
+        hx = request.headers.get("hx-request") == "true"
+        s = _session()
+        try:
+            out = cancel_platform_run(s, run_id)
+            if hx:
+                if out["status"] == "cancel_requested":
+                    return _toast(
+                        _platform_run_row_response(request, s, run_id),
+                        f"平台运行 Platform run #{run_id} 已请求取消 cancel "
+                        f"requested — 运行器将在下个检查点退出 the runner "
+                        f"exits at its next checkpoint")
+                if out["status"] == "not_found":
+                    return _toast(HTMLResponse(""),
+                                  f"platform run {run_id} not found", "err")
+                return _toast(
+                    _platform_run_row_response(request, s, run_id)
+                    or HTMLResponse(""),
+                    f"运行 Run #{run_id} 已结束，未取消 already finished "
+                    f"({out.get('current_status')})", "err")
+        finally:
+            s.close()
+        if out["status"] == "cancel_requested":
+            return RedirectResponse("/panel/runs", status_code=303)
+        if out["status"] == "not_found":
+            raise HTTPException(404, f"platform run {run_id} not found")
+        raise HTTPException(409, f"platform run {run_id} already finished "
+                                 f"({out.get('current_status')}); nothing cancelled")
+
+    @app.post("/panel/pending/{pending_id}/cancel")
+    def platform_pending_cancel(pending_id: int, request: Request):
+        """Cancel a pending/claimed pending_runs row (CAS; terminal rows 409)."""
+        hx = request.headers.get("hx-request") == "true"
+        s = _session()
+        try:
+            back = None
+            p = s.get(PendingRun, pending_id)
+            if p is not None:
+                back = f"/panel/sources/{p.source}"
+            out = cancel_pending_run(s, pending_id)
+            if hx:
+                if out["status"] == "cancelled":
+                    return _toast(
+                        _pending_row_response(request, s, pending_id),
+                        f"待运行务 Pending #{pending_id} 已取消 cancelled")
+                if out["status"] == "not_found":
+                    return _toast(HTMLResponse(""),
+                                  f"pending run {pending_id} not found", "err")
+                return _toast(
+                    _pending_row_response(request, s, pending_id)
+                    or HTMLResponse(""),
+                    f"待运行务 Pending #{pending_id} 已是终态，未取消 already "
+                    f"{out.get('current_status')}", "err")
+        finally:
+            s.close()
+        if out["status"] == "cancelled":
+            return RedirectResponse(back or "/panel/sources", status_code=303)
+        if out["status"] == "not_found":
+            raise HTTPException(404, f"pending run {pending_id} not found")
+        raise HTTPException(409, f"pending run {pending_id} already "
+                                 f"{out.get('current_status')}; nothing cancelled")
+
+    @app.get("/panel/partials/platform", response_class=HTMLResponse)
+    def partial_platform(request: Request):
+        """Polled platform-source health roll-up on the cockpit (15s, degrades
+        independently like every home partial)."""
+        try:
+            s = _session()
+            try:
+                h = _snapshot.platform_health(s)
+            finally:
+                s.close()
+            return templates.TemplateResponse(
+                request, "partial_platform.html", {"h": h})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
 
     # ── editor ─────────────────────────────────────────────────────────────
     def _editor_context(s, policy: CrawlPolicy | None):

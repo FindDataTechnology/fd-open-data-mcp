@@ -33,6 +33,13 @@
   </section>
 
   <section class="card">
+    <h3>平台源健康 <span class="en">Platform sources</span></h3>
+    <div hx-get="/panel/partials/platform" hx-trigger="load, every {{ poll_seconds }}s">
+      <p class="muted">加载中 loading…</p>
+    </div>
+  </section>
+
+  <section class="card">
     <h3>运行中的爬取 <span class="en">Running runs</span></h3>
     <div hx-get="/panel/partials/running" hx-trigger="load, every {{ poll_seconds }}s">
       <p class="muted">加载中 loading…</p>

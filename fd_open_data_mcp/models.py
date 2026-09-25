@@ -29,7 +29,9 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
+    CheckConstraint,
     Column,
     DateTime,
     Float,
@@ -37,6 +39,7 @@ from sqlalchemy import (
     Index,
     Integer,
     JSON,
+    PrimaryKeyConstraint,
     String,
     Text,
     UniqueConstraint,
@@ -50,6 +53,11 @@ Base = declarative_base()
 # shared alias degrades to generic JSON there. One instance reused across
 # columns is fine — Column copies the type on attach.
 JSONB = _PG_JSONB().with_variant(JSON(), "sqlite")
+
+# Postgres platform tables key on BIGSERIAL/bigint; SQLite only autoincrements
+# a column declared INTEGER PRIMARY KEY, so the shared alias degrades there
+# (same with_variant trick as JSONB above).
+Bigint = BigInteger().with_variant(Integer(), "sqlite")
 
 
 def _now() -> datetime:
@@ -905,4 +913,153 @@ class ConceptEmbedding(Base):
         return {
             "id": self.id, "concept_id": self.concept_id,
             "model": self.model, "created_at": self.created_at,
+        }
+
+
+# --- crawl platform control tables (crawl-platform) ---------------------------
+# Central control-plane tables shared with the spider platform dispatcher
+# (same database/schema as crawl_policies). The dispatcher mirrors every
+# spiders/*/manifest.yaml into crawl_sources; operators/agents trigger work by
+# inserting pending_runs and ask for teardown via crawl_runs.cancel_requested.
+# Column names match the deployed DDL (change crawl-platform task 2.3) exactly;
+# the tables already exist in the canonical PG, the models exist so tests
+# (Base.metadata.create_all on sqlite) and the panel/MCP read+write paths share
+# one schema definition. Timestamps are TIMESTAMPTZ in PG; readers treat naive
+# values as UTC (the same writer contract snapshot._as_aware_utc documents).
+
+PLATFORM_PENDING_STATUSES = ("pending", "claimed", "done", "failed", "cancelled")
+# crawl_runs.status values (runners write these; cancel_requested is a flag)
+PLATFORM_RUN_STATUSES = ("running", "success", "failed", "cancelled", "skipped")
+
+
+class CrawlSite(Base):
+    """A member site of the crawl platform federation (tencent, nbs-workers,
+    law, ...). Sources reference a site; triggers fail loudly when the site is
+    not registered here (FK)."""
+    __tablename__ = "crawl_sites"
+
+    id = Column(Text, primary_key=True)               # e.g. "tencent"
+    description = Column(Text, nullable=True)
+    kind = Column(Text, nullable=True)
+    enabled = Column(Boolean, nullable=True)
+    last_seen_at = Column(DateTime(timezone=True), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "description": self.description, "kind": self.kind,
+            "enabled": self.enabled,
+            "last_seen_at": self.last_seen_at.isoformat() if self.last_seen_at else None,
+        }
+
+
+class CrawlSource(Base):
+    """One spider of the platform, mirrored from the content repo's
+    spiders/*/manifest.yaml by the dispatcher. ``schedule`` NULL means the
+    source is registered but not lit up (未点亮) — no automatic runs."""
+    __tablename__ = "crawl_sources"
+
+    source = Column(Text, primary_key=True)
+    site = Column(Text, ForeignKey("crawl_sites.id"), nullable=True, index=True)
+    schedule = Column(Text, nullable=True)            # NULL = 未点亮
+    enabled = Column(Boolean, nullable=False, default=True)
+    last_commit = Column(Text, nullable=True)
+    updated_at = Column(DateTime(timezone=True), default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "source": self.source, "site": self.site, "schedule": self.schedule,
+            "enabled": self.enabled, "last_commit": self.last_commit,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class CrawlRun(Base):
+    """A platform run reported to crawl_runs (all sites). ``cancel_requested``
+    is the cooperative-cancel checkpoint flag: control planes only SET it; the
+    runner observes it and closes its own row as cancelled."""
+    __tablename__ = "crawl_runs"
+
+    id = Column(Bigint, primary_key=True, autoincrement=True)
+    source = Column(Text, nullable=False, index=True)
+    kind = Column(Text, nullable=False, default="runtime", server_default="runtime")
+    status = Column(Text, nullable=False, index=True)  # running|success|failed|cancelled|skipped
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+    rows_written = Column(Integer, nullable=True)
+    error_head = Column(Text, nullable=True)
+    commit_sha = Column(Text, nullable=True)
+    image_tag = Column(Text, nullable=True)
+    cancel_requested = Column(DateTime(timezone=True), nullable=True)
+    pending_run_id = Column(Bigint, nullable=True)    # trigger lineage, no hard FK
+    created_at = Column(DateTime(timezone=True), default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "source": self.source, "kind": self.kind,
+            "status": self.status,
+            "started_at": self.started_at.isoformat() if self.started_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+            "rows_written": self.rows_written, "error_head": self.error_head,
+            "commit_sha": self.commit_sha, "image_tag": self.image_tag,
+            "cancel_requested": (self.cancel_requested.isoformat()
+                                 if self.cancel_requested else None),
+            "pending_run_id": self.pending_run_id,
+        }
+
+
+class CrawlItem(Base):
+    """Per-run payload rows (crawl_items): item batch jsonb keyed (run, idx)."""
+    __tablename__ = "crawl_items"
+    __table_args__ = (
+        PrimaryKeyConstraint("run_id", "idx", name="pk_crawl_items"),
+    )
+
+    run_id = Column(Bigint, nullable=False)
+    idx = Column(Integer, nullable=False)
+    payload = Column(JSONB, nullable=False)
+
+    def toDict(self) -> dict:
+        return {"run_id": self.run_id, "idx": self.idx, "payload": self.payload}
+
+
+class PendingRun(Base):
+    """A requested-but-not-yet-executed platform run. Control planes (panel /
+    MCP tools) INSERT; the site dispatcher atomically claims (status pending ->
+    claimed + lease), executes, and writes back the terminal status."""
+    __tablename__ = "pending_runs"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('pending','claimed','done','failed','cancelled')",
+            name="ck_pending_runs_status"),
+        Index("idx_pending_runs_site_status", "site", "status"),
+    )
+
+    id = Column(Bigint, primary_key=True, autoincrement=True)
+    source = Column(Text, nullable=False, index=True)
+    site = Column(Text, ForeignKey("crawl_sites.id"), nullable=True, index=True)
+    params = Column(JSONB, nullable=True)             # param overrides for the run
+    requested_by = Column(Text, nullable=False, default="panel")
+    status = Column(Text, nullable=False, default="pending", index=True)
+    claimed_by = Column(Text, nullable=True)
+    claimed_at = Column(DateTime(timezone=True), nullable=True)
+    lease_until = Column(DateTime(timezone=True), nullable=True)
+    attempts = Column(Integer, nullable=False, default=0)
+    max_attempts = Column(Integer, nullable=False, default=3)
+    run_id = Column(Bigint, nullable=True)            # -> crawl_runs.id once started
+    error_head = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_now)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "source": self.source, "site": self.site,
+            "params": self.params, "requested_by": self.requested_by,
+            "status": self.status, "claimed_by": self.claimed_by,
+            "claimed_at": self.claimed_at.isoformat() if self.claimed_at else None,
+            "lease_until": self.lease_until.isoformat() if self.lease_until else None,
+            "attempts": self.attempts, "max_attempts": self.max_attempts,
+            "run_id": self.run_id, "error_head": self.error_head,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
         }

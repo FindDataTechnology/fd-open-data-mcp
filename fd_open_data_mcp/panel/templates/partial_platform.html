@@ -1,0 +1,11 @@
+{% from "_macros.html" import th %}
+<table>
+  <tr>{{ th('源总数', 'Sources') }}{{ th('已点亮', 'Lit') }}{{ th('停滞', 'Stalled') }}{{ th('24h 成功', '24h ok') }}{{ th('24h 失败', '24h failed') }}</tr>
+  <tr>
+    <td><a href="/panel/sources">{{ h.total }}</a></td>
+    <td><a href="/panel/sources?health=lit">{{ h.lit }}</a></td>
+    <td>{% if h.stalled %}<a class="warn-text" href="/panel/sources?health=stalled">{{ h.stalled }}</a>{% else %}<span class="muted">0</span>{% endif %}</td>
+    <td>{{ h.success_24h }}</td>
+    <td>{{ h.failed_24h }}</td>
+  </tr>
+</table>

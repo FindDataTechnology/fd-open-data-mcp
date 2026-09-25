@@ -1,0 +1,54 @@
+{% extends "base.html" %}
+{% from "_macros.html" import th %}
+{% block title %}源 {{ src.source }} · 爬虫控制台{% endblock %}
+{% block content %}
+<h2>源 <span class="en">Source</span> — {{ src.source }}</h2>
+
+{% if health and health.stalled %}
+<div class="banner warn">
+  ⚠ 停滞提示 Stalled: 该源已点亮（schedule={{ src.schedule or '—' }}）但超过 7 天没有任何 crawl_runs 记录
+  lit but no run recorded in >7 days — 停滞是提示，不是错误 a hint, not an error.
+</div>
+{% endif %}
+
+<div class="table-wrap">
+<table>
+  <tr>{{ th('站点', 'Site') }}{{ th('调度', 'Schedule') }}{{ th('启用', 'Enabled') }}{{ th('最近提交', 'Last commit') }}{{ th('清单更新', 'Manifest updated') }}</tr>
+  <tr>
+    <td class="muted">{{ src.site or '—' }}</td>
+    <td>{% if src.schedule %}<code>{{ src.schedule }}</code>{% else %}<span class="muted">未点亮 not lit（无自动运行 no automatic runs）</span>{% endif %}</td>
+    <td><span class="badge {{ 'success' if src.enabled else 'refused' }}">{{ '启用 ON' if src.enabled else '停用 OFF' }}</span></td>
+    <td class="muted">{{ src.last_commit or '—' }}</td>
+    <td class="muted">{{ src.updated_at or '—' }}</td>
+  </tr>
+</table>
+</div>
+<p>
+  <button type="button" class="btn btn-primary"
+          hx-post="/panel/sources/{{ src.source }}/trigger"
+          hx-swap="none">立即触发 trigger now</button>
+  <span class="muted">写入 pending_runs（requested_by=panel），由站点 dispatcher 认领执行
+  queues a pending_runs row for the site dispatcher.</span>
+  <noscript><form class="inline-form" method="post" action="/panel/sources/{{ src.source }}/trigger"><button class="btn btn-primary" type="submit">立即触发 trigger now</button></form></noscript>
+</p>
+
+<h3>待运行 <span class="en">Pending</span></h3>
+<div class="table-wrap">
+<table>
+  <tr>{{ th('ID') }}{{ th('源', 'Source') }}{{ th('状态', 'Status') }}{{ th('请求者', 'Requested by') }}{{ th('创建', 'Created') }}<th></th></tr>
+  {% for p in pending %}{% include "_pending_row.html" %}{% else %}
+  <tr><td colspan="6" class="muted">没有待运行务 No pending runs.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<h3>最近 20 次运行 <span class="en">Last 20 runs</span></h3>
+<div class="table-wrap">
+<table>
+  <tr>{{ th('ID') }}{{ th('源', 'Source') }}{{ th('状态', 'Status') }}{{ th('开始', 'Started') }}{{ th('结束', 'Finished') }}{{ th('产出行', 'Rows') }}{{ th('触发行', 'Trigger') }}{{ th('错误', 'Error') }}</tr>
+  {% for r in runs %}{% include "_platform_run_row.html" %}{% else %}
+  <tr><td colspan="8" class="muted">尚无运行记录 No runs recorded yet.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}

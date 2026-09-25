@@ -36,6 +36,12 @@ from fd_open_data_mcp.policy_tools import register_policy_tools
 
 register_policy_tools(mcp)
 
+# Attach the crawl-platform control tools (crawl-platform 4.3): platform source
+# inventory / run history + the same trigger/cancel operations the panel exposes.
+from fd_open_data_mcp.platform_tools import register_platform_tools
+
+register_platform_tools(mcp)
+
 # Attach the crawl-visibility tools (add-crawl-visibility): on-demand
 # `crawl_status` snapshot, shared with the scan/digest watcher entrypoints.
 from fd_open_data_mcp.visibility_tools import register_visibility_tools
@@ -291,6 +297,7 @@ def propose_bindings() -> dict:
 @mcp.tool
 def list_concepts(
     entity_type: str | None = None, concept_family: str | None = None,
+    query: str | None = None,
     limit: int = 500, offset: int = 0,
 ) -> list[dict]:
     """List concepts (Variables) with their concept family; optionally filtered.
@@ -300,9 +307,25 @@ def list_concepts(
     a page comes back shorter than ``limit`` — that enumerates the full catalog
     even when one entity type exceeds the per-call cap.
 
+    The catalog also serves verified entries of the unified indicator registry
+    (world_bank / gta_panel / china_city_panel / fd_open_data mirror sources).
+    Registry rows are appended after the native rows, ordered by
+    (domain, semantic_code); they carry additive ``native_code`` and
+    ``source_db`` fields, so an entry is findable by either identifier.
+    Entries whose semantic_code duplicates a non-deprecated native concept
+    code are deduped (native row wins); deprecated legacy rows never shadow a
+    verified entry. Note: reading the underlying observations of
+    registry-only indicators is NOT available here (a later change forwards
+    those reads via business-mcp).
+
     Args:
         entity_type: restrict to one entity type (country, stock, ...)
+            — registry rows carry no entity type and are excluded by this filter
         concept_family: restrict to one concept family id (GDP, Population, ...)
+            — registry rows carry no family and are excluded by this filter
+        query: optional case-insensitive substring matched against
+            code / name_en / name_zh (and native_code on registry rows);
+            default None = unfiltered
         limit: page size, 1..1000 (default 500)
         offset: rows to skip (default 0)
     """
@@ -312,7 +335,7 @@ def list_concepts(
     try:
         return list_concepts_with_family(
             s, entity_type=entity_type, concept_family=concept_family,
-            limit=limit, offset=offset,
+            query=query, limit=limit, offset=offset,
         )
     finally:
         s.close()

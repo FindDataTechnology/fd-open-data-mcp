@@ -22,13 +22,13 @@ import logging
 from typing import Optional
 
 from croniter import croniter
-from sqlalchemy import func
+from sqlalchemy import and_, func
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
 from fd_open_data_mcp.models import (
-    CrawlPolicy, Cluster, EntitySourceIdentifier, FetchLog, PolicyRun,
-    SourceProxyHealth,
+    CrawlPolicy, CrawlRun, CrawlSite, CrawlSource, PendingRun, Cluster,
+    EntitySourceIdentifier, FetchLog, PolicyRun, SourceProxyHealth,
 )
 from fd_open_data_mcp.visibility import state as _state
 
@@ -568,6 +568,128 @@ def running_runs(session: Session, now: dt.datetime | None = None) -> list[dict]
             "rows_new": run.rows_new,
         })
     return out
+
+
+# --- crawl platform: sources / runs / health (crawl-platform 4.1/4.3) ---------
+# Shared by the panel platform views AND the platform_* MCP tools so the two
+# control-plane entrances always agree (spec crawl-control-plane: same facts,
+# same guardrails). Read-only over crawl_sources / crawl_runs / pending_runs.
+
+# A lit source (schedule non-null) with no crawl_runs record for this many days
+# shows a stall hint — a prompt, not an error (spec: 停滞提示而非按无数据处理).
+PLATFORM_STALLED_DAYS = 7
+
+
+def platform_sources(session: Session, site: str | None = None,
+                     now: dt.datetime | None = None) -> list[dict]:
+    """Every ``crawl_sources`` row joined with its latest ``crawl_runs`` fact.
+
+    Per source: site, schedule (None = 未点亮 not lit), enabled, last run
+    (status/time/rows_written/id), the count of ACTIVE pending_runs (pending |
+    claimed), and a ``stalled`` hint — True only for sources that are expected
+    to run (enabled AND schedule lit) whose last run is absent or older than
+    PLATFORM_STALLED_DAYS. Unlit / disabled sources are shown as such, never
+    stalled: nothing is owed.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    cutoff_naive = (now - dt.timedelta(days=PLATFORM_STALLED_DAYS)).replace(
+        tzinfo=None)  # naive-UTC comparison contract, see stale_runs
+
+    latest = (
+        session.query(
+            CrawlRun.source.label("src"),
+            CrawlRun.id.label("rid"),
+            CrawlRun.status.label("rstatus"),
+            CrawlRun.started_at.label("rstart"),
+            CrawlRun.rows_written.label("rrows"),
+            func.row_number().over(
+                partition_by=CrawlRun.source,
+                order_by=(CrawlRun.started_at.desc().nulls_last(),
+                          CrawlRun.id.desc())).label("rn"),
+        ).subquery()
+    )
+    q = (
+        session.query(
+            CrawlSource, latest.c.rid, latest.c.rstatus, latest.c.rstart,
+            latest.c.rrows)
+        .outerjoin(latest, and_(latest.c.src == CrawlSource.source,
+                                latest.c.rn == 1))
+        .order_by(CrawlSource.source)
+    )
+    if site is not None:
+        q = q.filter(CrawlSource.site == site)
+
+    pending_counts: dict[str, int] = dict(
+        session.query(PendingRun.source, func.count(PendingRun.id))
+        .filter(PendingRun.status.in_(("pending", "claimed")))
+        .group_by(PendingRun.source).all())
+
+    out = []
+    for src, rid, rstatus, rstart, rrows in q.all():
+        last_start = _as_aware_utc(rstart)
+        stalled = bool(
+            src.enabled and src.schedule
+            and (last_start is None
+                 or (now - last_start).total_seconds() > PLATFORM_STALLED_DAYS * 86400))
+        out.append({
+            "source": src.source, "site": src.site,
+            "schedule": src.schedule, "enabled": src.enabled,
+            "last_commit": src.last_commit,
+            "updated_at": _iso(src.updated_at),
+            "last_run_id": rid,
+            "last_run_status": rstatus,
+            "last_run_at": _iso(rstart),
+            "last_run_rows": int(rrows) if rrows is not None else None,
+            "pending": int(pending_counts.get(src.source, 0)),
+            "stalled": stalled,
+        })
+    return out
+
+
+def platform_runs(session: Session, source: str | None = None,
+                  limit: int = 20) -> list[dict]:
+    """Latest ``crawl_runs`` rows with their pending_runs trigger lineage
+    (requested_by) when the run was triggered from the control plane."""
+    q = (
+        session.query(CrawlRun, PendingRun.requested_by, PendingRun.status)
+        .outerjoin(PendingRun, CrawlRun.pending_run_id == PendingRun.id)
+        .order_by(CrawlRun.started_at.desc().nulls_last(), CrawlRun.id.desc())
+    )
+    if source is not None:
+        q = q.filter(CrawlRun.source == source)
+    q = q.limit(limit)
+    out = []
+    for run, requested_by, pending_status in q.all():
+        d = run.toDict()
+        d["pending_requested_by"] = requested_by
+        d["pending_status"] = pending_status
+        out.append(d)
+    return out
+
+
+def platform_health(session: Session, hours: int = 24,
+                    now: dt.datetime | None = None) -> dict:
+    """Cockpit roll-up: total registered sources, lit (schedule non-null),
+    stalled (see ``platform_sources``), and platform-run success/failed counts
+    over the window (finished_at-based, like kpi_snapshot)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    since_naive = (now - dt.timedelta(hours=hours)).replace(tzinfo=None)
+    by_status: dict[str, int] = dict(
+        session.query(CrawlRun.status, func.count(CrawlRun.id))
+        .filter(CrawlRun.finished_at >= since_naive)
+        .group_by(CrawlRun.status).all())
+    sources = session.query(
+        func.count(CrawlSource.source),
+        func.count(CrawlSource.schedule),
+    ).one()
+    total, lit = int(sources[0] or 0), int(sources[1] or 0)
+    stalled = sum(1 for s in platform_sources(session, now=now) if s["stalled"])
+    return {
+        "total": total, "lit": lit, "stalled": stalled,
+        "success_24h": by_status.get("success", 0),
+        "failed_24h": by_status.get("failed", 0),
+        "window_hours": hours,
+    }
 
 
 # --- the composite snapshot --------------------------------------------------

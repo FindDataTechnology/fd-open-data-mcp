@@ -1,0 +1,18 @@
+  <tr>
+    <td><a href="/panel/sources/{{ s.source }}">{{ s.source }}</a>
+      {% if s.stalled %}<span class="warn-text" title="已点亮但超过 7 天无运行记录 lit but no run in >7 days">⚠ 停滞 stalled</span>{% endif %}</td>
+    <td class="muted">{{ s.site or '—' }}</td>
+    <td>{% if s.schedule %}<code>{{ s.schedule }}</code>{% else %}<span class="muted">未点亮 not lit</span>{% endif %}</td>
+    <td><span class="badge {{ 'success' if s.enabled else 'refused' }}">{{ '启用 ON' if s.enabled else '停用 OFF' }}</span></td>
+    <td>{% if s.last_run_status %}<span class="badge {{ s.last_run_status }}">{{ s.last_run_status }}</span>{% else %}<span class="muted">从未运行 never ran</span>{% endif %}</td>
+    <td class="muted">{{ s.last_run_at or '—' }}</td>
+    <td>{{ s.last_run_rows if s.last_run_rows is not none else '—' }}</td>
+    <td>{% if s.pending %}<span class="badge running">{{ s.pending }} 待运行 pending</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td>
+      <button type="button" class="link"
+              title="写入 pending_runs，由站点 dispatcher 认领执行 queues a pending_runs row for the site dispatcher"
+              hx-post="/panel/sources/{{ s.source }}/trigger"
+              hx-target="closest tr" hx-swap="outerHTML">立即触发 trigger</button>
+      <noscript><form class="inline-form" method="post" action="/panel/sources/{{ s.source }}/trigger"><button class="link" type="submit">立即触发 trigger</button></form></noscript>
+    </td>
+  </tr>
