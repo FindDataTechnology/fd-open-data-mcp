@@ -1134,13 +1134,54 @@ class BearerAuthMiddleware:
         return _reject(receive, send)
 
 
+def _panel_app():
+    """The console panel ASGI app, or None when disabled/unavailable.
+
+    SERVE_PANEL=0 opts out (ships the MCP endpoint alone, as before).
+    """
+    if os.environ.get("SERVE_PANEL", "1") == "0":
+        return None
+    try:
+        from fd_open_data_mcp.panel.app import app as panel_app
+    except Exception:  # noqa: BLE001 - panel is optional at runtime
+        return None
+    return panel_app
+
+
+def _http_asgi():
+    """Composite ASGI app: /panel/* -> console panel, everything else -> MCP.
+
+    Both apps carry their own auth (panel gate vs MCP bearer); one uvicorn
+    process serves both, so the console ships with zero extra deployments.
+    """
+    from starlette.middleware import Middleware
+
+    token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
+    if token:
+        mcp_asgi = mcp.http_app(middleware=[Middleware(BearerAuthMiddleware)])
+    else:
+        mcp_asgi = mcp.http_app()
+    panel_asgi = _panel_app()
+    if panel_asgi is None:
+        return mcp_asgi
+
+    async def composite(scope, receive, send):
+        if scope["type"] == "http" and scope["path"].startswith("/panel"):
+            await panel_asgi(scope, receive, send)
+        else:
+            await mcp_asgi(scope, receive, send)
+
+    return composite
+
+
 def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8300) -> None:
     """Run the FastMCP server.
 
     By default uses stdio transport (for local MCP clients launched as a
     subprocess). Pass ``transport="http"`` to serve over Streamable HTTP
     for long-running / remote use; the MCP endpoint is then reachable at
-    ``http://<host>:<port>/mcp``.
+    ``http://<host>:<port>/mcp``; the console panel is served alongside at
+    ``/panel`` unless SERVE_PANEL=0.
 
     When ``MCP_BEARER_TOKEN`` is set, http requests must carry the matching
     bearer token (401 otherwise); without it serving is unchanged.
@@ -1149,16 +1190,9 @@ def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8300) ->
         mcp.run()
         return
 
-    token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
-    if not token:
-        mcp.run(transport=transport, host=host, port=port)
-        return
-
     import uvicorn
-    from starlette.middleware import Middleware
 
-    asgi = mcp.http_app(middleware=[Middleware(BearerAuthMiddleware)])
-    uvicorn.run(asgi, host=host, port=port)
+    uvicorn.run(_http_asgi(), host=host, port=port)
 
 
 if __name__ == "__main__":
