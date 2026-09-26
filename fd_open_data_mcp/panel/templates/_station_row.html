@@ -1,0 +1,29 @@
+{% set badge = {'launching': 'running', 'waiting_operator': 'refused',
+                'completed': 'success', 'failed': 'failed',
+                'timeout': 'zero_yield', 'reclaimed': 'cancelled'}.get(t.status, 'no_op') %}
+  <tr>
+    <td>#{{ t.id }}</td>
+    <td><a href="/panel/sources/{{ t.source | urlencode }}">{{ t.source }}</a> / {{ t.account_alias }}</td>
+    <td><span class="badge {{ badge }}">{{ t.status }}</span></td>
+    <td class="muted">{{ t.proxy_url_masked }}</td>
+    <td class="muted">{{ t.deadline_at or '—' }}</td>
+    <td>
+      {% if t.live %}
+      <button type="button" class="link"
+              hx-get="/panel/auth/station/{{ t.id }}/view"
+              hx-target="#station-view" hx-swap="innerHTML">观察窗 view</button>
+      <span class="confirm">
+        <button type="button" class="link link-danger"
+                onclick="this.closest('.confirm').classList.add('armed')">回收 reclaim</button>
+        <span class="confirm-arm">
+          <button type="button" class="link link-danger"
+                  hx-post="/panel/auth/station/{{ t.id }}/reclaim"
+                  hx-target="closest tr" hx-swap="outerHTML">确认回收 confirm</button>
+          <button type="button" class="link"
+                  onclick="this.closest('.confirm').classList.remove('armed')">否 no</button>
+        </span>
+      </span>
+      <noscript><form class="inline-form" method="post" action="/panel/auth/station/{{ t.id }}/reclaim"><button class="link" type="submit">回收 reclaim</button></form></noscript>
+      {% else %}<span class="muted">—</span>{% endif %}
+    </td>
+  </tr>

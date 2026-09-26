@@ -17,6 +17,22 @@
   <span class="badge running">租借中 leased {{ summary.leased }}</span>
 </p>
 
+<h3>新建账号 <span class="en">New account</span></h3>
+<p class="muted">选源 + 起别名即登记身份，并自动分配独立出口（不同账号默认不同出口）。
+Pick a source + an alias to register an identity; a dedicated egress is assigned automatically (distinct accounts get distinct egress by default).</p>
+<form class="inline-form" hx-post="/panel/auth/identities" hx-target="#identity-created" hx-swap="innerHTML">
+  <select name="source" required>
+    {% for src in station_sources %}
+    <option value="{{ src.source }}">{{ src.source }}（{{ src.auth_profile }}）</option>
+    {% else %}
+    <option value="">— 无认证源 no auth_profile sources —</option>
+    {% endfor %}
+  </select>
+  <input name="account_alias" placeholder="账号别名 account alias" required>
+  <button type="submit">登记 register</button>
+</form>
+<div id="identity-created"></div>
+
 <h3>需登录队列 <span class="en">Login-required queue</span></h3>
 <p class="muted">失败次数多者先处理，从未登录过的（新登记）排最前。
 Most failures first; never-logged-in registrations at the head.</p>
@@ -54,7 +70,14 @@ Grouped by source: account, five-state status, automation, last login/success, z
   {% for i in g.identities %}
   <tr>
     <td>{{ i.account_alias }}</td>
-    <td><span class="badge {{ status_badge.get(i.status, 'no_op') }}">{{ i.status }}</span></td>
+    <td><span class="badge {{ status_badge.get(i.status, 'no_op') }}">{{ i.status }}</span>
+        {% if i.status == 'login_required' %}
+        <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
+          <input type="hidden" name="source" value="{{ i.source }}">
+          <input type="hidden" name="account_alias" value="{{ i.account_alias }}">
+          <button class="link" type="submit">登录 login</button>
+        </form>
+        {% endif %}</td>
     <td class="muted">{{ i.automation }}</td>
     <td class="muted">{{ i.last_login_at or '—' }}</td>
     <td class="muted">{{ i.last_success_at or '—' }}</td>
@@ -86,6 +109,20 @@ The auditable login/probe/lease trail, replayable per identity.</p>
   </tr>
   {% else %}
   <tr><td colspan="5" class="muted">尚无事件 No identity events yet.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<h3>登录站 <span class="en">Login stations</span></h3>
+<p class="muted">进行中/最近的登录站：状态（拉起中 / 等待操作 / 完成 / 失败 / 超时 / 回收）、期限与观察窗入口；超期未完成的站会被标记超时并可回收。
+Live and recent login stations: status, deadline and the observation-view entry; an overdue station is marked timeout and can be reclaimed.</p>
+<div class="table-wrap">
+<table>
+  <tr>{{ th('站', 'Station') }}{{ th('身份', 'Identity') }}{{ th('状态', 'Status') }}{{ th('出口', 'Egress') }}{{ th('期限', 'Deadline') }}{{ th('操作', 'Actions') }}</tr>
+  {% for t in stations %}
+  {% include "_station_row.html" %}
+  {% else %}
+  <tr><td colspan="6" class="muted">暂无登录站 No login stations yet.</td></tr>
   {% endfor %}
 </table>
 </div>

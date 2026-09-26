@@ -9,20 +9,23 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import logging
 import os
 import urllib.request
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request
+from fastapi import FastAPI, Form, HTTPException, Request, Response, WebSocket
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import func
 
+from fd_open_data_mcp import station_ops
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.models import (
-    BanRule, Cluster, Concept, CrawlPolicy, CrawlRun, CrawlSite, CrawlSource,
-    FetchLog, PendingRun, PolicyRun, Proxy, SourceProxyHealth, SourceRateLimit,
+    BanRule, Cluster, Concept, CrawlLoginStation, CrawlPolicy, CrawlRun,
+    CrawlSite, CrawlSource, FetchLog, PendingRun, PolicyRun, Proxy,
+    SourceProxyHealth, SourceRateLimit,
 )
 from fd_open_data_mcp.platform_tools import (
     cancel_pending_run, cancel_platform_run, trigger_platform_run,
@@ -31,6 +34,7 @@ from fd_open_data_mcp.visibility import snapshot as _snapshot
 
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
+logger = logging.getLogger(__name__)
 
 FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "yearly"]
 MODES = ["series", "per_date"]
@@ -173,6 +177,55 @@ def _run_launcher():
     return _default_launcher()
 
 
+def _station_client():
+    """The station k8s client seam (module-level so tests stub it with a fake
+    — no station pod is ever really launched from tests)."""
+    return station_ops.get_station_client()
+
+
+def _station_upstream(station_id: int) -> str | None:
+    """``host:port`` of a live station's noVNC endpoint, or None when the
+    station is unknown / not in flight / its Service is not resolvable.
+    Applies the deadline-timeout backstop on read; module-level seam so tests
+    can point the proxy and the websocket relay at a local upstream."""
+    s = _session()
+    try:
+        station_ops.active_stations_summary(s)  # timeout backstop on read
+        st = s.get(CrawlLoginStation, station_id)
+        if st is None or st.status not in station_ops.STATION_OPEN:
+            return None
+        client = _station_client()
+        names = client.list_names("Service", f"station-id={station_id}")
+        if not names:
+            return None
+        return (f"{names[0]}.{client.namespace}.svc.cluster.local:"
+                f"{station_ops.STATION_PORT}")
+    except Exception:  # noqa: BLE001 - no resolvable station -> friendly error
+        return None
+    finally:
+        s.close()
+
+
+def _station_unavailable(station_id: int) -> str:
+    """Friendly (non-500) page for a station the proxy cannot serve."""
+    return (
+        "<h1>登录站不可用 login station unavailable</h1>"
+        f'<p>站 #{station_id} 不存在、已完成或已回收，观察通道已关闭。'
+        f"Station #{station_id} does not exist, already finished or was "
+        f"reclaimed; the observation channel is closed.</p>")
+
+
+def _station_unreachable(station_id: int, err: Exception) -> str:
+    """Friendly 502 page: the station exists but its noVNC endpoint did not
+    answer (typically still booting)."""
+    return (
+        "<h1>登录站暂不可达 login station unreachable</h1>"
+        f'<p>站 #{station_id} 可能仍在拉起（约需数十秒），请稍后刷新重试；'
+        f"持续失败时请回收后重新拉起。Station #{station_id} is probably still "
+        f"booting — retry shortly; if it keeps failing, reclaim and relaunch."
+        f"</p><p class='muted'>{type(err).__name__}</p>")
+
+
 # ── cockpit aggregations (panel-ui-refresh: KPI row + yield trend) ─────────
 def kpi_snapshot(s) -> dict:
     """Home KPI row from `policy_runs`: running count, 24h terminal-run
@@ -253,16 +306,21 @@ def create_app() -> FastAPI:
 
     # ── auth gate (panel-logto-auth, design D3) ────────────────────────────
     # Precedence: PANEL_TOKEN (programmatic) → OIDC session cookie → redirect
-    # to Logto login (when LOGTO_* configured) → legacy 401. The auth routes
-    # themselves and static assets are always public.
+    # to Logto login (when LOGTO_* configured) → legacy 401. The OIDC routes
+    # themselves and static assets are always public; every OTHER /panel/auth
+    # path — the login-station observation channel and the identity writes
+    # (login-station-console 3.2: 观察通道不裸奔) — goes through this same gate.
     token = os.environ.get("PANEL_TOKEN")
     from fd_open_data_mcp.panel import auth as _auth
+
+    _PUBLIC_AUTH_PATHS = ("/panel/auth/login", "/panel/auth/callback",
+                          "/panel/auth/logout", "/panel/auth/whoami")
 
     @app.middleware("http")
     async def gate(request: Request, call_next):
         cfg = _auth.logto_config()
         path = request.url.path
-        if path.startswith("/panel/auth/") or path.startswith("/panel/static"):
+        if path in _PUBLIC_AUTH_PATHS or path.startswith("/panel/static"):
             return await call_next(request)
         if token:
             q = request.query_params.get("token")
@@ -952,11 +1010,12 @@ def create_app() -> FastAPI:
             return _unavailable(e)
 
     # ── authenticated-crawling panel (session-pool 4.1) ─────────────────────
-    # Read-only view over the central identity pool (crawl_identities /
-    # crawl_identity_events): the identity x health matrix, the login-required
-    # queue and the event stream. The page shell never queries; the polled
-    # partial carries the data and degrades independently. Logins happen on
-    # the login site — this surface only observes (spec authenticated-crawling).
+    # The Console login操作面 (login-station-console 3.3): the identity x
+    # health matrix with one-click login-station launch, the login-required
+    # queue, the event stream, multi-account registration and the station
+    # board. The page shell never queries; the polled partial carries the data
+    # and degrades independently. Logins happen ON the login station — this
+    # surface orchestrates and observes (spec authenticated-crawling).
     @app.get("/panel/auth", response_class=HTMLResponse)
     def auth_page(request: Request):
         return templates.TemplateResponse(
@@ -966,7 +1025,8 @@ def create_app() -> FastAPI:
     def partial_auth(request: Request):
         """Polled auth panel: identity matrix grouped by source, the
         login-required queue and the latest identity events (15s, degrades
-        like every home partial)."""
+        like every home partial); login-station board + registration sources
+        ride along (login-station-console 3.3)."""
         try:
             s = _session()
             try:
@@ -975,6 +1035,13 @@ def create_app() -> FastAPI:
                 events = _snapshot.identity_events(s, limit=20)
                 profiles = dict(
                     s.query(CrawlSource.source, CrawlSource.auth_profile).all())
+                stations = station_ops.station_status(s, limit=10)
+                station_sources = [
+                    {"source": r.source, "auth_profile": r.auth_profile}
+                    for r in (s.query(CrawlSource)
+                              .filter(CrawlSource.auth_profile.isnot(None))
+                              .order_by(CrawlSource.source).all())
+                    if r.auth_profile]
             finally:
                 s.close()
             grouped: dict[str, list[dict]] = {}
@@ -987,6 +1054,7 @@ def create_app() -> FastAPI:
             return templates.TemplateResponse(
                 request, "partial_auth.html",
                 {"groups": groups, "queue": queue, "events": events,
+                 "stations": stations, "station_sources": station_sources,
                  "summary": {
                      "total": len(pool),
                      "active": sum(1 for r in pool if r["status"] == "active"),
@@ -994,6 +1062,272 @@ def create_app() -> FastAPI:
                      "leased": sum(1 for r in pool if r["leased"])}})
         except Exception as e:  # noqa: BLE001
             return _unavailable(e)
+
+    # ── login-station console (login-station-console 3.2/3.3) ──────────────
+    # One-click login: the matrix's login_required rows post here; the HTMX
+    # response swaps the observation view (an iframe on the reverse-proxied
+    # noVNC page) into #station-view and refreshes the polled partial. The
+    # observation channel itself never bypasses the panel gate above.
+    @app.post("/panel/auth/station/launch")
+    async def station_launch(request: Request):
+        """Launch a login station: ensure the identity (login_required +
+        egress), create the station Job+Service, embed the observation view."""
+        form = await request.form()
+        source = (form.get("source") or "").strip()
+        alias = (form.get("account_alias") or "").strip()
+        hx = request.headers.get("hx-request") == "true"
+        if not source or not alias:
+            if hx:
+                return _toast(HTMLResponse("", status_code=400),
+                              "源与账号别名必填 source and account_alias required",
+                              "err")
+            raise HTTPException(400, "source and account_alias are required")
+        s = _session()
+        try:
+            ensured = station_ops.ensure_identity_with_egress(
+                s, source, alias, requested_by="panel")
+            if ensured.get("status") != "queued":
+                msg = f"{source}/{alias} 未登记 not registered: {ensured.get('reason')}"
+                if hx:
+                    return _toast(HTMLResponse(""), msg, "err")
+                raise HTTPException(400, ensured.get("reason", "invalid"))
+            out = station_ops.create_station(s, source, alias,
+                                             client=_station_client())
+            if out["status"] != "launched":
+                msg = (f"{source}/{alias} 拉起失败 launch failed: "
+                       f"{out.get('reason')}")
+                if hx:
+                    return _toast(HTMLResponse(""), msg, "err")
+                raise HTTPException(502, out.get("reason", "launch failed"))
+            stations = station_ops.station_status(s)
+            st = next(x for x in stations if x["id"] == out["station_id"])
+        finally:
+            s.close()
+        if not hx:
+            return RedirectResponse("/panel/auth", status_code=303)
+        resp = templates.TemplateResponse(
+            request, "_station_view.html",
+            {"st": st, "vnc_url": station_ops.station_vnc_path(out["station_id"])})
+        resp.headers["HX-Trigger"] = json.dumps({
+            "toast": {"message": (f"登录站已拉起 station #{out['station_id']} "
+                                  f"launched — 请在观察窗内完成登录 complete "
+                                  f"the login in the observation view"),
+                      "level": "ok"},
+            "auth-refresh": {}})
+        return resp
+
+    @app.post("/panel/auth/identities")
+    async def auth_identity_create(request: Request):
+        """多账号登记 (spec: Console 登录操作面): register an identity and
+        auto-assign its egress; the fragment shows the assigned binding."""
+        form = await request.form()
+        source = (form.get("source") or "").strip()
+        alias = (form.get("account_alias") or "").strip()
+        hx = request.headers.get("hx-request") == "true"
+        if not source or not alias:
+            if hx:
+                return _toast(HTMLResponse("", status_code=400),
+                              "源与账号别名必填 source and alias required", "err")
+            raise HTTPException(400, "source and account_alias are required")
+        s = _session()
+        try:
+            out = station_ops.ensure_identity_with_egress(
+                s, source, alias, requested_by="panel")
+        finally:
+            s.close()
+        if out.get("status") != "queued":
+            msg = f"{source}/{alias} 未登记 not registered: {out.get('reason')}"
+            if hx:
+                return _toast(HTMLResponse(""), msg, "err")
+            raise HTTPException(400, out.get("reason", "invalid"))
+        if not hx:
+            return RedirectResponse("/panel/auth", status_code=303)
+        resp = templates.TemplateResponse(
+            request, "_identity_created.html",
+            {"out": out,
+             "proxy_masked": station_ops.mask_proxy_url(out.get("proxy_url"))})
+        resp.headers["HX-Trigger"] = json.dumps({
+            "toast": {"message": (f"{source}/{alias} 已登记 registered — 出口 "
+                                  f"egress {out.get('egress_ref') or '未分配 none'}"),
+                      "level": "ok"},
+            "auth-refresh": {}})
+        return resp
+
+    @app.get("/panel/auth/station/{station_id}/view", response_class=HTMLResponse)
+    def station_view(request: Request, station_id: int):
+        """The observation-view fragment for a live station (htmx target of
+        the board's 观察窗 button)."""
+        s = _session()
+        try:
+            stations = station_ops.station_status(s)
+            st = next((x for x in stations if x["id"] == station_id), None)
+        finally:
+            s.close()
+        if st is None or not st["live"]:
+            return HTMLResponse(_station_unavailable(station_id),
+                                status_code=404)
+        return templates.TemplateResponse(
+            request, "_station_view.html",
+            {"st": st, "vnc_url": station_ops.station_vnc_path(station_id)})
+
+    @app.post("/panel/auth/station/{station_id}/reclaim")
+    def station_reclaim(station_id: int, request: Request):
+        """Operator reclaim: tear the station's Job+Service down and close the
+        row (deadline backstop covers the overdue case automatically)."""
+        hx = request.headers.get("hx-request") == "true"
+        s = _session()
+        try:
+            out = station_ops.reclaim_station(s, station_id,
+                                              client=_station_client(),
+                                              actor="panel")
+            if out["status"] == "not_found":
+                if hx:
+                    return _toast(HTMLResponse(""),
+                                  f"station {station_id} not found", "err")
+                raise HTTPException(404, f"station {station_id} not found")
+            stations = station_ops.station_status(s)
+            st = next((x for x in stations if x["id"] == station_id), None)
+        finally:
+            s.close()
+        if not hx:
+            return RedirectResponse("/panel/auth", status_code=303)
+        msg = (f"登录站 station #{station_id} 已回收 reclaimed"
+               if out["status"] == "reclaimed" else
+               f"登录站 station #{station_id} 已结束 already "
+               f"{out.get('current_status')}；集群对象已清理 objects cleaned")
+        row = (templates.TemplateResponse(request, "_station_row.html",
+                                          {"t": st})
+               if st is not None else HTMLResponse(""))
+        return _toast(row, msg)
+
+    @app.get("/panel/auth/station/{station_id}/vnc/{path:path}")
+    async def station_vnc_proxy(station_id: int, path: str, request: Request):
+        """Reverse proxy to the station's noVNC static page (and any asset
+        under it) — the only HTTP path to a station's web UI. Panel-gated
+        above; stations are never exposed directly."""
+        import httpx
+
+        upstream = _station_upstream(station_id)
+        if upstream is None:
+            return HTMLResponse(_station_unavailable(station_id),
+                                status_code=404)
+        url = f"http://{upstream}/{path}"
+        if request.url.query:
+            url += f"?{request.url.query}"
+        try:
+            # trust_env=False: the station Service is cluster-internal — an
+            # ambient HTTP(S)_PROXY (dev box / egress-restricted pod) must
+            # never intercept the observation channel
+            async with httpx.AsyncClient(
+                    timeout=httpx.Timeout(10.0, read=60.0),
+                    trust_env=False) as hc:
+                up = await hc.get(
+                    url,
+                    headers={"accept": request.headers.get("accept", "*/*")})
+        except httpx.HTTPError as e:  # noqa: BLE001 - friendly, never a 500
+            logger.warning("station %s http proxy failed: %s", station_id, e)
+            return HTMLResponse(_station_unreachable(station_id, e),
+                                status_code=502)
+        return Response(
+            content=up.content, status_code=up.status_code,
+            media_type=up.headers.get("content-type", "application/octet-stream"),
+            headers={"cache-control": "no-store"})
+
+    def _station_ws_authorized(websocket: WebSocket) -> bool:
+        """The panel gate for the websocket scope (the http middleware cannot
+        see websockets): same primitives — PANEL_TOKEN (?token= / header /
+        cookie) or a valid OIDC session cookie; an unconfigured gate stays
+        open, exactly like the http gate."""
+        token = os.environ.get("PANEL_TOKEN")
+        if token and (websocket.query_params.get("token") == token
+                      or websocket.headers.get("x-panel-token") == token
+                      or websocket.cookies.get("panel_token") == token):
+            return True
+        sess = _auth.read_session(
+            websocket.cookies.get(_auth.SESSION_COOKIE))
+        if sess is not None:
+            allowed = _auth.allow_list()
+            if allowed is None or sess["sub"] in allowed:
+                return True
+        if token is None and _auth.logto_config() is None:
+            return True  # no gate configured — open panel (http parity)
+        return False
+
+    async def _relay_station_ws(websocket: WebSocket, station_id: int) -> None:
+        """Bidirectional websocket relay: browser noVNC <-> the station pod's
+        websockify. Hand-rolled two-pump relay (websockets client on the
+        upstream side, starlette WebSocket on the panel side) — no extra
+        framework dependency beyond the already-vendored websockets lib."""
+        import asyncio
+
+        await websocket.accept()
+        if not _station_ws_authorized(websocket):
+            await websocket.close(code=4401, reason="panel auth required")
+            return
+        upstream = _station_upstream(station_id)
+        if upstream is None:
+            await websocket.close(code=4404, reason="station not available")
+            return
+        import websockets
+
+        try:
+            async with websockets.connect(
+                    f"ws://{upstream}/websockify",
+                    open_timeout=10,
+                    proxy=None,  # cluster-internal upstream; ignore ambient proxy env
+                ) as up:
+
+                async def _down() -> None:
+                    async for message in up:
+                        if isinstance(message, str):
+                            await websocket.send_text(message)
+                        else:
+                            await websocket.send_bytes(message)
+
+                async def _up() -> None:
+                    while True:
+                        msg = await websocket.receive()
+                        if msg["type"] == "websocket.disconnect":
+                            return
+                        if msg.get("text") is not None:
+                            await up.send(msg["text"])
+                        elif msg.get("bytes") is not None:
+                            await up.send(msg["bytes"])
+
+                done, pending = await asyncio.wait(
+                    [asyncio.create_task(_down()),
+                     asyncio.create_task(_up())],
+                    return_when=asyncio.FIRST_COMPLETED)
+                for t in pending:
+                    t.cancel()
+                for t in done:
+                    t.exception()  # surface relay errors to the event loop log
+                try:
+                    await websocket.close()
+                except Exception:  # noqa: BLE001 - peer may have closed first
+                    pass
+        except asyncio.CancelledError:
+            raise
+        except Exception as e:  # noqa: BLE001 - station unreachable / dropped
+            logger.warning("station %s ws relay failed: %s", station_id, e)
+            try:
+                await websocket.close(
+                    code=1014,
+                    reason=f"station unreachable ({type(e).__name__})")
+            except Exception:  # noqa: BLE001
+                pass
+
+    @app.websocket("/panel/auth/station/{station_id}/websockify")
+    async def station_websockify(websocket: WebSocket, station_id: int):
+        """noVNC data channel (RFB-over-websocket), relayed to the station."""
+        await _relay_station_ws(websocket, station_id)
+
+    @app.websocket("/panel/auth/station/{station_id}/vnc/websockify")
+    async def station_websockify_nested(websocket: WebSocket,
+                                        station_id: int):
+        """Same relay at the vnc.html-relative path noVNC's default
+        ``path=websockify`` resolves to from the embedded page."""
+        await _relay_station_ws(websocket, station_id)
 
     # ── editor ─────────────────────────────────────────────────────────────
     def _editor_context(s, policy: CrawlPolicy | None):

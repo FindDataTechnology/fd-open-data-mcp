@@ -1174,6 +1174,59 @@ class CrawlIdentityEvent(Base):
         }
 
 
+# --- login stations (login-station-console) -------------------------------------
+# One row per login-station launch. Written by the panel/orchestration side
+# (station_ops.create_station: launching -> waiting_operator) and by the
+# station runtime itself (login_station.py reports completed/failed). Column
+# names match the central DDL exactly (station_ops.STATION_DDL is the shared
+# source of truth; the fd-industry-data runtime creates it centrally).
+STATION_STATUSES = (
+    "launching", "waiting_operator", "completed", "failed", "timeout",
+    "reclaimed",
+)
+
+
+class CrawlLoginStation(Base):
+    """A login station in flight (crawl_login_stations).
+
+    Status machine: launching -> waiting_operator -> completed | failed; the
+    orchestration side may close an overdue station as timeout (deadline
+    backstop) or reclaimed (operator reclaim / teardown). The identity keeps
+    its own five-state machine — a station never touches it beyond events."""
+    __tablename__ = "crawl_login_stations"
+    __table_args__ = (
+        CheckConstraint(
+            "status in ('launching','waiting_operator','completed','failed',"
+            "'timeout','reclaimed')",
+            name="ck_login_station_status"),
+        Index("idx_login_stations_identity", "identity_id"),
+    )
+
+    id = Column(Bigint, primary_key=True, autoincrement=True)
+    identity_id = Column(Bigint,
+                         ForeignKey("crawl_identities.id", ondelete="CASCADE"),
+                         nullable=False)
+    source = Column(Text, nullable=False)
+    account_alias = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="launching")
+    proxy_url = Column(Text, nullable=True)     # the identity egress the station dials through
+    note = Column(Text, nullable=True)          # job/service/progress notes (runtime overwrites)
+    created_at = Column(DateTime(timezone=True), default=_now)
+    deadline_at = Column(DateTime(timezone=True), nullable=True)
+    finished_at = Column(DateTime(timezone=True), nullable=True)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "identity_id": self.identity_id,
+            "source": self.source, "account_alias": self.account_alias,
+            "status": self.status, "proxy_url": self.proxy_url,
+            "note": self.note,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "deadline_at": self.deadline_at.isoformat() if self.deadline_at else None,
+            "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+        }
+
+
 # --- source-discovery pipeline mirror tables (harness-platform-integration) ---
 # Read-only mirrors of the discovery pipeline tables that live in the central
 # fd_open_data database (created and written by the fd-scraw-harness side:

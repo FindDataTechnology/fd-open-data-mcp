@@ -1,0 +1,8 @@
+{#- Registration confirmation (login-station-console 3.3): the new identity
+    is queued login_required and its auto-assigned egress is shown. -#}
+<p class="muted">
+  已登记 registered: <strong>{{ out.source }} / {{ out.account_alias }}</strong>
+  — 状态 status <span class="badge refused">login_required</span>
+  出口 egress <span class="badge">{{ out.egress_ref or '未分配 none (pool dry)' }}</span>
+  {% if proxy_masked and proxy_masked != '—' %}<span class="muted">{{ proxy_masked }}</span>{% endif %}
+</p>

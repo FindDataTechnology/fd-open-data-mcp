@@ -1,0 +1,11 @@
+{#- Embedded login-station observation view (login-station-console 3.3):
+    the iframe points at the panel reverse proxy (panel-gated), noVNC connects
+    back through the relayed websockify path. -#}
+<div class="card">
+  <h3>观察窗 <span class="en">Observation view</span> <span class="badge running">#{{ st.id }} {{ st.status }}</span></h3>
+  <p class="muted">{{ st.source }} / {{ st.account_alias }} — 在下方画面中完成登录（滑块 / 验证码），完成后站自动回收、身份转入活跃。
+  Complete the login (slider / captcha) inside the frame below; the station reclaims itself when done and the identity turns active.</p>
+  <iframe src="{{ vnc_url }}" title="login station {{ st.id }} observation view"
+          style="width:100%;height:520px;border:1px solid var(--border);border-radius:var(--radius);background:#111;"></iframe>
+  <p class="muted">站仍在拉起时画面可能空白数十秒 — the frame may stay blank for tens of seconds while the station boots.</p>
+</div>

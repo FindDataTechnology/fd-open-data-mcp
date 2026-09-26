@@ -86,16 +86,20 @@ def _matrix() -> str:
     return text.split("身份矩阵", 1)[1].split("事件流", 1)[0]
 
 
-# ── 4.1 page shell: polling, read-only note, nav ────────────────────────────
-def test_auth_page_shell_polling_and_readonly_note(session):
+# ── 4.1 page shell: polling, station-launch note, nav ────────────────────────
+def test_auth_page_shell_polling_and_station_note(session):
     page = client.get("/panel/auth").text
     assert "认证身份池" in page and "Auth identities" in page
     # the shell carries the polled region; the page itself never queries
     assert 'hx-get="/panel/partials/auth"' in page
     assert "every 15s" in page
-    # logins happen on the login site — stated bilingually, this view is read-only
+    # logins happen on a login station launched FROM this panel, completed in
+    # the embedded observation view (login-station-console 3.3 replaced the
+    # old read-only note) — stated bilingually
     assert "登录经登录站完成" in page
-    assert "this view is read-only" in page
+    assert "observation view" in page
+    # the station observation view swaps into this page-side region
+    assert 'id="station-view"' in page
     # nav entry visible from the home cockpit
     assert 'href="/panel/auth"' in client.get("/panel").text
 

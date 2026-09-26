@@ -1,0 +1,398 @@
+"""Panel login-station console tests (login-station-console 3.2/3.3/3.4).
+
+Covers the panel surface: the launch route (identity ensured + station
+launched + iframe-embedded observation view swapped in), the noVNC HTTP
+reverse proxy and the websocket relay against local mock upstreams, the token
+gate over the observation channel (spec: 观察通道不裸奔), the multi-account
+registration form, the station board (badges + two-step reclaim), the
+station-view fragment, and the auth_launch_login MCP tool end-to-end on a
+FakeStationClient (shared with test_station_ops).
+"""
+from __future__ import annotations
+
+import asyncio
+import datetime as dt
+import threading
+import time
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+import pytest
+from fastapi.testclient import TestClient
+from starlette.websockets import WebSocketDisconnect
+
+import fd_open_data_mcp.panel.app as appmod
+from fd_open_data_mcp import station_ops
+from fd_open_data_mcp.db import get_database
+from fd_open_data_mcp.models import CrawlIdentity, CrawlLoginStation
+from fd_open_data_mcp.panel.app import app
+from test_station_ops import (  # shared doubles + seed helpers (same dir)
+    NOW, FakeStationClient, _ident, _proxy, _source, _station,
+)
+
+client = TestClient(app)
+
+
+def _db():
+    return get_database().get_session()
+
+
+# ── token gate: the observation channel never bypasses panel auth ───────────
+def test_station_routes_behind_token_gate(session, monkeypatch):
+    monkeypatch.setenv("PANEL_TOKEN", "sekret")
+    from importlib import reload
+
+    gated = TestClient(reload(appmod).app)
+    try:
+        # no credential -> refused (401; the channel and the writes)
+        assert gated.get("/panel/auth/station/1/vnc/vnc.html").status_code == 401
+        assert gated.post("/panel/auth/station/launch",
+                          data={"source": "s", "account_alias": "a"}
+                          ).status_code == 401
+        assert gated.post("/panel/auth/identities",
+                          data={"source": "s", "account_alias": "a"}
+                          ).status_code == 401
+        # the OIDC endpoints stay public
+        assert gated.get("/panel/auth/whoami").status_code == 200
+        # with the token the request passes the gate (then 404s: no station 42)
+        ok = {"X-Panel-Token": "sekret"}
+        assert gated.get("/panel/auth/station/424242/vnc/vnc.html",
+                         headers=ok).status_code == 404
+    finally:
+        monkeypatch.undo()
+        reload(appmod)
+
+
+# ── launch route: ensure + launch + embedded view ───────────────────────────
+def test_station_launch_route_launches_and_embeds_view(session, monkeypatch):
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    _proxy(ip="10.0.0.1")
+    fake = FakeStationClient()
+    monkeypatch.setattr(appmod, "_station_client", lambda: fake)
+
+    r = client.post("/panel/auth/station/launch",
+                    data={"source": "rmfyalk", "account_alias": "acc-a"},
+                    headers={"hx-request": "true"})
+
+    assert r.status_code == 200
+    # the observation view embeds the panel-relative noVNC page (no token in it)
+    assert 'src="/panel/auth/station/1/vnc/vnc.html?autoconnect=1' in r.text
+    assert "path=websockify" in r.text
+    assert "token=" not in r.text
+    # the partial is told to refresh + a toast announces the launch
+    trigger = r.headers.get("hx-trigger", "")
+    assert "auth-refresh" in trigger and "toast" in trigger
+    # one Job + one Service were created
+    assert len(fake.manifests("Job")) == 1
+    assert len(fake.manifests("Service")) == 1
+    s = _db()
+    try:
+        st = s.get(CrawlLoginStation, 1)
+        assert st.status == "waiting_operator"
+        ident = s.query(CrawlIdentity).filter_by(
+            source="rmfyalk", account_alias="acc-a").one()
+        assert ident.status == "login_required"
+        assert ident.egress_ref == "proxy:1"
+    finally:
+        s.close()
+
+
+def test_station_launch_route_plain_post_redirects(session, monkeypatch):
+    _source("rmfyalk")
+    fake = FakeStationClient()
+    monkeypatch.setattr(appmod, "_station_client", lambda: fake)
+    r = client.post("/panel/auth/station/launch",
+                    data={"source": "rmfyalk", "account_alias": "acc-p"},
+                    follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].endswith("/panel/auth")
+
+
+def test_station_launch_route_missing_fields(session):
+    r = client.post("/panel/auth/station/launch", data={"source": ""},
+                    headers={"hx-request": "true"})
+    assert r.status_code == 400
+
+
+# ── new-account form ────────────────────────────────────────────────────────
+def test_new_account_form_registers_identity_with_egress(session):
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    _source("anon", auth_profile=None)
+    pid = _proxy(ip="10.0.0.2")
+
+    r = client.post("/panel/auth/identities",
+                    data={"source": "rmfyalk", "account_alias": "acc-new"},
+                    headers={"hx-request": "true"})
+
+    assert r.status_code == 200
+    assert "acc-new" in r.text and f"proxy:{pid}" in r.text
+    # proxy credentials never render
+    assert "u:p" not in r.text
+    s = _db()
+    try:
+        ident = s.query(CrawlIdentity).filter_by(
+            source="rmfyalk", account_alias="acc-new").one()
+        assert ident.status == "login_required"
+        assert ident.egress_ref == f"proxy:{pid}"
+    finally:
+        s.close()
+
+
+# ── the polled board ────────────────────────────────────────────────────────
+def test_partial_shows_station_board_and_login_button(session):
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    iid = _ident("rmfyalk", "acc-a", "login_required")
+    _ident("rmfyalk", "acc-b", "active")
+    _station(iid, "rmfyalk", "acc-a", status="waiting_operator",
+             deadline=NOW + dt.timedelta(minutes=25),
+             proxy_url="http://user:pass@1.2.3.4:8080")
+
+    r = client.get("/panel/partials/auth")
+    assert r.status_code == 200 and "<html" not in r.text
+
+    # login button ONLY on the login_required row of the matrix
+    matrix = r.text.split("身份矩阵", 1)[1].split("事件流", 1)[0]
+    row_a = matrix.split("acc-a", 1)[1].split("</tr>", 1)[0]
+    row_b = matrix.split("acc-b", 1)[1].split("</tr>", 1)[0]
+    assert "登录 login" in row_a
+    assert "登录 login" not in row_b
+
+    # the station board: row, badge, masked egress, two-step reclaim
+    board = r.text.split("登录站", 2)[-1]
+    assert "waiting_operator" in board and "#1" in board
+    assert "确认回收 confirm" in board
+    assert "user:pass" not in r.text          # credentials never render
+    assert "••••" in board
+
+    # the registration form lists only auth_profile sources
+    assert 'value="rmfyalk"' in r.text
+    form_region = r.text.split("新建账号", 1)[1].split("需登录队列", 1)[0]
+    assert "anon" not in form_region
+
+
+def test_station_view_route_embeds_live_station_only(session):
+    iid = _ident("rmfyalk", "acc-v")
+    sid = _station(iid, "rmfyalk", "acc-v", status="waiting_operator",
+                   deadline=NOW + dt.timedelta(minutes=25))
+    r = client.get(f"/panel/auth/station/{sid}/view")
+    assert r.status_code == 200
+    assert f"/panel/auth/station/{sid}/vnc/vnc.html" in r.text
+
+    done = _station(iid, "rmfyalk", "acc-v", status="completed")
+    r2 = client.get(f"/panel/auth/station/{done}/view")
+    assert r2.status_code == 404
+    assert "不可用" in r2.text or "unavailable" in r2.text
+
+
+def test_reclaim_route_tears_station_down(session, monkeypatch):
+    _source("rmfyalk")
+    station_ops.ensure_identity_with_egress(session, "rmfyalk", "acc-rc",
+                                            now=NOW)
+    fake = FakeStationClient()
+    monkeypatch.setattr(appmod, "_station_client", lambda: fake)
+    created = station_ops.create_station(session, "rmfyalk", "acc-rc",
+                                         client=fake, now=NOW)
+    sid = created["station_id"]
+
+    r = client.post(f"/panel/auth/station/{sid}/reclaim",
+                    headers={"hx-request": "true"})
+
+    assert r.status_code == 200
+    assert "reclaimed" in r.headers.get("hx-trigger", "")
+    assert fake.created == []
+    s = _db()
+    try:
+        assert s.get(CrawlLoginStation, sid).status == "reclaimed"
+    finally:
+        s.close()
+    # the swapped row no longer offers a reclaim on a terminal station
+    assert "hx-post" not in r.text
+
+
+# ── HTTP reverse proxy ──────────────────────────────────────────────────────
+class _UpstreamHandler(BaseHTTPRequestHandler):
+    seen: list[str] = []
+    body = b"<html>novnc-page</html>"
+    content_type = "text/html"
+
+    def do_GET(self):  # noqa: N802 - http.server API
+        _UpstreamHandler.seen.append(self.path)
+        self.send_response(200)
+        self.send_header("Content-Type", self.content_type)
+        self.send_header("Content-Length", str(len(self.body)))
+        self.end_headers()
+        self.wfile.write(self.body)
+
+    def log_message(self, *args):  # silence the test server
+        pass
+
+
+@pytest.fixture
+def upstream_server():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _UpstreamHandler)
+    port = server.server_address[1]
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    _UpstreamHandler.seen = []
+    yield f"127.0.0.1:{port}"
+    server.shutdown()
+
+
+def test_vnc_reverse_proxy_forwards_path_and_query(session, monkeypatch,
+                                                   upstream_server):
+    monkeypatch.setattr(appmod, "_station_upstream",
+                        lambda sid: upstream_server)
+    r = client.get("/panel/auth/station/1/vnc/vnc.html"
+                   "?autoconnect=1&path=websockify")
+    assert r.status_code == 200
+    assert "novnc-page" in r.text
+    assert r.headers["content-type"].startswith("text/html")
+    # the upstream saw the proxied path + query, un-rewritten
+    assert _UpstreamHandler.seen == ["/vnc.html?autoconnect=1&path=websockify"]
+
+
+def test_vnc_reverse_proxy_unreachable_is_friendly_502(session, monkeypatch):
+    monkeypatch.setattr(appmod, "_station_upstream", lambda sid: "127.0.0.1:1")
+    r = client.get("/panel/auth/station/1/vnc/vnc.html")
+    assert r.status_code == 502          # friendly page, not a 500
+    assert "登录站暂不可达" in r.text and "unreachable" in r.text
+
+
+def test_vnc_reverse_proxy_unknown_station(session):
+    # real resolver: no such station -> friendly 404, upstream never contacted
+    r = client.get("/panel/auth/station/999/vnc/vnc.html")
+    assert r.status_code == 404
+    assert "不可用" in r.text
+
+
+# ── websocket relay ─────────────────────────────────────────────────────────
+@pytest.fixture
+def echo_ws_port():
+    import websockets
+
+    holder: dict[str, int] = {}
+
+    def run():
+        async def handler(ws):
+            async for message in ws:
+                await ws.send(message)
+
+        async def main():
+            async with websockets.serve(handler, "127.0.0.1", 0) as srv:
+                holder["port"] = srv.sockets[0].getsockname()[1]
+                await asyncio.Event().wait()
+
+        asyncio.run(main())
+
+    threading.Thread(target=run, daemon=True).start()
+    for _ in range(200):
+        if "port" in holder:
+            return holder["port"]
+        time.sleep(0.05)
+    raise RuntimeError("echo server did not start")
+
+
+def test_websockify_relays_both_directions(session, monkeypatch, echo_ws_port):
+    monkeypatch.setattr(appmod, "_station_upstream",
+                        lambda sid: f"127.0.0.1:{echo_ws_port}")
+    with client.websocket_connect("/panel/auth/station/1/websockify") as ws:
+        ws.send_text("hello-rfb")
+        assert ws.receive_text() == "hello-rfb"
+        ws.send_bytes(b"\x01\x02\x03")
+        assert ws.receive_bytes() == b"\x01\x02\x03"
+
+
+def test_websockify_vnc_relative_path_relays_too(session, monkeypatch,
+                                                 echo_ws_port):
+    # noVNC's default path=websockify resolves relative to vnc.html -> the
+    # nested route must relay exactly like the flat one
+    monkeypatch.setattr(appmod, "_station_upstream",
+                        lambda sid: f"127.0.0.1:{echo_ws_port}")
+    with client.websocket_connect(
+            "/panel/auth/station/1/vnc/websockify") as ws:
+        ws.send_text("via-nested")
+        assert ws.receive_text() == "via-nested"
+
+
+def test_websockify_requires_panel_auth(session, monkeypatch):
+    monkeypatch.setenv("PANEL_TOKEN", "sekret")
+    # no credential -> closed 4401, no relay attempted (the close surfaces on
+    # the first receive)
+    with pytest.raises(WebSocketDisconnect) as exc:
+        with client.websocket_connect("/panel/auth/station/1/websockify") as ws:
+            ws.receive_text()
+    assert exc.value.code == 4401
+    # the token as a query param authorizes (then 4404: station does not exist)
+    with pytest.raises(WebSocketDisconnect) as exc2:
+        with client.websocket_connect(
+                "/panel/auth/station/1/websockify?token=sekret") as ws:
+            ws.receive_text()
+    assert exc2.value.code == 4404
+
+
+# ── MCP auth_launch_login (task 3.4) ────────────────────────────────────────
+def _unwrap(result):
+    sc = getattr(result, "structured_content", None)
+    if sc is not None:
+        return sc.get("result", sc)
+    if isinstance(result, tuple):
+        return result[1]
+    return getattr(result, "data", result)
+
+
+def _call(name, args):
+    from fd_open_data_mcp.server import mcp
+
+    return _unwrap(asyncio.run(mcp.call_tool(name, args)))
+
+
+def test_auth_launch_login_tool_registered():
+    tools = asyncio.run(_tools())
+    assert "auth_launch_login" in tools
+
+
+def _tools():
+    from fd_open_data_mcp.server import mcp
+
+    async def run():
+        return {t.name for t in await mcp.list_tools()}
+
+    return run()
+
+
+def test_auth_launch_login_launches_station_with_relative_url(session,
+                                                              monkeypatch):
+    _source("rmfyalk")
+    pid = _proxy(ip="10.0.0.9")
+    fake = FakeStationClient()
+    monkeypatch.setattr(station_ops, "get_station_client", lambda: fake)
+
+    out = _call("auth_launch_login",
+                {"source": "rmfyalk", "account_alias": "acc-mcp"})
+
+    assert out["status"] == "launched"
+    # the egress the station dials through was assigned + returned
+    assert out["egress_ref"] == f"proxy:{pid}"
+    # vnc_url is RELATIVE and credential-free (the channel is panel-gated)
+    assert out["vnc_url"].startswith("/panel/auth/station/")
+    assert "vnc.html?autoconnect=1" in out["vnc_url"]
+    assert "token" not in out["vnc_url"]
+    assert len(fake.manifests("Job")) == 1
+    assert len(fake.manifests("Service")) == 1
+
+    # auth_status now carries the in-flight station count
+    status = _call("auth_status", {})
+    assert status["stations"] == {"active": 1}
+    assert status["login_required"] == 1  # the identity sits in the queue
+
+
+def test_auth_launch_login_resets_and_reuses_identity(session, monkeypatch):
+    _source("rmfyalk")
+    fake = FakeStationClient()
+    monkeypatch.setattr(station_ops, "get_station_client", lambda: fake)
+    _call("auth_launch_login", {"source": "rmfyalk", "account_alias": "acc-1"})
+    out = _call("auth_launch_login",
+                {"source": "rmfyalk", "account_alias": "acc-1"})
+    assert out["status"] == "launched" and out["created"] is False
+    assert len(fake.manifests("Job")) == 2  # one station per launch
+    status = _call("auth_status", {})
+    assert status["stations"]["active"] == 2
+    assert status["total_identities"] == 1  # same identity, reset

@@ -1161,6 +1161,8 @@ def _http_asgi():
 
     Both apps carry their own auth (panel gate vs MCP bearer); one uvicorn
     process serves both, so the console ships with zero extra deployments.
+    Websocket scopes under /panel (the login-station observation relay,
+    login-station-console 3.2) route to the panel too.
     """
     from starlette.middleware import Middleware
 
@@ -1174,7 +1176,8 @@ def _http_asgi():
         return mcp_asgi
 
     async def composite(scope, receive, send):
-        if scope["type"] == "http" and scope["path"].startswith("/panel"):
+        if (scope["type"] in ("http", "websocket")
+                and scope["path"].startswith("/panel")):
             await panel_asgi(scope, receive, send)
         else:
             await mcp_asgi(scope, receive, send)
