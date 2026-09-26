@@ -333,9 +333,9 @@ def get_station_client() -> StationK8sClient:
 
 # ── manifests ────────────────────────────────────────────────────────────────
 def _dnsify(value: str) -> str:
-    """k8s-name-safe: lowercase, non-alphanumerics collapse to '_' (a source's
-    '-' becomes '_', per the station naming contract)."""
-    return re.sub(r"[^a-z0-9]+", "_", value.lower()).strip("_") or "x"
+    """k8s-name-safe: lowercase, non-alphanumerics collapse to '-' (RFC 1123
+    label; underscores are invalid in object names)."""
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-") or "x"
 
 
 def station_name(source: str, account_alias: str) -> str:
