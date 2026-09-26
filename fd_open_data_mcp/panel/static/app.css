@@ -89,6 +89,13 @@
 
 /* ── base ─────────────────────────────────────────────────────────────── */
 * { box-sizing: border-box; }
+
+/* the inline icon sprite relies on the [hidden] attribute, but the UA
+   [hidden] { display: none } rule does not match SVG elements in
+   Chromium/WebKit — the sprite rendered at its default 300x150 and pushed
+   the whole shell down 150px. This author rule closes it for good. */
+svg[hidden] { display: none; }
+
 body {
   margin: 0; background: var(--bg); color: var(--text);
   font: 15px/1.5 system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
