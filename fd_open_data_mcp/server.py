@@ -55,6 +55,14 @@ from fd_open_data_mcp.coverage_tools import register_coverage_tools
 
 register_coverage_tools(mcp)
 
+# Attach the authenticated-crawling identity-pool tools (session-pool 4.2):
+# pool overview / event stream / login-required registration. Reads share the
+# aggregations the Console auth panel renders; the write only records rows —
+# logins happen on the login site.
+from fd_open_data_mcp.auth_tools import register_auth_tools
+
+register_auth_tools(mcp)
+
 
 def _session():
     return get_database().get_session()

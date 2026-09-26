@@ -19,6 +19,7 @@
     <symbol id="i-runs" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M10 8.5v7l6-3.5z"/></symbol>
     <symbol id="i-sources" viewBox="0 0 24 24"><path d="M4 6h16M4 12h16M4 18h10"/></symbol>
     <symbol id="i-funnel" viewBox="0 0 24 24"><path d="M3 4h18l-7 8v6l-4 2v-8z"/></symbol>
+    <symbol id="i-auth" viewBox="0 0 24 24"><circle cx="8" cy="15" r="4"/><path d="M11 12 21 2M17 6l3 3"/></symbol>
     <symbol id="i-proxy" viewBox="0 0 24 24"><path d="M12 3l7 3v5c0 4.5-3 8-7 10-4-2-7-5.5-7-10V6z"/></symbol>
     <symbol id="i-data" viewBox="0 0 24 24"><ellipse cx="12" cy="5" rx="8" ry="3"/><path d="M4 5v14c0 1.7 3.6 3 8 3s8-1.3 8-3V5"/><path d="M4 12c0 1.7 3.6 3 8 3s8-1.3 8-3"/></symbol>
   </svg>
@@ -33,6 +34,7 @@
         <a class="nav-link {{ 'active' if path.startswith('/panel/runs') }}" href="/panel/runs"><svg><use href="#i-runs"/></svg>运行 <span class="en">Runs</span></a>
         <a class="nav-link {{ 'active' if path.startswith('/panel/sources') }}" href="/panel/sources"><svg><use href="#i-sources"/></svg>平台源 <span class="en">Sources</span></a>
         <a class="nav-link {{ 'active' if path.startswith('/panel/funnel') }}" href="/panel/funnel"><svg><use href="#i-funnel"/></svg>候选源 <span class="en">Funnel</span></a>
+        <a class="nav-link {{ 'active' if path == '/panel/auth' }}" href="/panel/auth"><svg><use href="#i-auth"/></svg>认证 <span class="en">Auth</span></a>
         <a class="nav-link {{ 'active' if path.startswith('/panel/proxy') }}" href="/panel/proxy"><svg><use href="#i-proxy"/></svg>代理 <span class="en">Proxy</span></a>
         <a class="nav-link {{ 'active' if path.startswith('/panel/data') }}" href="/panel/data"><svg><use href="#i-data"/></svg>数据 <span class="en">Data</span></a>
       </nav>

@@ -4,6 +4,7 @@
     <td>#{{ r.id }}</td>
     <td><a href="/panel/sources/{{ r.source }}">{{ r.source }}</a></td>
     <td><span class="badge {{ badge }}">{{ r.status }}</span>
+      {% if r.identity_alias %}<span class="badge no_op" title="本次运行所租身份 the leased identity">{{ r.identity_alias }}</span>{% endif %}
       {% if r.cancel_requested %}<span class="warn-text">取消请求中 cancel…</span>{% endif %}
       {% if r.status == 'running' and not r.cancel_requested %}
       <span class="confirm">

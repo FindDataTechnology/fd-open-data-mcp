@@ -27,9 +27,10 @@ from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
 from fd_open_data_mcp.models import (
-    Analysis, Candidate, CrawlPolicy, CrawlRun, CrawlSite, CrawlSource,
-    Discovery, PendingRun, Cluster, EntitySourceIdentifier, FetchLog,
-    PolicyRun, SourceProxyHealth, SourceManifest,
+    Analysis, Candidate, CrawlIdentity, CrawlIdentityEvent, CrawlPolicy,
+    CrawlRun, CrawlSite, CrawlSource, Discovery, PendingRun, Cluster,
+    EntitySourceIdentifier, FetchLog, PolicyRun, SourceProxyHealth,
+    SourceManifest,
 )
 from fd_open_data_mcp.visibility import state as _state
 
@@ -770,6 +771,113 @@ def source_pipeline_link(session: Session, source: str) -> dict | None:
     return {"manifest_id": m.id, "source_name": m.source_name,
             "model_used": m.model_used,
             "updated_at": _iso(m.updated_at) or _iso(m.created_at)}
+
+
+# --- authenticated-crawling identity pool (session-pool 4.1/4.2) --------------
+# Read-only aggregations over crawl_identities / crawl_identity_events shared
+# by the Console auth panel and the auth_* MCP tools — same contract as the
+# platform_* functions above: one query set, two entrances, identical facts.
+# The panel never writes these tables; logins happen on the login site.
+
+IDENTITY_EVENT_STREAM_LIMIT = 20  # the panel event stream shows the latest 20
+
+
+def identity_pool(session: Session, source: str | None = None,
+                  now: dt.datetime | None = None) -> list[dict]:
+    """Every ``crawl_identities`` row (optionally one source) as a display
+    row: status, automation, last login/success, the zero-run streak, and the
+    lease view — ``leased`` only while a lease is held AND its TTL has not
+    passed; a held-but-past-TTL lease reads ``lease_expired`` (the lazy
+    re-claimable state the table-semantics lease defines)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    q = session.query(CrawlIdentity).order_by(
+        CrawlIdentity.source, CrawlIdentity.account_alias)
+    if source is not None:
+        q = q.filter(CrawlIdentity.source == source)
+    out = []
+    for i in q.all():
+        expires = _as_aware_utc(i.lease_expires_at)
+        holds_lease = i.lease_owner is not None
+        out.append({
+            "id": i.id, "source": i.source,
+            "account_alias": i.account_alias, "status": i.status,
+            "automation": i.automation, "egress_ref": i.egress_ref,
+            "last_login_at": _iso(i.last_login_at),
+            "last_probe_at": _iso(i.last_probe_at),
+            "last_success_at": _iso(i.last_success_at),
+            "consecutive_zero_runs": i.consecutive_zero_runs,
+            "failure_count": i.failure_count,
+            "lease_owner": i.lease_owner,
+            "leased": holds_lease and (expires is None or expires > now),
+            "lease_expired": holds_lease and expires is not None and expires <= now,
+        })
+    return out
+
+
+def identity_pool_summary(session: Session, source: str | None = None,
+                          now: dt.datetime | None = None) -> dict:
+    """The ``auth_status`` payload: identity totals, the login-required queue
+    length, and per source the status distribution (five states) + the
+    currently-leased count. With ``source``: also that source's detail rows
+    (``identities``, empty when it has none — an unknown source is not an
+    error, it just owns no pool)."""
+    now = now or dt.datetime.now(dt.timezone.utc)
+    rows = identity_pool(session, source=source, now=now)
+    by_source: dict[str, dict] = {}
+    for r in rows:
+        bucket = by_source.setdefault(r["source"], {
+            "source": r["source"], "total": 0, "leased": 0, "statuses": {}})
+        bucket["total"] += 1
+        bucket["statuses"][r["status"]] = bucket["statuses"].get(r["status"], 0) + 1
+        if r["leased"]:
+            bucket["leased"] += 1
+    out = {
+        "total_identities": len(rows),
+        "login_required": sum(b["statuses"].get("login_required", 0)
+                              for b in by_source.values()),
+        "active": sum(b["statuses"].get("active", 0)
+                      for b in by_source.values()),
+        "leased": sum(b["leased"] for b in by_source.values()),
+        "sources": [by_source[k] for k in sorted(by_source)],
+    }
+    if source is not None:
+        out["source"] = source
+        out["identities"] = rows
+    return out
+
+
+def login_queue(session: Session) -> list[dict]:
+    """The 需登录队列: identities with status='login_required', most-failed
+    first, then longest-since-last-login (never-logged-in sorts first —
+    registrations await their first login)."""
+    rows = [r for r in identity_pool(session) if r["status"] == "login_required"]
+    rows.sort(key=lambda r: (-r["failure_count"], r["last_login_at"] or ""))
+    return rows
+
+
+def identity_events(session: Session, source: str | None = None,
+                    limit: int = IDENTITY_EVENT_STREAM_LIMIT) -> list[dict]:
+    """Newest ``crawl_identity_events`` with their identity (source + alias)
+    attached, newest first, capped at ``limit`` (default: the panel stream's
+    latest 20; hard cap 200)."""
+    limit = max(1, min(int(limit or IDENTITY_EVENT_STREAM_LIMIT), 200))
+    q = (
+        session.query(CrawlIdentityEvent,
+                      CrawlIdentity.source, CrawlIdentity.account_alias)
+        .join(CrawlIdentity, CrawlIdentityEvent.identity_id == CrawlIdentity.id)
+        .order_by(CrawlIdentityEvent.created_at.desc().nulls_last(),
+                  CrawlIdentityEvent.id.desc())
+    )
+    if source is not None:
+        q = q.filter(CrawlIdentity.source == source)
+    out = []
+    for ev, src, alias in q.limit(limit).all():
+        out.append({
+            "id": ev.id, "source": src, "account_alias": alias,
+            "kind": ev.kind, "detail": ev.detail,
+            "lease_token": ev.lease_token, "created_at": _iso(ev.created_at),
+        })
+    return out
 
 
 # --- the composite snapshot --------------------------------------------------

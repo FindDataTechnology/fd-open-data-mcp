@@ -23,6 +23,11 @@
   </tr>
 </table>
 </div>
+{% if src.auth_profile %}
+<p><span class="badge running">认证源 authenticated</span>
+  <span class="muted">auth_profile=<code>{{ src.auth_profile }}</code> — 登录身份见 the identity pool lives on the
+  <a href="/panel/auth">认证面板 auth panel</a></span></p>
+{% endif %}
 {% if pipeline %}
 <p><span class="badge success">来自发现流水线 from discovery pipeline</span>
   <span class="muted">manifest #{{ pipeline.manifest_id }} 批准于 approved

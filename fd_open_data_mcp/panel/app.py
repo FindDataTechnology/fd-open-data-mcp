@@ -951,6 +951,50 @@ def create_app() -> FastAPI:
         except Exception as e:  # noqa: BLE001
             return _unavailable(e)
 
+    # ── authenticated-crawling panel (session-pool 4.1) ─────────────────────
+    # Read-only view over the central identity pool (crawl_identities /
+    # crawl_identity_events): the identity x health matrix, the login-required
+    # queue and the event stream. The page shell never queries; the polled
+    # partial carries the data and degrades independently. Logins happen on
+    # the login site — this surface only observes (spec authenticated-crawling).
+    @app.get("/panel/auth", response_class=HTMLResponse)
+    def auth_page(request: Request):
+        return templates.TemplateResponse(
+            request, "auth.html", {"poll_seconds": POLL_SECONDS})
+
+    @app.get("/panel/partials/auth", response_class=HTMLResponse)
+    def partial_auth(request: Request):
+        """Polled auth panel: identity matrix grouped by source, the
+        login-required queue and the latest identity events (15s, degrades
+        like every home partial)."""
+        try:
+            s = _session()
+            try:
+                pool = _snapshot.identity_pool(s)
+                queue = _snapshot.login_queue(s)
+                events = _snapshot.identity_events(s, limit=20)
+                profiles = dict(
+                    s.query(CrawlSource.source, CrawlSource.auth_profile).all())
+            finally:
+                s.close()
+            grouped: dict[str, list[dict]] = {}
+            for r in pool:
+                grouped.setdefault(r["source"], []).append(r)
+            groups = [{"source": src,
+                       "auth_profile": profiles.get(src),
+                       "identities": ids}
+                      for src, ids in sorted(grouped.items())]
+            return templates.TemplateResponse(
+                request, "partial_auth.html",
+                {"groups": groups, "queue": queue, "events": events,
+                 "summary": {
+                     "total": len(pool),
+                     "active": sum(1 for r in pool if r["status"] == "active"),
+                     "login_required": len(queue),
+                     "leased": sum(1 for r in pool if r["leased"])}})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
+
     # ── editor ─────────────────────────────────────────────────────────────
     def _editor_context(s, policy: CrawlPolicy | None):
         selected = set(policy.concept_ids) if policy else set()

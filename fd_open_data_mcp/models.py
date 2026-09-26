@@ -964,12 +964,16 @@ class CrawlSource(Base):
     schedule = Column(Text, nullable=True)            # NULL = 未点亮
     enabled = Column(Boolean, nullable=False, default=True)
     last_commit = Column(Text, nullable=True)
+    # session-pool: the source's login profile (spiders/<source>/login.py
+    # declares it); NULL = anonymous crawl, no identity pool consulted.
+    auth_profile = Column(Text, nullable=True)
     updated_at = Column(DateTime(timezone=True), default=_now)
 
     def toDict(self) -> dict:
         return {
             "source": self.source, "site": self.site, "schedule": self.schedule,
             "enabled": self.enabled, "last_commit": self.last_commit,
+            "auth_profile": self.auth_profile,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
@@ -992,6 +996,10 @@ class CrawlRun(Base):
     image_tag = Column(Text, nullable=True)
     cancel_requested = Column(DateTime(timezone=True), nullable=True)
     pending_run_id = Column(Bigint, nullable=True)    # trigger lineage, no hard FK
+    # session-pool: the crawl_identities.account_alias whose leased session the
+    # run was injected with (NULL = anonymous run). Alias, not FK — the pool
+    # table is keyed (source, account_alias) and rows outlive runs.
+    identity_alias = Column(Text, nullable=True)
     created_at = Column(DateTime(timezone=True), default=_now)
 
     def toDict(self) -> dict:
@@ -1005,6 +1013,7 @@ class CrawlRun(Base):
             "cancel_requested": (self.cancel_requested.isoformat()
                                  if self.cancel_requested else None),
             "pending_run_id": self.pending_run_id,
+            "identity_alias": self.identity_alias,
         }
 
 
@@ -1062,6 +1071,106 @@ class PendingRun(Base):
             "run_id": self.run_id, "error_head": self.error_head,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
+        }
+
+
+# --- authenticated-crawling identity pool (session-pool) -----------------------
+# Mirror of the central identity-pool tables (created by change session-pool
+# task 1.1 in the central fd_open_data database). Column names match the
+# deployed DDL exactly; the panel reads these read-only (logins happen on the
+# login site) while the auth_request_login MCP tool only registers rows in
+# login_required + note events. Timestamps are TIMESTAMPTZ in PG; sqlite tests
+# read them back naive (the writer contract snapshot._as_aware_utc documents).
+IDENTITY_STATUSES = ("login_required", "active", "cooldown", "banned", "retired")
+IDENTITY_EVENT_KINDS = (
+    "login", "probe", "small_batch", "lease_acquired", "lease_released",
+    "lease_expired", "auth_failed", "suspect_yield", "banned", "note",
+)
+
+
+class CrawlIdentity(Base):
+    """One account identity in a source's pool (crawl_identities).
+
+    Five-state machine: login_required -> active -> (cooldown | banned |
+    retired); UNIQUE(source, account_alias). The lease_* columns implement the
+    table-semantics atomic lease (claim writes owner + token + TTL; TTL expiry
+    is lazily re-claimable). Sessions live in object storage (session_ref);
+    credentials in k8s secrets (credentials_secret_ref) — neither here."""
+    __tablename__ = "crawl_identities"
+    __table_args__ = (
+        UniqueConstraint("source", "account_alias", name="uq_identity_source_alias"),
+        CheckConstraint(
+            "status in ('login_required','active','cooldown','banned','retired')",
+            name="ck_identity_status"),
+        CheckConstraint("automation in ('auto','assisted')",
+                        name="ck_identity_automation"),
+        Index("idx_identities_source_status", "source", "status"),
+    )
+
+    id = Column(Bigint, primary_key=True, autoincrement=True)
+    source = Column(Text, nullable=False)
+    account_alias = Column(Text, nullable=False)
+    status = Column(Text, nullable=False, default="login_required")
+    automation = Column(Text, nullable=False, default="assisted")  # auto | assisted
+    egress_ref = Column(Text, nullable=True)            # identity-level egress binding
+    credentials_secret_ref = Column(Text, nullable=True)
+    session_ref = Column(Text, nullable=True)           # encrypted jar in RustFS
+    lease_owner = Column(Text, nullable=True)
+    lease_token = Column(Text, nullable=True)
+    lease_expires_at = Column(DateTime(timezone=True), nullable=True)
+    last_login_at = Column(DateTime(timezone=True), nullable=True)
+    last_probe_at = Column(DateTime(timezone=True), nullable=True)
+    last_success_at = Column(DateTime(timezone=True), nullable=True)
+    consecutive_zero_runs = Column(Integer, nullable=False, default=0)
+    failure_count = Column(Integer, nullable=False, default=0)
+    created_at = Column(DateTime(timezone=True), default=_now)
+    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "source": self.source,
+            "account_alias": self.account_alias, "status": self.status,
+            "automation": self.automation, "egress_ref": self.egress_ref,
+            "lease_owner": self.lease_owner,
+            "lease_expires_at": (self.lease_expires_at.isoformat()
+                                 if self.lease_expires_at else None),
+            "last_login_at": (self.last_login_at.isoformat()
+                              if self.last_login_at else None),
+            "last_success_at": (self.last_success_at.isoformat()
+                                if self.last_success_at else None),
+            "consecutive_zero_runs": self.consecutive_zero_runs,
+            "failure_count": self.failure_count,
+        }
+
+
+class CrawlIdentityEvent(Base):
+    """Audit event for one identity (crawl_identity_events) — the replayable
+    login/probe/lease trail the spec requires. lease_token correlates the
+    event with the lease it belongs to."""
+    __tablename__ = "crawl_identity_events"
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('login','probe','small_batch','lease_acquired',"
+            "'lease_released','lease_expired','auth_failed','suspect_yield',"
+            "'banned','note')",
+            name="ck_identity_event_kind"),
+        Index("idx_identity_events_identity_created", "identity_id", "created_at"),
+    )
+
+    id = Column(Bigint, primary_key=True, autoincrement=True)
+    identity_id = Column(Bigint,
+                         ForeignKey("crawl_identities.id", ondelete="CASCADE"),
+                         nullable=False)
+    kind = Column(Text, nullable=False)
+    detail = Column(Text, nullable=True)
+    lease_token = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "identity_id": self.identity_id, "kind": self.kind,
+            "detail": self.detail, "lease_token": self.lease_token,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
         }
 
 

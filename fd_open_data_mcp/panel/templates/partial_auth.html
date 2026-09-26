@@ -1,0 +1,91 @@
+{% from "_macros.html" import th %}
+{#- five-state badge coloring: warn=needs action, green=healthy, info=paused,
+    red=dead, gray=retired -#}
+{% set status_badge = {'login_required': 'refused', 'active': 'success',
+                       'cooldown': 'running', 'banned': 'failed',
+                       'retired': 'cancelled'} %}
+{% set kind_badge = {'login': 'success', 'probe': 'running',
+                     'small_batch': 'running', 'lease_acquired': 'running',
+                     'lease_released': 'no_op', 'lease_expired': 'refused',
+                     'auth_failed': 'failed', 'suspect_yield': 'zero_yield',
+                     'banned': 'failed', 'note': 'no_op'} %}
+
+<p>
+  <span class="badge">身份 identities {{ summary.total }}</span>
+  <span class="badge success">活跃 active {{ summary.active }}</span>
+  <span class="badge refused">需登录 login_required {{ summary.login_required }}</span>
+  <span class="badge running">租借中 leased {{ summary.leased }}</span>
+</p>
+
+<h3>需登录队列 <span class="en">Login-required queue</span></h3>
+<p class="muted">失败次数多者先处理，从未登录过的（新登记）排最前。
+Most failures first; never-logged-in registrations at the head.</p>
+<div class="table-wrap">
+<table>
+  <tr>{{ th('源', 'Source') }}{{ th('账号', 'Account') }}{{ th('自动化', 'Automation') }}{{ th('最近登录', 'Last login') }}{{ th('失败次数', 'Failures') }}</tr>
+  {% for i in queue %}
+  <tr>
+    <td><a href="/panel/sources/{{ i.source | urlencode }}">{{ i.source }}</a></td>
+    <td>{{ i.account_alias }}</td>
+    <td class="muted">{{ i.automation }}</td>
+    <td class="muted">{{ i.last_login_at or '从未登录 never logged in' }}</td>
+    <td>{{ i.failure_count }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">队列为空，没有需要登录的身份 Empty queue — no identities need a login.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<h3>身份矩阵 <span class="en">Identity matrix</span></h3>
+<p class="muted">按源分组：账号 / 五态状态 / 自动化程度 / 最近登录 / 最近成功 / 连续零产出 / 租借。
+Grouped by source: account, five-state status, automation, last login/success, zero-run streak, lease.</p>
+<div class="table-wrap">
+<table>
+  <tr>{{ th('账号', 'Account') }}{{ th('状态', 'Status') }}{{ th('自动化', 'Automation') }}{{ th('最近登录', 'Last login') }}{{ th('最近成功', 'Last success') }}{{ th('连续零产出', 'Zero-run streak') }}{{ th('租借', 'Lease') }}</tr>
+  {% for g in groups %}
+  <tr>
+    <td colspan="7">
+      <strong>{{ g.source }}</strong>
+      {% if g.auth_profile %}<span class="badge running">认证源 authenticated</span>{% endif %}
+      <span class="muted">{{ g.identities | length }} 身份 identities</span>
+    </td>
+  </tr>
+  {% for i in g.identities %}
+  <tr>
+    <td>{{ i.account_alias }}</td>
+    <td><span class="badge {{ status_badge.get(i.status, 'no_op') }}">{{ i.status }}</span></td>
+    <td class="muted">{{ i.automation }}</td>
+    <td class="muted">{{ i.last_login_at or '—' }}</td>
+    <td class="muted">{{ i.last_success_at or '—' }}</td>
+    <td>{% if i.consecutive_zero_runs %}<span class="warn-text">{{ i.consecutive_zero_runs }}</span>{% else %}<span class="muted">0</span>{% endif %}</td>
+    <td>{% if i.leased %}<span class="badge running">租借中 leased</span> <span class="muted">{{ i.lease_owner }}</span>
+        {% elif i.lease_expired %}<span class="badge refused">租约过期 lease expired</span>
+        {% else %}<span class="muted">—</span>{% endif %}</td>
+  </tr>
+  {% endfor %}
+  {% else %}
+  <tr><td colspan="7" class="muted">尚无身份 No identities registered yet.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<h3>事件流 <span class="en">Event stream</span> <span class="muted">最近 20 条 latest 20</span></h3>
+<p class="muted">login / probe / small_batch / lease / 失效与封禁留痕，可按身份回放。
+The auditable login/probe/lease trail, replayable per identity.</p>
+<div class="table-wrap">
+<table>
+  <tr>{{ th('时间', 'Time') }}{{ th('类型', 'Kind') }}{{ th('身份', 'Identity') }}{{ th('详情', 'Detail') }}{{ th('租借令牌', 'Lease token') }}</tr>
+  {% for ev in events %}
+  <tr>
+    <td class="muted">{{ ev.created_at or '—' }}</td>
+    <td><span class="badge {{ kind_badge.get(ev.kind, 'no_op') }}">{{ ev.kind }}</span></td>
+    <td><a href="/panel/sources/{{ ev.source | urlencode }}">{{ ev.source }}</a> / {{ ev.account_alias }}</td>
+    <td class="muted wrap">{{ ev.detail or '—' }}</td>
+    <td class="muted">{{ (ev.lease_token or '')[:8] or '—' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">尚无事件 No identity events yet.</td></tr>
+  {% endfor %}
+</table>
+</div>
