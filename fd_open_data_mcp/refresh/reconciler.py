@@ -39,6 +39,7 @@ from zoneinfo import ZoneInfo
 from fd_open_data_mcp.crawl.plan import CrawlPlan, DateRange, EntityScope
 from fd_open_data_mcp.crawl.planner import plan_crawl
 from fd_open_data_mcp.models import Cluster, CrawlPolicy, EntitySourceIdentifier, PolicyRun, Proxy
+from fd_open_data_mcp.refresh.platform_mirror import mirror_run_close
 
 logger = logging.getLogger(__name__)
 
@@ -987,6 +988,9 @@ def reconcile_once(
             run.status = classify_yield(run) if state == "success" else "failed"
             run.finished_at = now
             summary["probed_closed"] += 1
+            # concept-platform-federation: mirror the close into crawl_runs
+            # (swallows its own failures — never blocks the close above)
+            mirror_run_close(session, run)
             logger.info("run %d closed as %s (plan_cells=%s attempted=%s new=%s)",
                         run.id, run.status, run.plan_cells,
                         run.rows_attempted, run.rows_new)

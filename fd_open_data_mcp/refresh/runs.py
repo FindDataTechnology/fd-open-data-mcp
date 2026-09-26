@@ -20,6 +20,7 @@ from types import SimpleNamespace
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import PolicyRun
+from fd_open_data_mcp.refresh.platform_mirror import mirror_run_close
 from fd_open_data_mcp.refresh.reconciler import (
     CANCELLED, POLICY_MAX_FETCHES, Launcher, _OPEN, estimate_fetches,
 )
@@ -69,6 +70,11 @@ def cancel_run(
     job_deleted = False
     run = session.get(PolicyRun, run_id)
     job_ref = run.job_ref if run else None
+    if run is not None:
+        # concept-platform-federation: mirror the cancel close into crawl_runs
+        # (swallows its own failures — never affects the cancel outcome)
+        if mirror_run_close(session, run):
+            session.commit()
     if launcher is not None and job_ref:
         try:
             job_deleted = bool(launcher.delete(job_ref))

@@ -198,14 +198,15 @@ def consume_concepts_cmd():
 @cli.command("list-concepts")
 @click.option("--entity-type", help="Restrict to one entity type (country, stock, ...)")
 @click.option("--concept-family", help="Restrict to one concept family id (GDP, Population, ...)")
-def list_concepts_cmd(entity_type, concept_family):
+@click.option("--query", "query", default=None, help="Substring filter on code/name (or native_code for registry rows)")
+def list_concepts_cmd(entity_type, concept_family, query):
     """List variables with their concept family (the two-level concept model)."""
     from fd_open_data_mcp.db import get_database
     from fd_open_data_mcp.semantic.concepts import list_concepts_with_family
 
     s = get_database().get_session()
     try:
-        _echo(list_concepts_with_family(s, entity_type=entity_type, concept_family=concept_family))
+        _echo(list_concepts_with_family(s, entity_type=entity_type, concept_family=concept_family, query=query))
     finally:
         s.close()
 
@@ -347,6 +348,21 @@ def generate_schedules_cmd():
     s = get_database().get_session()
     try:
         _echo(generate_schedules(s))
+    finally:
+        s.close()
+
+
+@cli.command("register-concept-sources")
+@click.option("--site", default="tencent", show_default=True,
+              help="Site tag for the registered rows (informational for federated members).")
+def register_concept_sources_cmd(site):
+    """Register every catalog source into platform crawl_sources (idempotent)."""
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.refresh.platform_mirror import register_concept_sources
+
+    s = get_database().get_session()
+    try:
+        _echo(register_concept_sources(s, site=site))
     finally:
         s.close()
 
