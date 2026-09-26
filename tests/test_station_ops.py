@@ -248,8 +248,8 @@ def test_create_station_job_and_service_spec(session):
     job = fake.manifests("Job")[0]
     service = fake.manifests("Service")[0]
 
-    # naming: login-<src '-'->'_'>-<alias sanitized>-<rand6>, shared by both
-    assert re.fullmatch(r"login-rmfy_alk-acc_1-[0-9a-f]{6}",
+    # naming: login-<src '-'-sanitized>-<alias sanitized>-<rand6>, shared by both
+    assert re.fullmatch(r"login-rmfy-alk-acc-1-[0-9a-f]{6}",
                         job["metadata"]["name"])
     assert service["metadata"]["name"] == job["metadata"]["name"]
     assert job["metadata"]["namespace"] == station_ops.STATION_NAMESPACE
