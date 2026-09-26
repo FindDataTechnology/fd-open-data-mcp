@@ -804,10 +804,13 @@ def create_app() -> FastAPI:
                             PendingRun.status.in_(("pending", "claimed")))
                     .order_by(PendingRun.id.desc()).all())
             ]
+            # discovery-pipeline provenance (query-time fact, no FK): the
+            # latest approved manifest whose source_name equals this source
+            pipeline = _snapshot.source_pipeline_link(s, source)
             return templates.TemplateResponse(
                 request, "source_detail.html",
                 {"src": src.toDict(), "health": row,
-                 "runs": runs, "pending": pending})
+                 "runs": runs, "pending": pending, "pipeline": pipeline})
         finally:
             s.close()
 
@@ -919,6 +922,32 @@ def create_app() -> FastAPI:
                 s.close()
             return templates.TemplateResponse(
                 request, "partial_platform.html", {"h": h})
+        except Exception as e:  # noqa: BLE001
+            return _unavailable(e)
+
+    # ── source-discovery funnel (harness-platform-integration 2.2/2.3) ──────
+    # Read-only view over the central pipeline tables (discoveries /
+    # candidates / analyses / manifests). The page shell never touches the
+    # DB; the polled partial carries the data and degrades independently.
+    # Approval happens on the harness tool surface (agent-operated) — the
+    # panel only observes the funnel (spec source-discovery-pipeline).
+    @app.get("/panel/funnel", response_class=HTMLResponse)
+    def funnel_page(request: Request):
+        return templates.TemplateResponse(
+            request, "funnel.html", {"poll_seconds": POLL_SECONDS})
+
+    @app.get("/panel/partials/funnel", response_class=HTMLResponse)
+    def partial_funnel(request: Request):
+        """Polled funnel stage counts + latest approval queue (15s, degrades
+        like every home partial)."""
+        try:
+            s = _session()
+            try:
+                f = _snapshot.discovery_funnel(s)
+            finally:
+                s.close()
+            return templates.TemplateResponse(
+                request, "partial_funnel.html", {"f": f})
         except Exception as e:  # noqa: BLE001
             return _unavailable(e)
 

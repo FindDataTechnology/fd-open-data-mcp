@@ -1063,3 +1063,122 @@ class PendingRun(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "finished_at": self.finished_at.isoformat() if self.finished_at else None,
         }
+
+
+# --- source-discovery pipeline mirror tables (harness-platform-integration) ---
+# Read-only mirrors of the discovery pipeline tables that live in the central
+# fd_open_data database (created and written by the fd-scraw-harness side:
+# discover → candidates → analyses → manifests). Column names match the
+# deployed central DDL exactly; unlike the crawl-platform tables above, the
+# panel/MCP never write these — approval happens on the harness tool surface.
+# Timestamps are TIMESTAMP WITHOUT TIME ZONE (naive-UTC writer contract), so
+# the models use plain DateTime. The approved-manifest -> crawl_sources landed
+# linkage is a QUERY-TIME fact (source_name == crawl_sources.source): no FK,
+# no schema change (spec source-discovery-pipeline).
+MANIFEST_STATUSES = ("draft", "approved", "rejected")
+
+
+def _now_naive() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+class Discovery(Base):
+    """One source-discovery run (a query for new data sources)."""
+    __tablename__ = "discoveries"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    query = Column(Text, nullable=True)
+    query_type = Column(String(16), nullable=True)     # e.g. topic|domain
+    status = Column(String(32), nullable=True, index=True)
+    created_at = Column(DateTime, default=_now_naive)
+    updated_at = Column(DateTime, default=_now_naive)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "query": self.query, "query_type": self.query_type,
+            "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class Candidate(Base):
+    """A candidate data source surfaced by one discovery run."""
+    __tablename__ = "candidates"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    discovery_id = Column(Integer, ForeignKey("discoveries.id"), index=True)
+    url = Column(Text, nullable=True)
+    title = Column(Text, nullable=True)
+    description = Column(Text, nullable=True)
+    estimated_data_type = Column(String(64), nullable=True)
+    score = Column(Integer, nullable=True)
+    coverage_status = Column(String(32), nullable=True)
+    coverage_details = Column(Text, nullable=True)
+    adjusted_score = Column(Integer, nullable=True)
+    created_at = Column(DateTime, default=_now_naive)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "discovery_id": self.discovery_id, "url": self.url,
+            "title": self.title, "description": self.description,
+            "estimated_data_type": self.estimated_data_type,
+            "score": self.score, "coverage_status": self.coverage_status,
+            "coverage_details": self.coverage_details,
+            "adjusted_score": self.adjusted_score,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class Analysis(Base):
+    """Deep page analysis of one candidate (DOM snapshot, endpoints, tables)."""
+    __tablename__ = "analyses"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), index=True)
+    discovery_id = Column(Integer, ForeignKey("discoveries.id"), index=True)
+    page_url = Column(Text, nullable=True)
+    page_title = Column(Text, nullable=True)
+    dom_snapshot = Column(Text, nullable=True)
+    api_endpoints = Column(Text, nullable=True)
+    data_tables = Column(Text, nullable=True)
+    download_links = Column(Text, nullable=True)
+    forms = Column(Text, nullable=True)
+    raw_analysis = Column(Text, nullable=True)
+    status = Column(String(32), nullable=True, index=True)
+    created_at = Column(DateTime, default=_now_naive)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "candidate_id": self.candidate_id,
+            "discovery_id": self.discovery_id, "page_url": self.page_url,
+            "page_title": self.page_title, "status": self.status,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+        }
+
+
+class SourceManifest(Base):
+    """A generated crawler manifest awaiting or carrying approval. Its
+    source_name links (query-time only) to crawl_sources once landed."""
+    __tablename__ = "manifests"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    discovery_id = Column(Integer, ForeignKey("discoveries.id"), index=True)
+    analysis_id = Column(Integer, ForeignKey("analyses.id"), index=True)
+    manifest_yaml = Column(Text, nullable=True)
+    source_name = Column(String(128), nullable=True, index=True)
+    model_used = Column(String(128), nullable=True)
+    status = Column(String(32), nullable=True, index=True)  # draft|approved|rejected
+    validation_error = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=_now_naive)
+    updated_at = Column(DateTime, default=_now_naive)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "discovery_id": self.discovery_id,
+            "analysis_id": self.analysis_id, "manifest_yaml": self.manifest_yaml,
+            "source_name": self.source_name, "model_used": self.model_used,
+            "status": self.status, "validation_error": self.validation_error,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }

@@ -27,8 +27,9 @@ from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
 from fd_open_data_mcp.models import (
-    CrawlPolicy, CrawlRun, CrawlSite, CrawlSource, PendingRun, Cluster,
-    EntitySourceIdentifier, FetchLog, PolicyRun, SourceProxyHealth,
+    Analysis, Candidate, CrawlPolicy, CrawlRun, CrawlSite, CrawlSource,
+    Discovery, PendingRun, Cluster, EntitySourceIdentifier, FetchLog,
+    PolicyRun, SourceProxyHealth, SourceManifest,
 )
 from fd_open_data_mcp.visibility import state as _state
 
@@ -690,6 +691,85 @@ def platform_health(session: Session, hours: int = 24,
         "failed_24h": by_status.get("failed", 0),
         "window_hours": hours,
     }
+
+
+# --- source-discovery pipeline funnel (harness-platform-integration) --------
+def discovery_funnel(session: Session, pending_limit: int = 10) -> dict:
+    """Read-only funnel over the central pipeline tables (discoveries /
+    candidates / analyses / manifests) plus the landed linkage.
+
+    Stage counts — discoveries / candidates / analyses (row counts),
+    generated (all manifests), pending (status='draft'), approved
+    (status='approved'), landed: approved manifests whose source_name
+    exactly matches a crawl_sources.source. Landed is a QUERY-TIME FACT —
+    no FK, no schema change (spec source-discovery-pipeline).
+
+    Also returns the latest draft manifests (the approval queue — approval
+    itself happens on the harness tool surface, this is read-only) and the
+    latest approved manifests each with its landed flag. Shared by the
+    panel funnel view and (future) MCP tools, like every query here.
+    """
+    landed_names = {r[0] for r in session.query(CrawlSource.source).all()}
+
+    def _count(q) -> int:
+        return int(q.scalar() or 0)
+
+    approved_rows = (
+        session.query(SourceManifest)
+        .filter(SourceManifest.status == "approved")
+        .order_by(SourceManifest.updated_at.desc().nulls_last(),
+                  SourceManifest.id.desc())
+        .all())
+    counts = {
+        "discoveries": _count(session.query(func.count(Discovery.id))),
+        "candidates": _count(session.query(func.count(Candidate.id))),
+        "analyses": _count(session.query(func.count(Analysis.id))),
+        "generated": _count(session.query(func.count(SourceManifest.id))),
+        "pending": _count(session.query(func.count(SourceManifest.id))
+                          .filter(SourceManifest.status == "draft")),
+        "approved": len(approved_rows),
+        "landed": sum(1 for m in approved_rows
+                      if (m.source_name or "") in landed_names),
+    }
+
+    def _brief(m: SourceManifest, *, landed: bool = False) -> dict:
+        d = {"id": m.id, "source_name": m.source_name,
+             "model_used": m.model_used,
+             "updated_at": _iso(m.updated_at) or _iso(m.created_at)}
+        if landed:
+            # only approved manifests can be landed (spec: draft never lands)
+            d["landed"] = bool(m.source_name) and m.source_name in landed_names
+        return d
+
+    queue = (
+        session.query(SourceManifest)
+        .filter(SourceManifest.status == "draft")
+        .order_by(SourceManifest.updated_at.desc().nulls_last(),
+                  SourceManifest.id.desc())
+        .limit(pending_limit).all())
+    return {
+        "counts": counts,
+        "pending": [_brief(m) for m in queue],
+        "approved": [_brief(m, landed=True)
+                     for m in approved_rows[:pending_limit]],
+    }
+
+
+def source_pipeline_link(session: Session, source: str) -> dict | None:
+    """Discovery-pipeline provenance for one landed source: the latest
+    approved manifest whose source_name equals this crawl_sources.source.
+    Query-time fact like ``discovery_funnel``'s landed count — never writes."""
+    m = (session.query(SourceManifest)
+         .filter(SourceManifest.source_name == source,
+                 SourceManifest.status == "approved")
+         .order_by(SourceManifest.updated_at.desc().nulls_last(),
+                   SourceManifest.id.desc())
+         .first())
+    if m is None:
+        return None
+    return {"manifest_id": m.id, "source_name": m.source_name,
+            "model_used": m.model_used,
+            "updated_at": _iso(m.updated_at) or _iso(m.created_at)}
 
 
 # --- the composite snapshot --------------------------------------------------
