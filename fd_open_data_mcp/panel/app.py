@@ -333,6 +333,17 @@ def create_app() -> FastAPI:
                 return await call_next(request)
         session = _auth.read_session(request.cookies.get(_auth.SESSION_COOKIE))
         if session is not None:
+            # Role gate takes precedence (panel-role-gate D2): re-check the
+            # roles frozen into the session at login — removals in Logto
+            # propagate at next login, not mid-session.
+            role = _auth.required_role()
+            if role is not None:
+                if role in session["roles"]:
+                    request.state.panel_user = session
+                    return await call_next(request)
+                return HTMLResponse(
+                    f"<h1>403 - missing required role {role}</h1>",
+                    status_code=403)
             allowed = _auth.allow_list()
             if allowed is None or session["sub"] in allowed:
                 request.state.panel_user = session
@@ -371,17 +382,33 @@ def create_app() -> FastAPI:
         if not _auth.check_state(request.cookies.get(_auth.STATE_COOKIE), state):
             return HTMLResponse("<h1>401 - bad state</h1>", status_code=401)
         try:
-            claims = _auth.id_token_claims(cfg, _auth.exchange_code(cfg, code))
+            token_response = _auth.exchange_code(cfg, code)
+            claims = _auth.id_token_claims(cfg, token_response)
         except Exception as e:  # noqa: BLE001 - provider/network errors
             return HTMLResponse(f"<h1>login failed</h1><p>{e}</p>", status_code=401)
-        allowed = _auth.allow_list()
-        if allowed is not None and claims.get("sub") not in allowed:
-            return HTMLResponse("<h1>403 - user not in PANEL_USER_IDS</h1>",
-                                status_code=403)
+        role = _auth.required_role()
+        roles: list[str] = []
+        if role is not None:
+            # Role admission (panel-role-gate): no roles claim anywhere or
+            # role not held → 403 before any session cookie is issued.
+            extracted = _auth.extract_roles(cfg, claims, token_response)
+            if extracted is None:
+                return HTMLResponse("<h1>403 - no roles claim in token</h1>",
+                                    status_code=403)
+            if role not in extracted:
+                return HTMLResponse(
+                    f"<h1>403 - missing required role {role}</h1>",
+                    status_code=403)
+            roles = extracted
+        else:
+            allowed = _auth.allow_list()
+            if allowed is not None and claims.get("sub") not in allowed:
+                return HTMLResponse("<h1>403 - user not in PANEL_USER_IDS</h1>",
+                                    status_code=403)
         resp = RedirectResponse("/panel", status_code=302)
         resp.set_cookie(_auth.SESSION_COOKIE,
                         _auth.make_session_value(claims.get("sub", ""),
-                                                 claims.get("name", "")),
+                                                 claims.get("name", ""), roles),
                         httponly=True, samesite="lax",
                         max_age=_auth.SESSION_HOURS * 3600)
         resp.delete_cookie(_auth.STATE_COOKIE)
@@ -1236,8 +1263,9 @@ def create_app() -> FastAPI:
     def _station_ws_authorized(websocket: WebSocket) -> bool:
         """The panel gate for the websocket scope (the http middleware cannot
         see websockets): same primitives — PANEL_TOKEN (?token= / header /
-        cookie) or a valid OIDC session cookie; an unconfigured gate stays
-        open, exactly like the http gate."""
+        cookie) or a valid OIDC session cookie (with the role re-check,
+        panel-role-gate D2); an unconfigured gate stays open, exactly like
+        the http gate."""
         token = os.environ.get("PANEL_TOKEN")
         if token and (websocket.query_params.get("token") == token
                       or websocket.headers.get("x-panel-token") == token
@@ -1246,9 +1274,14 @@ def create_app() -> FastAPI:
         sess = _auth.read_session(
             websocket.cookies.get(_auth.SESSION_COOKIE))
         if sess is not None:
-            allowed = _auth.allow_list()
-            if allowed is None or sess["sub"] in allowed:
-                return True
+            role = _auth.required_role()
+            if role is not None:
+                if role in sess["roles"]:
+                    return True
+            else:
+                allowed = _auth.allow_list()
+                if allowed is None or sess["sub"] in allowed:
+                    return True
         if token is None and _auth.logto_config() is None:
             return True  # no gate configured — open panel (http parity)
         return False
