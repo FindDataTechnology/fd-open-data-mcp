@@ -323,13 +323,11 @@ def create_app() -> FastAPI:
         if path in _PUBLIC_AUTH_PATHS or path.startswith("/panel/static"):
             return await call_next(request)
         if token:
-            q = request.query_params.get("token")
-            if q == token:
-                resp = await call_next(request)
-                resp.set_cookie("panel_token", token)
-                return resp
-            if (request.headers.get("X-Panel-Token") == token
-                    or request.cookies.get("panel_token") == token):
+            # query/header only — a browser-held panel_token cookie defeated
+            # both interactive paths (never redirected to Logto; logout could
+            # not log out), so the cookie variant is not admitted or set
+            if (request.query_params.get("token") == token
+                    or request.headers.get("X-Panel-Token") == token):
                 return await call_next(request)
         session = _auth.read_session(request.cookies.get(_auth.SESSION_COOKIE))
         if session is not None:
@@ -418,6 +416,7 @@ def create_app() -> FastAPI:
     def auth_logout():
         resp = RedirectResponse("/panel", status_code=302)
         resp.delete_cookie(_auth.SESSION_COOKIE)
+        resp.delete_cookie("panel_token")  # clear pre-role-gate browsers
         return resp
 
     @app.get("/panel/auth/whoami", response_class=HTMLResponse)
@@ -1262,14 +1261,12 @@ def create_app() -> FastAPI:
 
     def _station_ws_authorized(websocket: WebSocket) -> bool:
         """The panel gate for the websocket scope (the http middleware cannot
-        see websockets): same primitives — PANEL_TOKEN (?token= / header /
-        cookie) or a valid OIDC session cookie (with the role re-check,
-        panel-role-gate D2); an unconfigured gate stays open, exactly like
-        the http gate."""
+        see websockets): same primitives — PANEL_TOKEN (?token= / header) or a
+        valid OIDC session cookie (with the role re-check, panel-role-gate
+        D2); an unconfigured gate stays open, exactly like the http gate."""
         token = os.environ.get("PANEL_TOKEN")
         if token and (websocket.query_params.get("token") == token
-                      or websocket.headers.get("x-panel-token") == token
-                      or websocket.cookies.get("panel_token") == token):
+                      or websocket.headers.get("x-panel-token") == token):
             return True
         sess = _auth.read_session(
             websocket.cookies.get(_auth.SESSION_COOKIE))

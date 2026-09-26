@@ -332,3 +332,38 @@ def test_ws_gate_rechecks_session_role(session, oidc_env, monkeypatch):
                 cookies={_auth.SESSION_COOKIE: holding}) as ws:
             ws.receive_text()
     assert exc2.value.code == 4404
+
+
+# ─── browser token-cookie bypass removed (panel-role-gate follow-up) ────────
+def test_token_cookie_no_longer_admits(session, oidc_env, monkeypatch):
+    """A browser still holding a pre-role-gate panel_token cookie must be sent
+    to the Logto login instead of silently admitted (query/header still work
+    for programmatic callers — see test_token_still_admits_with_oidc_on)."""
+    from importlib import reload
+    import fd_open_data_mcp.panel.app as appmod
+    with monkeypatch.context() as m:
+        m.setenv("PANEL_TOKEN", "sekret")
+        c = TestClient(reload(appmod).app, follow_redirects=False)
+        r = c.get("/panel", cookies={"panel_token": "sekret"})
+        assert r.status_code == 302
+        assert r.headers["location"] == "/panel/auth/login"
+
+
+def test_query_token_visit_sets_no_cookie(session, oidc_env, monkeypatch):
+    from importlib import reload
+    import fd_open_data_mcp.panel.app as appmod
+    with monkeypatch.context() as m:
+        m.setenv("PANEL_TOKEN", "sekret")
+        c = TestClient(reload(appmod).app, follow_redirects=False)
+        r = c.get("/panel", params={"token": "sekret"})
+        assert r.status_code == 200
+        assert "panel_token" not in r.cookies
+
+
+def test_logout_clears_both_cookies(session, oidc_env):
+    c = _client()
+    r = c.get("/panel/auth/logout")
+    assert r.status_code == 302
+    names = {v.decode().split("=")[0]
+             for k, v in r.headers.raw if k.decode().lower() == "set-cookie"}
+    assert {"panel_token", _auth.SESSION_COOKIE} <= names
