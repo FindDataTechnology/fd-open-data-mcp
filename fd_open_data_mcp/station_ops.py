@@ -72,7 +72,7 @@ set -e
 git clone --depth 1 --filter=blob:none --sparse \
   "https://FindDataTechnology:${GITEE_TOKEN}@gitee.com/FindDataTechnology/fd-industry-data.git" /content
 cd /content
-git sparse-checkout set spiders/
+git sparse-checkout set spiders/ scripts/
 git rev-parse HEAD > /content/.commit
 """
 
