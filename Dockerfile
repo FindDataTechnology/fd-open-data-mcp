@@ -37,5 +37,6 @@ COPY alembic.ini /app/alembic.ini
 RUN useradd --create-home --uid 1000 appuser
 USER appuser
 
+ENV PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple PIP_DEFAULT_TIMEOUT=120 PIP_RETRIES=10
 EXPOSE 8300
 ENTRYPOINT ["fd-open-data-mcp", "serve", "--transport", "http", "--host", "0.0.0.0", "--port", "8300"]
