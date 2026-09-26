@@ -13,7 +13,9 @@
 
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('站点', 'Site') }}{{ th('调度', 'Schedule') }}{{ th('启用', 'Enabled') }}{{ th('最近提交', 'Last commit') }}{{ th('清单更新', 'Manifest updated') }}</tr>
+  </thead>
   <tr>
     <td class="muted">{{ src.site or '—' }}</td>
     <td>{% if src.schedule %}<code>{{ src.schedule }}</code>{% else %}<span class="muted">未点亮 not lit（无自动运行 no automatic runs）</span>{% endif %}</td>
@@ -46,7 +48,9 @@
 <h3>待运行 <span class="en">Pending</span></h3>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('ID') }}{{ th('源', 'Source') }}{{ th('状态', 'Status') }}{{ th('请求者', 'Requested by') }}{{ th('创建', 'Created') }}<th></th></tr>
+  </thead>
   {% for p in pending %}{% include "_pending_row.html" %}{% else %}
   <tr><td colspan="6" class="muted">没有待运行务 No pending runs.</td></tr>
   {% endfor %}
@@ -56,7 +60,9 @@
 <h3>最近 20 次运行 <span class="en">Last 20 runs</span></h3>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('ID') }}{{ th('源', 'Source') }}{{ th('状态', 'Status') }}{{ th('开始', 'Started') }}{{ th('结束', 'Finished') }}{{ th('产出行', 'Rows') }}{{ th('触发行', 'Trigger') }}{{ th('错误', 'Error') }}</tr>
+  </thead>
   {% for r in runs %}{% include "_platform_run_row.html" %}{% else %}
   <tr><td colspan="8" class="muted">尚无运行记录 No runs recorded yet.</td></tr>
   {% endfor %}

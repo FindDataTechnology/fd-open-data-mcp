@@ -4,8 +4,9 @@
       <form class="inline-form" method="post" action="/panel/clusters/{{ f.id }}/capacity"
             hx-post="/panel/clusters/{{ f.id }}/capacity" hx-target="closest tr" hx-swap="outerHTML">
         <input type="number" name="capacity" value="{{ f.capacity }}" min="0"
-               class="num-xs" title="最大并发运行数，下个 tick 生效 max concurrent open runs — effective next tick">
-        <button type="submit" class="link" title="保存容量 save capacity">↧</button>
+               class="num-xs" title="最大并发运行数，下个 tick 生效 max concurrent open runs — effective next tick"
+               aria-label="{{ f.name }} 最大并发运行数 max concurrent runs">
+        <button type="submit" class="link" title="保存容量 save capacity" aria-label="保存容量 save capacity">↧</button>
       </form>
       <span class="muted">open {{ f.open_runs }}</span>
       {% if f.open_runs > f.capacity %}<span class="badge refused">超载 over</span>{% endif %}

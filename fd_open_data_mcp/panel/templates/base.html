@@ -13,6 +13,7 @@
   <script src="/panel/static/app.js" defer></script>
 </head>
 <body>
+  <a class="skip-link" href="#main">跳到内容 Skip to content</a>
   <svg xmlns="http://www.w3.org/2000/svg" hidden>
     <symbol id="i-home" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
     <symbol id="i-policies" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></symbol>
@@ -26,7 +27,7 @@
 
   <div class="shell">
     <aside class="sidenav">
-      <div class="brand">fd 爬虫控制台<span class="en">CRAWL CONTROL</span></div>
+      <h1 class="brand">fd 爬虫控制台<span class="en">CRAWL CONTROL</span></h1>
       {% set path = request.url.path %}
       <nav>
         <a class="nav-link {{ 'active' if path == '/panel' }}" href="/panel"><svg><use href="#i-home"/></svg>总览 <span class="en">Home</span></a>
@@ -44,7 +45,7 @@
         <span class="whoami" hx-get="/panel/auth/whoami" hx-trigger="load" hx-swap="innerHTML"></span>
       </div>
     </aside>
-    <main class="content">{% block content %}{% endblock %}</main>
+    <main class="content" id="main">{% block content %}{% endblock %}</main>
   </div>
 
   <div id="toast-region" class="toast-region" aria-live="polite"></div>

@@ -36,7 +36,7 @@
     if (!region) return;
     var el = document.createElement("div");
     el.className = "toast " + ((detail && detail.level) === "err" ? "err" : "ok");
-    el.textContent = (detail && detail.message) || "done";
+    el.textContent = (detail && detail.message) || "已完成 done";
     region.appendChild(el);
     setTimeout(function () { el.remove(); }, 4000);
   }

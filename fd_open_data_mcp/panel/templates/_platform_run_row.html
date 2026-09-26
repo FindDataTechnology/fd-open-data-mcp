@@ -15,7 +15,7 @@
                   hx-post="/panel/runs/platform/{{ r.id }}/cancel"
                   hx-target="closest tr" hx-swap="outerHTML">确认取消 confirm</button>
           <button type="button" class="link"
-                  onclick="this.closest('.confirm').classList.remove('armed')">否 no</button>
+                  onclick="this.closest('.confirm').classList.remove('armed')">保留 keep</button>
         </span>
       </span>
       <noscript><form class="inline-form" method="post" action="/panel/runs/platform/{{ r.id }}/cancel"><button class="link" type="submit">取消 cancel</button></form></noscript>

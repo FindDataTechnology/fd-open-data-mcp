@@ -7,7 +7,7 @@ Stage counts and the latest approval queue over the central pipeline tables.
 审批在 harness 工具面完成（agent 操作），此处只读。
 Approval happens on the harness tool surface (agent-operated); this view is read-only.</p>
 <div class="table-wrap">
-  <div hx-get="/panel/partials/funnel" hx-trigger="load, every {{ poll_seconds }}s">
+  <div hx-get="/panel/partials/funnel" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible']">
     <p class="muted">加载中 loading…</p>
   </div>
 </div>

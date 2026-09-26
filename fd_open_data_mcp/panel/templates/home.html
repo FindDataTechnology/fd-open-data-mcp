@@ -21,41 +21,41 @@
 
 <section class="card mt">
   <h3>产出趋势（近 14 天）<span class="en">Yield trend (last 14 days)</span></h3>
-  {{ svg_bars(trend) }}
+  {{ svg_bars(trend, '近 14 天每日产出条形图 daily yield, last 14 days') }}
 </section>
 
 <div class="home-grid">
   <section class="card">
     <h3>舰队 <span class="en">Fleet</span></h3>
-    <div hx-get="/panel/partials/fleet" hx-trigger="load, every {{ poll_seconds }}s">
+    <div hx-get="/panel/partials/fleet" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible']">
       <p class="muted">加载中 loading…</p>
     </div>
   </section>
 
   <section class="card">
     <h3>平台源健康 <span class="en">Platform sources</span></h3>
-    <div hx-get="/panel/partials/platform" hx-trigger="load, every {{ poll_seconds }}s">
+    <div hx-get="/panel/partials/platform" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible']">
       <p class="muted">加载中 loading…</p>
     </div>
   </section>
 
   <section class="card">
     <h3>运行中的爬取 <span class="en">Running runs</span></h3>
-    <div hx-get="/panel/partials/running" hx-trigger="load, every {{ poll_seconds }}s">
+    <div hx-get="/panel/partials/running" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible']">
       <p class="muted">加载中 loading…</p>
     </div>
   </section>
 
   <section class="card">
     <h3>接下来 <span class="en">Next up</span></h3>
-    <div hx-get="/panel/partials/next" hx-trigger="load, every {{ poll_seconds }}s">
+    <div hx-get="/panel/partials/next" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible']">
       <p class="muted">加载中 loading…</p>
     </div>
   </section>
 
   <section class="card">
     <h3>最近完成 <span class="en">Recent finished</span></h3>
-    <div hx-get="/panel/partials/recent" hx-trigger="load, every {{ poll_seconds }}s">
+    <div hx-get="/panel/partials/recent" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible']">
       <p class="muted">加载中 loading…</p>
     </div>
   </section>
@@ -63,7 +63,7 @@
 
 <section class="card mt">
   <h3>错过的运行 <span class="en">Missed runs</span></h3>
-  <div hx-get="/panel/partials/missed" hx-trigger="load, every {{ poll_seconds }}s">
+  <div hx-get="/panel/partials/missed" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible']">
     <p class="muted">加载中 loading…</p>
   </div>
 </section>

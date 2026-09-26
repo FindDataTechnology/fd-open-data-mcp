@@ -1,6 +1,8 @@
 {% from "_macros.html" import th %}
 <table>
+  <thead>
   <tr>{{ th('运行', 'Run') }}{{ th('策略', 'Policy') }}{{ th('状态', 'Status') }}{{ th('产出', 'Yield') }}{{ th('完成于', 'Finished') }}</tr>
+  </thead>
   {% for r in runs %}
   <tr>
     <td><a href="/panel/runs/{{ r.id }}">#{{ r.id }}</a></td>

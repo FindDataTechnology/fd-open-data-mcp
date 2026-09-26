@@ -13,6 +13,11 @@
   --muted: #64748b;
   --accent: #2563eb;
   --accent-2: #1d4ed8;
+  /* fills under on-accent white text (primary buttons, active chips); split
+     from --accent because in dark theme --accent doubles as text color on
+     dark surfaces and must stay light, while fills need the darker pair
+     to hold 4.5:1 under white */
+  --accent-fill: #2563eb;
   --on-accent: #ffffff;
   --ok-bg: #dcfce7;      --ok-fg: #15803d;
   --info-bg: #dbeafe;    --info-fg: #1d4ed8;
@@ -38,7 +43,8 @@
   --text-2: #c4d2e4;
   --muted: #8aa0bd;
   --accent: #3b82f6;
-  --accent-2: #60a5fa;
+  --accent-2: #1d4ed8;
+  --accent-fill: #2563eb;
   --on-accent: #ffffff;
   --ok-bg: rgba(34, 197, 94, .16);   --ok-fg: #4ade80;
   --info-bg: rgba(59, 130, 246, .18); --info-fg: #93c5fd;
@@ -64,7 +70,8 @@
     --text-2: #c4d2e4;
     --muted: #8aa0bd;
     --accent: #3b82f6;
-    --accent-2: #60a5fa;
+    --accent-2: #1d4ed8;
+    --accent-fill: #2563eb;
     --on-accent: #ffffff;
     --ok-bg: rgba(34, 197, 94, .16);   --ok-fg: #4ade80;
     --info-bg: rgba(59, 130, 246, .18); --info-fg: #93c5fd;
@@ -93,10 +100,22 @@ code { font-family: var(--mono); font-size: .85em; background: var(--surface-2);
   border-radius: 4px; padding: .08em .35em; }
 .muted { color: var(--muted); font-size: .85rem; }
 .mt { margin-top: 1rem; }
-.en { font-size: .75em; color: var(--muted); font-weight: 400; margin-left: .15em; }
+/* 11px floor: .en rides on small hosts (nav, table headers, buttons), where
+   .75em lands under the functional-text minimum */
+.en { font-size: max(.75em, 11px); color: var(--muted); font-weight: 400; margin-left: .15em; }
 .mono { font-family: var(--mono); font-size: .85em; }
 .pill-row { display: flex; gap: 1.2rem; align-items: center; flex-wrap: wrap; }
 .inline-form { display: inline; }
+
+/* keyboard users jump straight past the nav; visible only on focus */
+.skip-link { position: absolute; left: -9999px; top: 0; z-index: 100;
+  background: var(--surface); color: var(--accent); padding: .5rem .9rem;
+  border: 1px solid var(--border); border-radius: 0 0 var(--radius-sm) 0; }
+.skip-link:focus { left: 0; }
+
+a:focus-visible, button:focus-visible, .chip:focus-visible, .nav-link:focus-visible,
+.skip-link:focus-visible { outline: 2px solid color-mix(in srgb, var(--accent) 70%, transparent);
+  outline-offset: 2px; }
 
 /* ── shell: sidebar + content (D6) ────────────────────────────────────── */
 .shell { display: grid; grid-template-columns: 232px minmax(0, 1fr); min-height: 100vh; }
@@ -104,7 +123,7 @@ code { font-family: var(--mono); font-size: .85em; background: var(--surface-2);
   position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
   background: var(--surface); border-right: 1px solid var(--border); padding: 1.1rem .9rem;
 }
-.brand { font-weight: 700; font-size: 1.02rem; line-height: 1.3; }
+.brand { font-weight: 700; font-size: 1.02rem; line-height: 1.3; margin: 0; }
 .brand .en { display: block; font-size: .72rem; font-weight: 500; letter-spacing: .04em; }
 .sidenav nav { display: flex; flex-direction: column; gap: 2px; margin-top: 1.1rem; }
 .nav-link {
@@ -121,7 +140,7 @@ code { font-family: var(--mono); font-size: .85em; background: var(--surface-2);
 .sidenav-foot { margin-top: auto; display: flex; flex-direction: column; gap: .6rem; padding-top: 1rem; }
 .nav-new {
   display: flex; justify-content: center; text-decoration: none;
-  background: var(--accent); color: var(--on-accent); border-radius: var(--radius-sm);
+  background: var(--accent-fill); color: var(--on-accent); border-radius: var(--radius-sm);
   padding: .5rem .8rem; font-size: .9rem; font-weight: 600;
 }
 .nav-new:hover { background: var(--accent-2); color: var(--on-accent); }
@@ -184,11 +203,13 @@ a.btn, button.btn {
 }
 a.btn:hover, button.btn:hover { border-color: var(--accent); color: var(--accent); }
 a.btn:disabled, button.btn:disabled { opacity: .5; cursor: not-allowed; }
-.btn-primary { background: var(--accent); border-color: var(--accent);
+.btn-primary { background: var(--accent-fill); border-color: var(--accent-fill);
   color: var(--on-accent); font-weight: 600; }
 .btn-primary:hover { background: var(--accent-2); color: var(--on-accent); }
+/* negative margins cancel the padding visually (row density unchanged);
+   the hit area still grows past the text for mouse users */
 button.link { color: var(--accent); background: none; border: none; cursor: pointer;
-  padding: 0; font-size: .85rem; text-decoration: none; }
+  padding: .3rem .25rem; margin: -.3rem -.25rem; font-size: .85rem; text-decoration: none; }
 button.link:hover { text-decoration: underline; }
 .link-danger { color: var(--fail-fg); }
 
@@ -241,17 +262,18 @@ textarea.mono-block { font-family: var(--mono); font-size: .85rem; }
 .chip { border: 1px solid var(--border); background: var(--surface); border-radius: 999px;
   padding: .22rem .8rem; font-size: .82rem; color: var(--text-2); cursor: pointer; text-decoration: none; }
 .chip:hover { border-color: var(--accent); color: var(--accent); }
-.chip.active { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
-.chip.active.success { background: #16a34a; border-color: #16a34a; }
+.chip.active { background: var(--accent-fill); border-color: var(--accent-fill); color: var(--on-accent); font-weight: 600; }
+/* active-chip fills: single-usage values, kept literal on purpose; all pass
+   4.5:1 under white (#15803d 5.02 / #dc2626 4.83 / #64748b 4.76) */
+.chip.active.success { background: #15803d; border-color: #15803d; }
 .chip.active.failed { background: #dc2626; border-color: #dc2626; }
-.chip.active.running { background: #2563eb; border-color: #2563eb; }
 .chip.active.cancelled { background: #64748b; border-color: #64748b; }
 
 /* ── toast (D5) ───────────────────────────────────────────────────────── */
 .toast-region { position: fixed; right: 1rem; bottom: 1rem; display: flex;
   flex-direction: column; gap: .5rem; z-index: 60; max-width: min(420px, 90vw); }
 .toast { background: var(--surface); border: 1px solid var(--border);
-  border-left: 4px solid var(--accent); border-radius: var(--radius-sm);
+  border-left: 1px solid var(--accent); border-radius: var(--radius-sm);
   padding: .6rem .9rem; box-shadow: var(--shadow-lg); font-size: .88rem;
   animation: toast-in .18s ease-out; }
 .toast.ok { border-left-color: var(--chart-ok); }
@@ -260,7 +282,7 @@ textarea.mono-block { font-family: var(--mono); font-size: .85rem; }
 
 /* ── charts: server-rendered SVG (D4) ─────────────────────────────────── */
 .chart { width: 100%; height: auto; display: block; }
-.chart text { fill: var(--muted); font-size: 10px; font-family: inherit; }
+.chart text { fill: var(--muted); font-size: 11px; font-family: inherit; }
 .chart .axis { stroke: var(--chart-axis); stroke-width: 1; }
 .chart .bar { fill: var(--chart-bar); }
 .chart .bar-ok { fill: var(--chart-ok); }
@@ -271,7 +293,9 @@ textarea.mono-block { font-family: var(--mono); font-size: .85rem; }
 .chart .heat-aging { fill: var(--heat-aging); }
 .chart .heat-stale { fill: var(--heat-stale); }
 .chart .heat-never { fill: var(--heat-never); }
-.chart .heat-text { fill: var(--surface); font-weight: 700; }
+/* font-size must live here: the template's font-size="20" attribute loses to
+   the .chart text rule above, which silently shrank the tile counts */
+.chart .heat-text { fill: var(--surface); font-weight: 700; font-size: 20px; }
 .progress-svg { display: inline-block; vertical-align: -2px; }
 .progress-track { fill: var(--surface-2); stroke: var(--border); stroke-width: 1; }
 .progress-fill { fill: var(--accent); }
@@ -305,4 +329,32 @@ textarea.mono-block { font-family: var(--mono); font-size: .85rem; }
 @media (max-width: 880px) {
   .home-grid, .grid, .row, .row2 { grid-template-columns: 1fr; }
   .kpi-row { grid-template-columns: 1fr 1fr; }
+}
+
+/* ── touch adaptation (pointer: coarse) ────────────────────────────────
+ * Primary pointer is touch → 44px-class targets regardless of viewport
+ * width (a tablet in landscape is wide and coarse). Real padding growth,
+ * no negative margins here: shrunk margins would make hit boxes overlap
+ * across table rows, so the wrong row's action could take the tap.
+ * Inputs go to 16px: iOS Safari force-zooms focused inputs below that. */
+@media (pointer: coarse) {
+  button.link { padding: .75rem .4rem; margin: 0; }
+  .nav-link { padding: .7rem .7rem; }
+  .nav-new { padding: .75rem .8rem; }
+  .theme-toggle { width: 44px; height: 44px; font-size: 1.15rem; }
+  .chip { padding: .75rem .9rem; }
+  .chips { gap: .6rem; }
+  a.btn, button.btn { padding: .75rem .85rem; }
+  button.badge { padding: .8rem .9rem; }
+  input[type=text], input[type=date], input[type=number], select, textarea {
+    padding: .55rem .6rem; font-size: 16px;
+  }
+}
+
+/* press feedback that does not depend on hover */
+button.link:active, .chip:active, a.btn:active, button.btn:active,
+.nav-link:active { opacity: .6; }
+
+@media (prefers-reduced-motion: reduce) {
+  .toast { animation: none; }
 }

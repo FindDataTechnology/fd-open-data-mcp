@@ -13,7 +13,9 @@
 </form>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('存储', 'Store') }}{{ th('类型', 'Kind') }}{{ th('行数', 'Rows') }}{{ th('大小', 'Size') }}{{ th('分块', 'Chunks') }}{{ th('数据截至', 'Data through') }}{{ th('采样于', 'Sampled') }}</tr>
+  </thead>
   {% for c in census %}
   <tr>
     <td>{{ c.store }}</td>
@@ -34,7 +36,7 @@
 {% block coverage_heatmap %}
 <section class="card">
   <h3>概念新鲜度 <span class="en">Concept freshness</span></h3>
-  {{ svg_heatmap(heat, link_prefix='/panel/data?freshness=', active_key=freshness) }}
+  {{ svg_heatmap(heat, link_prefix='/panel/data?freshness=', active_key=freshness, label='概念新鲜度分布 concept freshness by bucket') }}
   {{ legend_freshness() }}
   {% if freshness %}<a class="btn" href="/panel/data">清除新鲜度筛选 Clear freshness</a>{% endif %}
 </section>
@@ -42,8 +44,8 @@
 
 <form method="get" action="/panel/data">
   <div class="pill-row">
-    <input type="number" name="concept_id" placeholder="概念 id concept id" value="{{ concept_id or '' }}" class="filter-w">
-    <input type="text" name="entity_type" placeholder="实体类型 entity type (stock/fund/country…)" value="{{ entity_type or '' }}" class="filter-w">
+    <input type="number" name="concept_id" placeholder="概念 id concept id" aria-label="概念 id concept id" value="{{ concept_id or '' }}" class="filter-w">
+    <input type="text" name="entity_type" placeholder="实体类型 entity type (stock/fund/country…)" aria-label="实体类型 entity type" value="{{ entity_type or '' }}" class="filter-w">
     <button class="btn" type="submit">筛选 Filter</button>
     <a class="btn" href="/panel/data">清除 Clear</a>
   </div>
@@ -51,7 +53,9 @@
 
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('概念', 'Concept') }}{{ th('分类', 'Category') }}{{ th('行数', 'Rows') }}{{ th('最新日期', 'Latest date') }}{{ th('数据源', 'Sources') }}{{ th('上次抓取', 'Last fetch') }}</tr>
+  </thead>
   {% for c in coverage %}
   <tr>
     <td title="id {{ c.concept_id }}">{{ c.name_zh or c.name_en or c.code or c.concept_id }}</td>

@@ -1,6 +1,8 @@
 {% from "_macros.html" import th %}
 <table>
+  <thead>
   <tr>{{ th('源总数', 'Sources') }}{{ th('已点亮', 'Lit') }}{{ th('停滞', 'Stalled') }}{{ th('24h 成功', '24h ok') }}{{ th('24h 失败', '24h failed') }}</tr>
+  </thead>
   <tr>
     <td><a href="/panel/sources">{{ h.total }}</a></td>
     <td><a href="/panel/sources?health=lit">{{ h.lit }}</a></td>

@@ -20,7 +20,7 @@
                   hx-post="/panel/auth/station/{{ t.id }}/reclaim"
                   hx-target="closest tr" hx-swap="outerHTML">确认回收 confirm</button>
           <button type="button" class="link"
-                  onclick="this.closest('.confirm').classList.remove('armed')">否 no</button>
+                  onclick="this.closest('.confirm').classList.remove('armed')">保留 keep</button>
         </span>
       </span>
       <noscript><form class="inline-form" method="post" action="/panel/auth/station/{{ t.id }}/reclaim"><button class="link" type="submit">回收 reclaim</button></form></noscript>

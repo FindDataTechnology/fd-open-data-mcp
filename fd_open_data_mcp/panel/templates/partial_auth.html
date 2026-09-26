@@ -21,14 +21,14 @@
 <p class="muted">选源 + 起别名即登记身份，并自动分配独立出口（不同账号默认不同出口）。
 Pick a source + an alias to register an identity; a dedicated egress is assigned automatically (distinct accounts get distinct egress by default).</p>
 <form class="inline-form" hx-post="/panel/auth/identities" hx-target="#identity-created" hx-swap="innerHTML">
-  <select name="source" required>
+  <select name="source" required aria-label="数据源 source">
     {% for src in station_sources %}
     <option value="{{ src.source }}">{{ src.source }}（{{ src.auth_profile }}）</option>
     {% else %}
     <option value="">— 无认证源 no auth_profile sources —</option>
     {% endfor %}
   </select>
-  <input name="account_alias" placeholder="账号别名 account alias" required>
+  <input name="account_alias" placeholder="账号别名 account alias" aria-label="账号别名 account alias" required>
   <button type="submit">登记 register</button>
 </form>
 <div id="identity-created"></div>
@@ -38,7 +38,9 @@ Pick a source + an alias to register an identity; a dedicated egress is assigned
 Most failures first; never-logged-in registrations at the head.</p>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('源', 'Source') }}{{ th('账号', 'Account') }}{{ th('自动化', 'Automation') }}{{ th('最近登录', 'Last login') }}{{ th('失败次数', 'Failures') }}</tr>
+  </thead>
   {% for i in queue %}
   <tr>
     <td><a href="/panel/sources/{{ i.source | urlencode }}">{{ i.source }}</a></td>
@@ -58,7 +60,9 @@ Most failures first; never-logged-in registrations at the head.</p>
 Grouped by source: account, five-state status, automation, last login/success, zero-run streak, lease.</p>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('账号', 'Account') }}{{ th('状态', 'Status') }}{{ th('自动化', 'Automation') }}{{ th('最近登录', 'Last login') }}{{ th('最近成功', 'Last success') }}{{ th('连续零产出', 'Zero-run streak') }}{{ th('租借', 'Lease') }}</tr>
+  </thead>
   {% for g in groups %}
   <tr>
     <td colspan="7">
@@ -98,7 +102,9 @@ Grouped by source: account, five-state status, automation, last login/success, z
 The auditable login/probe/lease trail, replayable per identity.</p>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('时间', 'Time') }}{{ th('类型', 'Kind') }}{{ th('身份', 'Identity') }}{{ th('详情', 'Detail') }}{{ th('租借令牌', 'Lease token') }}</tr>
+  </thead>
   {% for ev in events %}
   <tr>
     <td class="muted">{{ ev.created_at or '—' }}</td>
@@ -118,7 +124,9 @@ The auditable login/probe/lease trail, replayable per identity.</p>
 Live and recent login stations: status, deadline and the observation-view entry; an overdue station is marked timeout and can be reclaimed.</p>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('站', 'Station') }}{{ th('身份', 'Identity') }}{{ th('状态', 'Status') }}{{ th('出口', 'Egress') }}{{ th('期限', 'Deadline') }}{{ th('操作', 'Actions') }}</tr>
+  </thead>
   {% for t in stations %}
   {% include "_station_row.html" %}
   {% else %}

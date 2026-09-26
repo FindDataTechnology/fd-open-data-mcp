@@ -6,7 +6,9 @@
 
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('状态', 'Status') }}{{ th('任务', 'Job') }}{{ th('集群', 'Cluster') }}{{ th('开始', 'Started') }}{{ th('结束', 'Finished') }}{{ th('时长', 'Duration') }}</tr>
+  </thead>
   <tr>
     <td><span class="badge {{ run.status }}">{{ run.status }}</span></td>
     <td class="muted">{{ run.job_ref or '—' }}</td>
@@ -21,7 +23,9 @@
 <h3>产出 <span class="en">Yield</span></h3>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('计划格子', 'Plan cells') }}{{ th('尝试试行数', 'Rows attempted') }}{{ th('新增行数', 'Rows new') }}</tr>
+  </thead>
   <tr>
     <td>{{ run.plan_cells if run.plan_cells is not none else '—' }}</td>
     <td>{{ run.rows_attempted if run.rows_attempted is not none else '—' }}</td>
@@ -34,7 +38,9 @@
 <h3>计划 <span class="en">Plan</span></h3>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('模式', 'Mode') }}{{ th('实体范围', 'Entity scope') }}{{ th('日期', 'Dates') }}</tr>
+  </thead>
   <tr>
     <td>{{ plan.mode or '—' }}</td>
     <td class="muted">{{ plan.entity_type }}{% if plan.entity_ids %} ({{ plan.entity_ids | length }} 显式 explicit){% else %} (全部 all){% endif %}</td>
@@ -44,7 +50,9 @@
 </div>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('概念', 'Concept') }}{{ th('排序后的源', 'Ranked sources') }}</tr>
+  </thead>
   {% for c in plan.concepts %}
   <tr><td>{{ c.code or c.id }}</td><td class="muted">{{ c.sources | join(' → ') or '—' }}</td></tr>
   {% else %}
@@ -61,14 +69,16 @@ filtered to this run's plan concepts{% if cluster_name %} and cluster{% endif %}
 {% from "_macros.html" import svg_timeline %}
 {% if fetch_timeline %}
 <div class="card">
-  {{ svg_timeline(fetch_timeline) }}
+  {{ svg_timeline(fetch_timeline, '运行窗口内抓取成功/失败分布 fetch ok/err during run window') }}
   <p class="muted">{% for f in fetch_summary %}{{ f.status }} {{ f.count }}{% if not loop.last %} · {% endif %}{% endfor %}</p>
   <div class="legend"><span><span class="swatch sw-fresh"></span>ok 成功</span><span><span class="swatch sw-stale"></span>err 错误</span></div>
 </div>
 {% else %}
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('状态', 'Status') }}{{ th('数量', 'Count') }}</tr>
+  </thead>
   {% for f in fetch_summary %}
   <tr><td>{{ f.status }}</td><td>{{ f.count }}</td></tr>
   {% else %}

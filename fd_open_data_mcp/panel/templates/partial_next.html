@@ -1,6 +1,8 @@
 {% from "_macros.html" import th %}
 <table>
+  <thead>
   <tr>{{ th('策略', 'Policy') }}{{ th('下次触发（本地）', 'Next fire (local)') }}{{ th('还有', 'In') }}{{ th('Cron') }}</tr>
+  </thead>
   {% for u in upcoming %}
   <tr>
     <td><a href="/panel/policies/{{ u.policy_id }}">{{ u.policy }}</a></td>

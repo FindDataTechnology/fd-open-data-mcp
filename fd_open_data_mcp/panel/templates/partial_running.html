@@ -1,6 +1,8 @@
 {% from "_macros.html" import th, svg_progress %}
 <table>
+  <thead>
   <tr>{{ th('运行', 'Run') }}{{ th('策略', 'Policy') }}{{ th('位置', 'Where') }}{{ th('已用时', 'Elapsed') }}{{ th('进度', 'Progress') }}</tr>
+  </thead>
   {% for r in runs %}
   <tr>
     <td><a href="/panel/runs/{{ r.id }}">#{{ r.id }}</a></td>

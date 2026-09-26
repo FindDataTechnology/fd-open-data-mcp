@@ -1,6 +1,8 @@
 {% from "_macros.html" import th %}
 <table>
+  <thead>
   <tr>{{ th('数据源', 'Source') }}{{ th('代理', 'Proxy') }}{{ th('状态', 'State') }}{{ th('连败', 'Fail streak') }}{{ th('熔断次数', 'Cycles') }}{{ th('永久', 'Permanent') }}{{ th('冷却至', 'Cooldown') }}{{ th('最近成功', 'Last success') }}</tr>
+  </thead>
   {% for c in circuits %}
   <tr>
     <td>{{ c.source }}</td>

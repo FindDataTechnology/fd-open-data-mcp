@@ -11,7 +11,9 @@
 </p>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('ID') }}{{ th('名称', 'Name') }}{{ th('实体', 'Entity') }}{{ th('概念', 'Concepts') }}{{ th('模式', 'Mode') }}{{ th('频率', 'Freq') }}{{ th('Cron', 'tz') }}{{ th('上次运行', 'Last run') }}{{ th('启用', 'Enabled') }}<th></th></tr>
+  </thead>
   {% for p in policies %}{% include "_policy_row.html" %}  {% else %}
   <tr><td colspan="10" class="muted">暂无策略 No policies yet. <a href="/panel/policies/new">创建一个 Create one</a>.</td></tr>
   {% endfor %}

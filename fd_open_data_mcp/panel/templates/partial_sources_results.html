@@ -13,7 +13,7 @@
   <a class="chip {{ 'active' if health == 'stalled' }}" href="/panel/sources?health=stalled"
      hx-get="/panel/sources" hx-vals='{"health": "stalled", "site": "{{ site }}"}'
      hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">停滞 stalled</a>
-  <select name="site"
+  <select name="site" aria-label="站点 site"
           hx-get="/panel/sources" hx-include="this"
           hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">
     <option value="">全部站点 all sites</option>
@@ -25,7 +25,9 @@
 </form>
 <div class="table-wrap">
 <table>
+  <thead>
   <tr>{{ th('源', 'Source') }}{{ th('站点', 'Site') }}{{ th('调度', 'Schedule') }}{{ th('启用', 'Enabled') }}{{ th('最近运行', 'Last run') }}{{ th('时间', 'At') }}{{ th('产出行', 'Rows') }}{{ th('待运行', 'Pending') }}<th></th></tr>
+  </thead>
   {% for s in sources %}{% include "_source_row.html" %}{% else %}
   <tr><td colspan="9" class="muted">没有匹配的源 No matching sources.</td></tr>
   {% endfor %}
