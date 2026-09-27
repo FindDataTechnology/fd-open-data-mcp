@@ -50,7 +50,7 @@ def _source(name, site="tencent", schedule="0 6 * * *", enabled=True) -> str:
         s.close()
 
 
-def _run(source, status, *, started=None, finished=None, rows=None,
+def _run(source, status, *, started=None, finished=None, rows=0,
          pending_id=None) -> int:
     s = get_database().get_session()
     try:

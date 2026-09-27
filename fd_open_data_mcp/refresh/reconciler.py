@@ -980,6 +980,7 @@ def reconcile_once(
     # "success": exit code 0 says the process ran, not that data landed.
     # Cancelled runs are terminal by the CAS in runs.cancel_run and are NOT
     # _OPEN, so this scan never resurrects or re-probes them.
+    closed: list[PolicyRun] = []
     for run in session.query(PolicyRun).filter_by(status=_OPEN).all():
         if not run.job_ref:
             continue
@@ -988,13 +989,16 @@ def reconcile_once(
             run.status = classify_yield(run) if state == "success" else "failed"
             run.finished_at = now
             summary["probed_closed"] += 1
-            # concept-platform-federation: mirror the close into crawl_runs
-            # (swallows its own failures — never blocks the close above)
-            mirror_run_close(session, run)
+            closed.append(run)
             logger.info("run %d closed as %s (plan_cells=%s attempted=%s new=%s)",
                         run.id, run.status, run.plan_cells,
                         run.rows_attempted, run.rows_new)
     session.commit()
+    # concept-platform-federation: mirror each close into crawl_runs AFTER the
+    # close is durable; the mirror writes in its own transaction, so a failing
+    # insert can neither roll back a close nor poison this session.
+    for run in closed:
+        mirror_run_close(session, run)
 
     # 1-5. due policies
     for policy in session.query(CrawlPolicy).filter_by(enabled=True).all():

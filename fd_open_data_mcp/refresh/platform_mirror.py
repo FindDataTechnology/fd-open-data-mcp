@@ -67,36 +67,63 @@ def run_sources(run: PolicyRun) -> list[str]:
 def mirror_run_close(session: Session, run: PolicyRun) -> int:
     """Mirror one closed PolicyRun into crawl_runs. Returns rows added.
 
-    Never raises: a mirror failure logs a warning and returns 0 so the
-    policy-side close (the thing that matters) proceeds untouched.
+    Writes in a SIBLING session/transaction bound to the caller's engine: a
+    failing crawl_runs insert (constraint, schema drift, outage) rolls back
+    only the mirror's transaction and can never poison the caller's session —
+    the 2026-09-27 incident showed a caught flush error still rolled back the
+    reconciler's shared session and killed the whole tick. Returns 0 on any
+    failure after a local log trace; the policy-side close proceeds untouched.
+
+    rows_written mirrors the platform's existing convention: unknowns are 0
+    (prod column is NOT NULL DEFAULT 0 — federation rows record 0 for "not
+    measured"). Exact yield is reported only for single-source runs whose pod
+    actually reported counters; a zero-yield run's 0 propagates to every row.
     """
+    payload = None
     try:
-        status = _STATUS_MAP.get(run.status)
-        if status is None:
-            return 0  # still open, or a status that never executed
-        if not run.job_ref:
-            return 0  # born-closed refusal/launch-failure rows never executed
-        sources = run_sources(run)
-        if not sources:
-            return 0  # source set not attributable — deliberate blank
-        # exact rows when single-source; a zero-yield run wrote 0 everywhere
-        rows_written = run.rows_new if (len(sources) == 1 or run.rows_new == 0) else None
-        for src in sources:
-            session.add(CrawlRun(
-                source=src,
-                kind="concept",
-                status=status,
-                started_at=run.started_at,
-                finished_at=run.finished_at,
-                rows_written=rows_written,
-                error_head=(run.detail or "")[:255] if status == "failed" else None,
-            ))
-        session.flush()
+        payload = _run_payload(run)
+        if payload is None:
+            return 0
+        rows, sources = payload
+        mirror_session = Session(bind=session.get_bind())
+        try:
+            for row in rows:
+                mirror_session.add(CrawlRun(**row))
+            mirror_session.commit()
+        finally:
+            mirror_session.close()
         return len(sources)
     except Exception:  # noqa: BLE001 — mirror must not break the close path
         logger.warning("crawl_runs mirror failed for run %s",
                        getattr(run, "id", "?"), exc_info=True)
         return 0
+
+
+def _run_payload(run: PolicyRun) -> tuple[list[dict], list[str]] | None:
+    """Extract the crawl_runs rows for a closed run, or None when the run
+    must not be mirrored (still open / never executed / unattributable)."""
+    status = _STATUS_MAP.get(run.status)
+    if status is None:
+        return None  # still open, or a status that never executed
+    if not run.job_ref:
+        return None  # born-closed refusal/launch-failure rows never executed
+    sources = run_sources(run)
+    if not sources:
+        return None  # source set not attributable — deliberate blank
+    # exact yield only when the pod reported counters on a single-source run;
+    # unknown (never-reported / multi-source) records 0, the platform convention
+    rows_written = run.rows_new if len(sources) == 1 and run.rows_new is not None else 0
+    error_head = (run.detail or "")[:255] if status == "failed" else None
+    rows = [{
+        "source": src,
+        "kind": "concept",
+        "status": status,
+        "started_at": run.started_at,
+        "finished_at": run.finished_at,
+        "rows_written": rows_written,
+        "error_head": error_head,
+    } for src in sources]
+    return rows, sources
 
 
 def register_concept_sources(session: Session, site: str = "tencent") -> dict:

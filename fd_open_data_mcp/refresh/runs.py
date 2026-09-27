@@ -72,9 +72,8 @@ def cancel_run(
     job_ref = run.job_ref if run else None
     if run is not None:
         # concept-platform-federation: mirror the cancel close into crawl_runs
-        # (swallows its own failures — never affects the cancel outcome)
-        if mirror_run_close(session, run):
-            session.commit()
+        # (own transaction — a mirror failure can never affect the cancel)
+        mirror_run_close(session, run)
     if launcher is not None and job_ref:
         try:
             job_deleted = bool(launcher.delete(job_ref))

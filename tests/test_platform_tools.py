@@ -51,7 +51,7 @@ def _seed(source, site="tencent", schedule="0 6 * * *", enabled=True):
         s.close()
 
 
-def _seed_run(source, status, *, started=None, finished=None, rows=None,
+def _seed_run(source, status, *, started=None, finished=None, rows=0,
               pending_id=None) -> int:
     s = get_database().get_session()
     try:

@@ -1,4 +1,4 @@
-"""concept-platform-federation: crawl_runs mirroring + crawl_sources registration.
+"""concept-platform-federation: crawl_runs mirroring + crawl_sources registration (rows_written: prod NOT NULL DEFAULT 0 — unknown records 0).
 
 Spec: openspec/changes/concept-platform-integration (capability
 concept-platform-federation). Covers: status mapping incl. zero-yield ->
@@ -87,13 +87,24 @@ def test_mirror_single_source_reports_exact_rows(session):
     assert row.error_head is None
 
 
-def test_mirror_multi_source_splits_rows_null(session):
+def test_mirror_multi_source_splits_rows_zero(session):
+    # prod crawl_runs.rows_written is NOT NULL DEFAULT 0; unknown multi-source
+    # attribution records 0 (platform convention), never NULL
     run = _run(session, plan_json=_plan_json(("akshare", "datacommons")),
                status="success", rows_new=500)
     assert mirror_run_close(session, run) == 2
     rows = session.query(CrawlRun).order_by(CrawlRun.source).all()
     assert [r.source for r in rows] == ["akshare", "datacommons"]
-    assert all(r.status == "success" and r.rows_written is None for r in rows)
+    assert all(r.status == "success" and r.rows_written == 0 for r in rows)
+
+
+def test_mirror_single_source_unreported_rows_zero(session):
+    # single source but the pod never reported counters -> unknown -> 0
+    p = _policy(session, source_filter=["akshare"])
+    run = _run(session, p, status="zero_yield", plan_json=_plan_json(("akshare",)),
+               rows_new=None)
+    assert mirror_run_close(session, run) == 1
+    assert session.query(CrawlRun).one().rows_written == 0
 
 
 def test_mirror_zero_yield_success_with_zero_rows(session):
@@ -141,6 +152,52 @@ def test_mirror_failure_is_swallowed(session, monkeypatch):
 
     monkeypatch.setattr("fd_open_data_mcp.refresh.platform_mirror.run_sources", boom)
     assert mirror_run_close(session, run) == 0  # no raise
+
+
+def test_mirror_failure_never_poisons_caller_session(session, monkeypatch):
+    """2026-09-27 incident regression: a rejected crawl_runs insert must not
+    roll back the caller's session. The mirror writes in its own transaction;
+    the caller must still be able to commit its own work afterwards."""
+    p = _policy(session, source_filter=["akshare"])
+    run = _run(session, p, status="success", plan_json=_plan_json(("akshare",)),
+               rows_new=9)
+
+    class _BoomSession:
+        def add(self, *a, **k):
+            raise RuntimeError("insert rejected (simulated NotNullViolation)")
+
+        def commit(self):
+            raise RuntimeError("session is poisoned")
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr("fd_open_data_mcp.refresh.platform_mirror.Session",
+                        lambda bind=None: _BoomSession())
+    assert mirror_run_close(session, run) == 0
+    # caller session still usable: the probe close it holds commits fine
+    run.status = "failed"
+    session.commit()
+    assert session.get(PolicyRun, run.id).status == "failed"
+
+
+def test_crawl_run_rows_written_matches_prod_schema(session):
+    """Model must match prod's NOT NULL DEFAULT 0 — the schema drift that was
+    missing on 2026-09-27 let sqlite fixtures accept NULLs prod rejects."""
+    from sqlalchemy import inspect
+
+    col = {c["name"]: c for c in inspect(session.get_bind()).get_columns("crawl_runs")}["rows_written"]
+    assert col["nullable"] is False
+    assert col["default"] is not None  # DEFAULT 0 present in the DDL
+    # writers that never set the column land as 0, never NULL
+    session.add(CrawlRun(source="akshare", kind="concept", status="success"))
+    session.commit()
+    assert session.query(CrawlRun).one().rows_written == 0
+    # an explicit None also lands as the default, never NULL
+    session.add(CrawlRun(source="akshare", kind="concept", status="success",
+                         rows_written=None))
+    session.commit()
+    assert [r.rows_written for r in session.query(CrawlRun).all()] == [0, 0]
 
 
 # ── close-site wiring (task 1.2) ─────────────────────────────────────────────

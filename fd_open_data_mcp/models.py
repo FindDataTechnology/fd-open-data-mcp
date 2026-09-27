@@ -990,7 +990,10 @@ class CrawlRun(Base):
     status = Column(Text, nullable=False, index=True)  # running|success|failed|cancelled|skipped
     started_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
-    rows_written = Column(Integer, nullable=True)
+    # Prod column is NOT NULL DEFAULT 0 (unknown yield records 0, the same
+    # convention federation rows use); the model must match or sqlite fixtures
+    # silently allow NULLs that production rejects (2026-09-27 incident).
+    rows_written = Column(Integer, nullable=False, server_default="0")
     error_head = Column(Text, nullable=True)
     commit_sha = Column(Text, nullable=True)
     image_tag = Column(Text, nullable=True)
