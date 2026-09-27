@@ -38,14 +38,15 @@ def _tools():
 
 
 # ── seed helpers (mirror test_panel_platform's) ─────────────────────────────
-def _seed(source, site="tencent", schedule="0 6 * * *", enabled=True):
+def _seed(source, site="tencent", schedule="0 6 * * *", enabled=True,
+          last_commit="c0ffee1"):
     s = get_database().get_session()
     try:
         if s.get(CrawlSite, site) is None:
             s.add(CrawlSite(id=site, enabled=True))
         if s.get(CrawlSource, source) is None:
             s.add(CrawlSource(source=source, site=site, schedule=schedule,
-                              enabled=enabled))
+                              enabled=enabled, last_commit=last_commit))
         s.commit()
     finally:
         s.close()
@@ -165,6 +166,11 @@ def test_platform_trigger_guardrails_match_panel(session):
     _seed("trig-off", enabled=False)
     out = _call("platform_trigger", {"source": "trig-off"})
     assert out["status"] == "refused" and "disabled" in out["reason"]
+    # federated member without a content-repo manifest: refused with a pointer
+    # (a queued row would only produce a bogus EXIT_SOURCE_MISSING failed run)
+    _seed("trig-fed", schedule=None, last_commit=None)
+    out = _call("platform_trigger", {"source": "trig-fed"})
+    assert out["status"] == "refused" and "federated member" in out["reason"]
     # single-flight: an open run blocks the trigger
     _seed("trig-open")
     _seed_run("trig-open", "running", started=NOW - dt.timedelta(minutes=1))

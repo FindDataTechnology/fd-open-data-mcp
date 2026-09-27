@@ -70,6 +70,18 @@ def trigger_platform_run(
             "reason": f"source '{source}' is disabled in crawl_sources; "
                       f"enable it before triggering",
         }
+    if src.last_commit is None:
+        # Federated members (concept line, law line, …) have no spiders/<src>/
+        # in the content repo; the dispatcher's runner_cli would exit
+        # EXIT_SOURCE_MISSING and record a bogus failed run. Their scheduling
+        # lives in their own line — refuse here with a pointer instead.
+        return {
+            "status": "refused",
+            "reason": (f"source '{source}' is a federated member without a "
+                       f"content-repo manifest; the platform dispatcher cannot "
+                       f"run it — trigger it from its own line's entry "
+                       f"(e.g. the concept line's policy trigger)"),
+        }
     open_run = (
         session.query(CrawlRun.id)
         .filter(CrawlRun.source == source, CrawlRun.status == "running")
