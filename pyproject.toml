@@ -17,7 +17,7 @@ classifiers = [
 ]
 dependencies = [
     "click>=8.0",
-    "sqlalchemy>=2.0",
+    "sqlalchemy>=2.0,<2.1",  # 2.1 drops the psycopg2 fallback for postgresql:// (init crash 09-29)
     "pydantic>=2.0",
     "fastmcp>=2.0",
     "pandas>=2.0",
