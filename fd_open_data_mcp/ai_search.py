@@ -12,10 +12,10 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
 from sqlalchemy import bindparam, text
 
 from fd_open_data_mcp import db as dbmod
+from fd_open_data_mcp import vector_backend
 from fd_open_data_mcp.embeddings.model import MODEL_NAME, get_model
 
 
@@ -113,78 +113,17 @@ def _semantic_search(query: str, entity_type: str | None, limit: int,
     session = db.get_session()
 
     try:
-        # Build the query
-        filter_clauses = []
-        params = {"model": MODEL_NAME}
-
-        if entity_type:
-            filter_clauses.append("c.entity_type = :entity_type")
-            params["entity_type"] = entity_type
-
-        # Exclude deprecated concepts
-        filter_clauses.append("COALESCE(c.deprecated, false) = false")
-
-        where_clause = " AND ".join(filter_clauses) if filter_clauses else "1=1"
-
-        sql = f"""
-            SELECT
-                c.id, c.code, c.name_en, c.name_zh, c.category, c.unit,
-                c.measure, c.frequency, c.entity_type, c.source,
-                ce.embedding
-            FROM concepts c
-            JOIN concept_embeddings ce ON c.id = ce.concept_id
-            WHERE ce.model = :model
-                AND {where_clause}
-        """
-
-        result = session.execute(text(sql), params)
-
-        # Concepts with at least one binding
-        bound_ids = {
-            row[0] for row in session.execute(text("SELECT DISTINCT concept_id FROM concept_bindings"))
-        }
-
-        candidates = []
-        for row in result:
-            # Parse embedding from JSON
-            embedding_str = row.embedding
-            if isinstance(embedding_str, str):
-                embedding_list = json.loads(embedding_str)
-            else:
-                embedding_list = [float(x) for x in embedding_str]
-
-            # Compute similarity
-            embedding_array = np.array(embedding_list, dtype=np.float32)
-            query_array = np.array(query_embedding, dtype=np.float32)
-            similarity = float(np.dot(query_array, embedding_array))
-
-            has_binding = row.id in bound_ids
-            if not has_binding and not include_unbound:
-                continue  # ai_search default: only retrievable concepts
-
-            candidates.append({
-                "id": row.id,
-                "code": row.code,
-                "name_en": row.name_en,
-                "name_zh": row.name_zh,
-                "category": row.category,
-                "unit": row.unit,
-                "measure": row.measure,
-                "frequency": row.frequency,
-                "entity_type": row.entity_type,
-                "source": row.source,
-                "similarity": similarity,
-                "has_binding": has_binding,
-            })
-
-        # Binding-aware ranking: bucket similarity into 0.05-wide bins; within a
-        # bin, bound concepts rank above unbound, then exact similarity.
-        def _rank_key(c):
-            sim = c["similarity"]
-            return (round(sim / 0.05), 1 if c["has_binding"] else 0, sim)
-
-        candidates.sort(key=_rank_key, reverse=True)
-        return candidates[:limit]
+        # Candidate retrieval goes through the vector backend abstraction
+        # (FD_MCP_VECTOR_BACKEND: json | matrix | pgvector). The default json
+        # backend is the legacy full-scan path, behavior-for-behavior.
+        return vector_backend.search_concept_candidates(
+            session,
+            query_embedding,
+            entity_type=entity_type,
+            limit=limit,
+            include_unbound=include_unbound,
+            model=MODEL_NAME,
+        )
 
     finally:
         session.close()

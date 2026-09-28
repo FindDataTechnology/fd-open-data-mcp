@@ -7,10 +7,10 @@ from __future__ import annotations
 
 import json
 
-import numpy as np
 from sqlalchemy import text
 
 from fd_open_data_mcp import db as dbmod
+from fd_open_data_mcp import vector_backend
 from fd_open_data_mcp.embeddings.model import MODEL_NAME, get_model
 
 # Lazy model singleton lives in embeddings.model (resolves by name, shared
@@ -50,83 +50,18 @@ def semantic_search(
         print(f"[semantic_search] Query: '{query}'")
         print(f"[semantic_search] Filters: entity_type={entity_type}, frequency={frequency}")
 
-        # Simple approach: fetch all relevant concepts and their embeddings
-        # Then compute similarity locally
-        filter_clauses = []
-        params = {"model": MODEL_NAME}
-
-        if entity_type:
-            filter_clauses.append("c.entity_type = :entity_type")
-            params["entity_type"] = entity_type
-
-        if frequency:
-            filter_clauses.append("c.frequency = :frequency")
-            params["frequency"] = frequency
-
-        # Exclude deprecated concepts (spec entity-semantic-search: discovery excludes deprecated)
-        filter_clauses.append("COALESCE(c.deprecated, false) = false")
-
-        where_clause = " AND ".join(filter_clauses) if filter_clauses else "1=1"
-
-        sql = f"""
-            SELECT
-                c.id, c.code, c.name_en, c.name_zh, c.category, c.unit,
-                c.measure, c.frequency, c.entity_type, c.source,
-                ce.embedding
-            FROM concepts c
-            JOIN concept_embeddings ce ON c.id = ce.concept_id
-            WHERE ce.model = :model
-                AND {where_clause}
-        """
-
-        result = session.execute(text(sql), params)
-
-        # Concepts with at least one binding (for binding-aware ranking)
-        bound_ids = {
-            row[0] for row in session.execute(text("SELECT DISTINCT concept_id FROM concept_bindings"))
-        }
-
-        candidates = []
-        for row in result:
-            # Parse embedding from JSON
-            embedding_str = row.embedding
-            if isinstance(embedding_str, str):
-                embedding_list = json.loads(embedding_str)
-            else:
-                embedding_list = [float(x) for x in embedding_str]
-
-            # Normalize and compute similarity
-            embedding_array = np.array(embedding_list, dtype=np.float32)
-            query_array = np.array(query_embedding, dtype=np.float32)
-
-            # Cosine similarity for normalized vectors = dot product
-            similarity = float(np.dot(query_array, embedding_array))
-
-            candidates.append({
-                "id": row.id,
-                "code": row.code,
-                "name_en": row.name_en,
-                "name_zh": row.name_zh,
-                "category": row.category,
-                "unit": row.unit,
-                "measure": row.measure,
-                "frequency": row.frequency,
-                "entity_type": row.entity_type,
-                "source": row.source,
-                "similarity": similarity,
-                "has_binding": row.id in bound_ids,
-            })
-
-        # Binding-aware ranking (spec entity-semantic-search): bound concepts rank
-        # above zero-binding concepts when similarity is within a 0.05 band.
-        # Bucket similarity into 0.05-wide bins; within a bin, bound first, then
-        # exact similarity. Concepts >0.05 apart are ordered by bin (similarity).
-        def _rank_key(c):
-            sim = c["similarity"]
-            return (round(sim / 0.05), 1 if c["has_binding"] else 0, sim)
-
-        candidates.sort(key=_rank_key, reverse=True)
-        results = candidates[:limit]
+        # Candidate retrieval goes through the vector backend abstraction
+        # (FD_MCP_VECTOR_BACKEND: json | matrix | pgvector). The default json
+        # backend is the legacy full-scan path, behavior-for-behavior.
+        results = vector_backend.search_concept_candidates(
+            session,
+            query_embedding,
+            entity_type=entity_type,
+            limit=limit,
+            include_unbound=True,
+            model=MODEL_NAME,
+            frequency=frequency,
+        )
 
         print(f"[semantic_search] Found {len(results)} results")
         for r in results[:5]:

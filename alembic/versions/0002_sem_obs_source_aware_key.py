@@ -65,6 +65,8 @@ def _uq_sem_obs_columns(bind) -> set[str]:
 
 def upgrade() -> None:
     bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        return  # PG-only (CONCURRENTLY); sqlite chain runs are no-ops
     if _uq_sem_obs_columns(bind) == set(_KEY_COLS):
         return  # already source-aware (e.g. swapped via the 007 runbook)
 
@@ -103,6 +105,8 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    if op.get_bind().dialect.name != "postgresql":
+        return
     raise NotImplementedError(
         "downgrade of the source-aware key is lossy (multiple rows per old "
         "key cannot coexist); rollback is redeploying the previous image. "

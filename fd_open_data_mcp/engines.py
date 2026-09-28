@@ -4,7 +4,9 @@ Caches must survive across tool calls within their TTLs (spec semantic-search:
 retrieval caches survive across calls). Both fd-open-data-mcp and
 fd-find-data-business-mcp take their engines from here so the graph TTL and
 the embedding query cache actually persist between calls. Write tools call
-``invalidate_graph`` / ``invalidate_searches`` instead of waiting out the TTL.
+``invalidate_graph`` / ``invalidate_searches`` instead of waiting out the TTL;
+``invalidate_searches`` also drops the transitional vector-matrix cache
+(``fd_open_data_mcp.vector_backend``, FD_MCP_VECTOR_BACKEND=matrix).
 """
 from __future__ import annotations
 
@@ -61,9 +63,13 @@ def invalidate_searches() -> None:
     with _lock:
         if _entity_search is not None:
             _entity_search.invalidate_cache()
-    from fd_open_data_mcp import search_cache
+    from fd_open_data_mcp import search_cache, vector_backend
 
     search_cache.invalidate()
+    # The transitional vector matrix (FD_MCP_VECTOR_BACKEND=matrix) is a
+    # snapshot of the embeddings table: writes make it stale, drop it now
+    # instead of waiting out VECTOR_MATRIX_TTL.
+    vector_backend.invalidate_matrix_cache()
 
 
 def reset_engines() -> None:
@@ -72,3 +78,6 @@ def reset_engines() -> None:
     with _lock:
         _graph_manager = None
         _entity_search = None
+    from fd_open_data_mcp import vector_backend
+
+    vector_backend.invalidate_matrix_cache()

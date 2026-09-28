@@ -809,10 +809,25 @@ def semantic_search(
     scores, ordered by similarity; cached=true marks a TTL-cache hit.
     """
     from fd_open_data_mcp.semantic_search import semantic_search as _search
+    from fd_open_data_mcp.semantic.registry_search import (
+        merge_registry_hits,
+        search_registry,
+    )
 
     def run():
         results = _search(query, entity_type, frequency, limit)
-        return {"count": len(results), "results": results}
+        # Registry corpus (spec semantic-search「语料覆盖」): verified
+        # registry-only indicators join the ranking; local concepts win
+        # semantic_code collisions. Same binding-aware key as the concept
+        # search — registry entries carry no bindings.
+        registry_hits = search_registry(query, limit)
+
+        def _rank(c):
+            sim = c.get("similarity", 0.0)
+            return (round(sim / 0.05), 1 if c.get("has_binding") else 0, sim)
+
+        merged = merge_registry_hits(results, registry_hits, limit=limit, key=_rank)
+        return {"count": len(merged), "results": merged}
 
     return cached_search(
         "semantic_search",
@@ -869,10 +884,21 @@ def semantic_search_unified(
         scores, merged and sorted; cached=true marks a TTL-cache hit.
     """
     search = engines.get_entity_search()
+    from fd_open_data_mcp.semantic.registry_search import (
+        merge_registry_hits,
+        search_registry,
+    )
 
     def run():
         results = search.search_unified(query, entity_type, limit)
-        return {"count": len(results), "results": results}
+        # Registry entries merge on the same similarity-descending order
+        # (spec「语料覆盖」); dedupe keeps the local concept on code collisions.
+        registry_hits = search_registry(query, limit)
+        merged = merge_registry_hits(
+            results, registry_hits, limit=limit,
+            key=lambda r: r.get("similarity", 0.0),
+        )
+        return {"count": len(merged), "results": merged}
 
     return cached_search(
         "semantic_search_unified",
@@ -917,6 +943,21 @@ def ai_search(
         cached=true marker when served from the TTL result cache.
     """
     from fd_open_data_mcp.ai_search import ai_search as _ai_search
+    from fd_open_data_mcp.semantic.registry_search import (
+        merge_registry_hits,
+        search_registry,
+    )
+
+    def _run():
+        result = _ai_search(query, entity_type, limit, include_values, value_date)
+        # Registry-only indicators ride the concepts list tail so they stay
+        # discoverable even when zero local concepts match (spec「语料覆盖」);
+        # each carries result_type="registry", deduped against concept codes.
+        registry_hits = search_registry(query, limit)
+        result["concepts"] = merge_registry_hits(
+            result.get("concepts", []), registry_hits,
+        )
+        return result
 
     return cached_search(
         "ai_search",
@@ -927,7 +968,7 @@ def ai_search(
             "include_values": include_values,
             "value_date": value_date,
         },
-        lambda: _ai_search(query, entity_type, limit, include_values, value_date),
+        _run,
     )
 
 

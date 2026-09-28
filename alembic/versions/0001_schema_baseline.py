@@ -52,13 +52,21 @@ def _snapshot_sql() -> str:
 
 
 def upgrade() -> None:
-    op.get_bind().exec_driver_sql(_snapshot_sql())
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        # SQLite consumers (tests) build the schema with an explicit test
+        # builder; running this chain on them stops here per revision.
+        return
+    bind.exec_driver_sql(_snapshot_sql())
 
 
 def downgrade() -> None:
     # pg_dump emits tables in dependency order, so reverse file order is a
     # valid drop order. Baseline downgrade is a full teardown; per D6 the
     # operational rollback is redeploying the previous image, not this.
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
     names = _CREATE_TABLE.findall(_snapshot_sql())
     for name in reversed(names):
         op.execute(f'DROP TABLE IF EXISTS public."{name}"')

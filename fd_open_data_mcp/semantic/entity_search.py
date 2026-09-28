@@ -1,14 +1,15 @@
 """Entity semantic search using vector embeddings."""
 from __future__ import annotations
 
-import json
 import logging
 import os
 from typing import List, Dict, Any, Optional
 
 import numpy as np
-from sqlalchemy import create_engine, text
+from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
+
+from fd_open_data_mcp import vector_backend
 
 logger = logging.getLogger(__name__)
 
@@ -132,63 +133,16 @@ class EntitySemanticSearch:
 
         session = self.Session()
         try:
-            # Build query
-            sql = """
-                SELECT
-                    e.id,
-                    e.entity_type,
-                    e.code,
-                    e.name_en,
-                    e.name_zh,
-                    e.metadata_json,
-                    ee.embedding
-                FROM entities e
-                JOIN entity_embeddings ee ON e.id = ee.entity_id
-                WHERE ee.model = :model
-            """
-
-            params = {"model": self.model_name}
-
-            if entity_type:
-                sql += " AND e.entity_type = :entity_type"
-                params["entity_type"] = entity_type
-
-            result = session.execute(text(sql), params)
-
-            # Calculate similarities
-            results = []
-            for row in result:
-                # Parse embedding from JSON
-                embedding_str = row.embedding
-                if isinstance(embedding_str, str):
-                    embedding = json.loads(embedding_str)
-                else:
-                    embedding = embedding_str
-
-                # Calculate cosine similarity
-                similarity = self._cosine_similarity(query_embedding, embedding)
-
-                # Parse metadata
-                metadata = row.metadata_json
-                if isinstance(metadata, str):
-                    try:
-                        metadata = json.loads(metadata)
-                    except json.JSONDecodeError:
-                        metadata = {}
-
-                results.append({
-                    "id": row.id,
-                    "entity_type": row.entity_type,
-                    "code": row.code,
-                    "name_en": row.name_en,
-                    "name_zh": row.name_zh,
-                    "metadata": metadata,
-                    "similarity": float(similarity)
-                })
-
-            # Sort by similarity and limit
-            results.sort(key=lambda x: x["similarity"], reverse=True)
-            return results[:limit]
+            # Candidate retrieval goes through the vector backend abstraction
+            # (FD_MCP_VECTOR_BACKEND: json | matrix | pgvector). The default
+            # json backend is the legacy full-scan path, behavior-for-behavior.
+            return vector_backend.search_entity_candidates(
+                session,
+                query_embedding,
+                entity_type=entity_type,
+                limit=limit,
+                model=self.model_name,
+            )
 
         finally:
             session.close()
