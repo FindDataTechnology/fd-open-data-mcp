@@ -2,6 +2,55 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.29] - 2026-09-29
+
+### Fixed (mcp-search-engine-overhaul P0)
+
+#### semantic_search resolves its model by name
+
+`semantic_search.py` loaded the embedding model from a hardcoded dev-machine
+cache path, so every `semantic_search` / `semantic_search_unified` call in the
+production container failed with a filesystem error. Model resolution now
+lives in `fd_open_data_mcp/embeddings/model.py`, resolves by name (env
+`FD_MCP_EMBEDDING_MODEL`), and failures surface as a tool error naming the
+model.
+
+#### Each tool registered exactly once
+
+`semantic_search.py`, `ai_search.py` and `entity_graph_tools.py` carried
+module-level `@mcp.tool()` registrations that re-registered (and overrode)
+the server-level definitions the first time a tool call lazily imported them.
+Those registrations are gone — `server.py` is the only registration point.
+
+#### Retrieval caches actually survive across calls
+
+The graph manager, entity semantic search and their caches (graph TTL,
+embedding query cache) were rebuilt per call, making the 300s TTLs useless.
+Both engines are now process-wide lazy singletons (`fd_open_data_mcp/engines.py`),
+shared with fd-find-data-business-mcp's delegated `graph_search`.
+`GRAPH_CACHE_TTL` / `EMBEDDING_CACHE_SIZE` are wired; `CACHE_ENABLED` /
+`SEARCH_RESULT_CACHE_TTL` gate a new search-result TTL cache whose hits are
+marked `"cached": true`. Write tools (`update_entity` / `add_entity` /
+`add_relationship` / `update_concept` / `re_embed_concept`) invalidate caches
+immediately instead of waiting out the TTL.
+
+#### ai_search value layer runs on SQLite dev databases
+
+Layer 3 used PostgreSQL-only `ANY()` / `DISTINCT ON`; now portable expanding
+`IN` + `ROW_NUMBER()` window, verified end-to-end on SQLite.
+
+#### Housekeeping
+
+- `semantic_search` / `semantic_search_entities` / `semantic_search_unified`
+  now return `{cached, count, results}` envelopes so cache hits stay
+  distinguishable.
+- Hardcoded DSNs (with a stale password placeholder) removed from
+  `scripts/migrate_add_vector_search.py`, `scripts/generate_entity_embeddings.py`
+  and `scripts/migrate_entity_sync_schema.py`; they now require
+  `FD_OPEN_DATA_MCP_DATABASE_URL`.
+- Dead `.env.example` keys removed (`EMBEDDING_MODEL` → `FD_MCP_EMBEDDING_MODEL`,
+  `CACHE_TTL_HOURS` → `SEARCH_RESULT_CACHE_TTL`).
+
 ## [0.5.16] - 2026-09-18
 
 ### Fixed

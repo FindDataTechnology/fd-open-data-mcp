@@ -6,33 +6,18 @@ similar concepts based on natural language queries.
 from __future__ import annotations
 
 import json
-from typing import Optional
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
 from sqlalchemy import text
 
 from fd_open_data_mcp import db as dbmod
-from fd_open_data_mcp.server import mcp
+from fd_open_data_mcp.embeddings.model import MODEL_NAME, get_model
+
+# Lazy model singleton lives in embeddings.model (resolves by name, shared
+# with ai_search / entity search — never a machine-specific cache path).
+_get_model = get_model
 
 
-# Use the same model as the embedding script
-MODEL_PATH = "/Users/chengsishi/.cache/huggingface/hub/models--sentence-transformers--all-MiniLM-L6-v2/snapshots/1110a243fdf4706b3f48f1d95db1a4f5529b4d41"
-MODEL_NAME = "all-MiniLM-L6-v2"
-
-# Lazy singleton: load the sentence-transformer model once per process, not per call
-# (avoids re-loading 103 weights on every semantic_search/ai_search invocation).
-_MODEL: Optional[SentenceTransformer] = None
-
-
-def _get_model() -> SentenceTransformer:
-    global _MODEL
-    if _MODEL is None:
-        _MODEL = SentenceTransformer(MODEL_PATH)
-    return _MODEL
-
-
-@mcp.tool()
 def semantic_search(
     query: str,
     entity_type: str | None = None,
@@ -156,7 +141,6 @@ def semantic_search(
         session.close()
 
 
-@mcp.tool()
 def re_embed_concept(concept_id: int) -> dict:
     """Re-embed a single concept.
 

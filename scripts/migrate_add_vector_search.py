@@ -1,12 +1,12 @@
 """Migration: Add vector search support for semantic concept search.
 
 Phase 3 of add-entity-graph-vector-search change. Adds concept_embeddings table
-to store vector embeddings of concept descriptions for semantic search.
+to store vector embeddings of concept descriptions for semantic concept search.
 
 Since pgvector is not available, we store embeddings as JSON arrays and implement
 cosine similarity search in Python using sentence-transformers.
 
-Usage: python scripts/migrate_add_vector_search.py
+Usage: FD_OPEN_DATA_MCP_DATABASE_URL=postgresql://... python scripts/migrate_add_vector_search.py
 """
 from __future__ import annotations
 
@@ -14,13 +14,15 @@ import os
 from sqlalchemy import text
 from fd_open_data_mcp import db as dbmod
 
-# Force remote Postgres connection
-DATABASE_URL = "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
-os.environ["FD_OPEN_DATA_MCP_DATABASE_URL"] = DATABASE_URL
-
 
 def main():
     """Run the vector search migration."""
+    if not os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL"):
+        raise SystemExit(
+            "Set FD_OPEN_DATA_MCP_DATABASE_URL to the target database before "
+            "running this migration (no default — migrations are explicit)."
+        )
+
     print("=== Vector Search Migration ===\n")
 
     # Get database session

@@ -11,33 +11,19 @@ coordinating the three layers:
 from __future__ import annotations
 
 import json
-from typing import Optional
 
 import numpy as np
-from sentence_transformers import SentenceTransformer
-from sqlalchemy import text
+from sqlalchemy import bindparam, text
 
 from fd_open_data_mcp import db as dbmod
-from fd_open_data_mcp.server import mcp
+from fd_open_data_mcp.embeddings.model import MODEL_NAME, get_model
 
 
-# Resolve by model name (never a machine-specific cache path): the runtime
-# image bakes the model into the default HF cache under HF_HUB_OFFLINE=1, and
-# dev machines resolve it from their own cache. Env override for exotic setups.
-import os
-
-MODEL_NAME = os.environ.get("FD_MCP_EMBEDDING_MODEL", "all-MiniLM-L6-v2")
-_MODEL: Optional[SentenceTransformer] = None
+# Lazy model singleton lives in embeddings.model (resolves by name, shared
+# with semantic_search / entity search — never a machine-specific cache path).
+_get_model = get_model
 
 
-def _get_model() -> SentenceTransformer:
-    global _MODEL
-    if _MODEL is None:
-        _MODEL = SentenceTransformer(MODEL_NAME)
-    return _MODEL
-
-
-@mcp.tool()
 def ai_search(
     query: str,
     entity_type: str | None = None,
@@ -255,39 +241,49 @@ def _fetch_values(concepts: list[dict], entity_type: str, value_date: str | None
         if not concept_ids:
             return []
 
-        # Build the query
+        # Portable SQL (spec semantic-search: works on SQLite dev databases):
+        # expanding IN instead of PG-only ANY(), and a ROW_NUMBER window
+        # instead of PG-only DISTINCT ON.
         if value_date:
             sql = """
                 SELECT so.concept_id, so.entity_type, so.entity_id, so.date, so.value, so.unit, so.source_used
                 FROM semantic_observations so
-                WHERE so.concept_id = ANY(:concept_ids)
+                WHERE so.concept_id IN :concept_ids
                     AND so.entity_type = :entity_type
                     AND so.date = :value_date
                 ORDER BY so.concept_id, so.entity_id
                 LIMIT 100
             """
             params = {
-                "concept_ids": concept_ids,
                 "entity_type": entity_type,
                 "value_date": value_date,
             }
         else:
-            # Get the latest values for each (concept, entity) pair
+            # Latest value per (concept, entity) pair
             sql = """
-                SELECT DISTINCT ON (so.concept_id, so.entity_id)
-                    so.concept_id, so.entity_type, so.entity_id, so.date, so.value, so.unit, so.source_used
-                FROM semantic_observations so
-                WHERE so.concept_id = ANY(:concept_ids)
-                    AND so.entity_type = :entity_type
-                ORDER BY so.concept_id, so.entity_id, so.date DESC
+                SELECT concept_id, entity_type, entity_id, date, value, unit, source_used
+                FROM (
+                    SELECT so.concept_id, so.entity_type, so.entity_id, so.date,
+                           so.value, so.unit, so.source_used,
+                           ROW_NUMBER() OVER (
+                               PARTITION BY so.concept_id, so.entity_id
+                               ORDER BY so.date DESC
+                           ) AS rn
+                    FROM semantic_observations so
+                    WHERE so.concept_id IN :concept_ids
+                        AND so.entity_type = :entity_type
+                ) ranked
+                WHERE rn = 1
+                ORDER BY concept_id, entity_id
                 LIMIT 100
             """
             params = {
-                "concept_ids": concept_ids,
                 "entity_type": entity_type,
             }
 
-        result = session.execute(text(sql), params)
+        stmt = text(sql).bindparams(bindparam("concept_ids", expanding=True))
+        params["concept_ids"] = concept_ids
+        result = session.execute(stmt, params)
 
         values = []
         for row in result:

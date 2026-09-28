@@ -12,10 +12,8 @@ from sqlalchemy import text
 
 from fd_open_data_mcp import db as dbmod
 from fd_open_data_mcp.entities.resolver import anchors_by_entity, entity_anchors
-from fd_open_data_mcp.server import mcp
 
 
-@mcp.tool()
 def list_entities(
     entity_type: str,
     limit: int = 100,
@@ -74,7 +72,6 @@ def list_entities(
         session.close()
 
 
-@mcp.tool()
 def get_entity(
     entity_type: str,
     code: str
@@ -123,7 +120,6 @@ def get_entity(
         session.close()
 
 
-@mcp.tool()
 def add_entity(
     entity_type: str,
     code: str,
@@ -195,7 +191,6 @@ def add_entity(
         session.close()
 
 
-@mcp.tool()
 def list_relationships(
     entity_type: str,
     code: str,
@@ -293,7 +288,6 @@ def list_relationships(
         session.close()
 
 
-@mcp.tool()
 def add_relationship(
     source_entity_type: str,
     source_code: str,

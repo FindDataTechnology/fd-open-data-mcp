@@ -11,10 +11,12 @@ from fd_open_data_mcp.embeddings.generator import EntityEmbeddingGenerator
 
 def main():
     """Generate embeddings for all entities."""
-    database_url = os.environ.get(
-        "FD_OPEN_DATA_MCP_DATABASE_URL",
-        "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
-    )
+    database_url = os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL")
+    if not database_url:
+        raise SystemExit(
+            "Set FD_OPEN_DATA_MCP_DATABASE_URL to the target database first "
+            "(no default — embedding runs are explicit)."
+        )
 
     print("Initializing embedding generator...")
     generator = EntityEmbeddingGenerator(model_name="all-MiniLM-L6-v2")

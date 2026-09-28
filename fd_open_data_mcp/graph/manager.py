@@ -44,6 +44,15 @@ class EntityGraphManager:
 
         logger.info(f"Initialized EntityGraphManager with cache_ttl={cache_ttl}s")
 
+    def invalidate(self) -> None:
+        """Drop the cached graph; the next get_graph() reloads from the database.
+
+        Called by write tools via engines.invalidate_graph() — entity or
+        relationship writes must not wait out the cache TTL.
+        """
+        self._graph = None
+        self._last_load = None
+
     def get_graph(self, force_reload: bool = False) -> nx.Graph:
         """
         Get the entity graph, loading from database if necessary.

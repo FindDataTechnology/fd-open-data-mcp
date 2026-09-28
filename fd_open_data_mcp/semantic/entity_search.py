@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 from typing import List, Dict, Any, Optional
 
 import numpy as np
@@ -12,8 +13,16 @@ from sqlalchemy.orm import sessionmaker
 logger = logging.getLogger(__name__)
 
 
+def _embedding_cache_size() -> int:
+    return int(os.environ.get("EMBEDDING_CACHE_SIZE", "1000"))
+
+
 class EntitySemanticSearch:
-    """Search entities using semantic similarity with vector embeddings."""
+    """Search entities using semantic similarity with vector embeddings.
+
+    Held as a process-wide singleton via ``fd_open_data_mcp.engines`` so the
+    query-embedding cache (EMBEDDING_CACHE_SIZE wired) survives across calls.
+    """
 
     def __init__(self, database_url: str, model_name: str = "all-MiniLM-L6-v2"):
         """
@@ -40,61 +49,14 @@ class EntitySemanticSearch:
             )
 
         # Embedding cache: query_text -> embedding_vector
-        self._embedding_cache = {}
+        self._embedding_cache: Dict[str, List[float]] = {}
         self._cache_hits = 0
         self._cache_misses = 0
 
         # Warm up cache on startup
         self._warm_up_cache()
 
-    def _warm_up_cache(self):
-        """Warm up the embedding cache with common queries."""
-        # Pre-compute embeddings for common entity types
-        common_queries = [
-            "country", "stock", "company", "city", "industry",
-            "inflation", "GDP", "population", "technology", "finance"
-        ]
-        for query in common_queries:
-            if query not in self._embedding_cache:
-                self._embedding_cache[query] = self.model.encode(query).tolist()
-        logger.info(f"Cache warmed up with {len(common_queries)} common queries")
-
-    def _get_embedding(self, text: str) -> list:
-        """Get embedding for text, using cache if available."""
-        if text in self._embedding_cache:
-            self._cache_hits += 1
-            return self._embedding_cache[text]
-
-        self._cache_misses += 1
-        embedding = self.model.encode(text).tolist()
-        self._embedding_cache[text] = embedding
-
-        # Limit cache size to prevent memory issues
-        if len(self._embedding_cache) > 1000:
-            # Remove oldest entries (simple FIFO)
-            keys_to_remove = list(self._embedding_cache.keys())[:100]
-            for key in keys_to_remove:
-                del self._embedding_cache[key]
-
-        return embedding
-
-    def invalidate_cache(self):
-        """Clear the embedding cache."""
-        self._embedding_cache.clear()
-        logger.info("Embedding cache invalidated")
-
-    def get_cache_stats(self) -> dict:
-        """Get cache statistics."""
-        total = self._cache_hits + self._cache_misses
-        hit_rate = (self._cache_hits / total * 100) if total > 0 else 0
-        return {
-            "cache_size": len(self._embedding_cache),
-            "hits": self._cache_hits,
-            "misses": self._cache_misses,
-            "hit_rate": f"{hit_rate:.2f}%"
-        }
-
-    def _warm_up_cache(self):
+    def _warm_up_cache(self) -> None:
         """Warm up embedding cache with common queries."""
         common_queries = [
             "inflation", "GDP", "unemployment", "interest rate",
@@ -114,11 +76,20 @@ class EntitySemanticSearch:
         if text in self._embedding_cache:
             self._cache_hits += 1
             return self._embedding_cache[text]
-        else:
-            self._cache_misses += 1
-            embedding = self.model.encode(text).tolist()
-            self._embedding_cache[text] = embedding
-            return embedding
+
+        self._cache_misses += 1
+        embedding = self.model.encode(text).tolist()
+        self._embedding_cache[text] = embedding
+
+        # Bound the cache (EMBEDDING_CACHE_SIZE, default 1000): evict the
+        # oldest ~10% so a busy server doesn't grow without limit.
+        limit = _embedding_cache_size()
+        if len(self._embedding_cache) > limit:
+            keys_to_remove = list(self._embedding_cache.keys())[: max(1, limit // 10)]
+            for key in keys_to_remove:
+                del self._embedding_cache[key]
+
+        return embedding
 
     def get_cache_stats(self) -> Dict[str, Any]:
         """Get cache statistics."""
@@ -132,7 +103,7 @@ class EntitySemanticSearch:
             "hit_rate": hit_rate
         }
 
-    def invalidate_cache(self):
+    def invalidate_cache(self) -> None:
         """Clear the embedding cache."""
         self._embedding_cache.clear()
         self._cache_hits = 0

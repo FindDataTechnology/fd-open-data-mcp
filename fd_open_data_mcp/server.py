@@ -14,6 +14,8 @@ import os
 from fastmcp import FastMCP
 
 from fd_open_data_mcp.db import get_database
+from fd_open_data_mcp import engines
+from fd_open_data_mcp.search_cache import cached_search
 
 mcp = FastMCP(
     name="fd-open-data-mcp",
@@ -163,6 +165,10 @@ def update_entity(
         entity_spec = EntitySpec(params)
         entity, status = upsert_entity(s, entity_spec, source_name="admin_update")
         s.commit()
+        # Entity write: drop the cached graph + cached search results now,
+        # not after the TTL (engines/search_cache singletons).
+        engines.invalidate_graph()
+        engines.invalidate_searches()
         return {"status": status, "entity_type": entity.entity_type, "code": entity.code, "id": entity.id}
     except Exception as e:
         s.rollback()
@@ -209,6 +215,8 @@ def update_concept(
             concept_ids.append(concept.id)
 
         s.commit()
+        # Concept write: cached search results are stale — drop them now.
+        engines.invalidate_searches()
         return {"affected_count": affected_count, "concept_ids": concept_ids}
     except Exception as e:
         s.rollback()
@@ -587,7 +595,10 @@ def add_entity(
     """Add a new entity to the registry."""
     from fd_open_data_mcp.entity_graph_tools import add_entity as _add
 
-    return _add(entity_type, code, name_en, name_zh, metadata)
+    result = _add(entity_type, code, name_en, name_zh, metadata)
+    engines.invalidate_graph()
+    engines.invalidate_searches()
+    return result
 
 
 @mcp.tool
@@ -612,7 +623,10 @@ def add_relationship(
     """Add a new relationship between two entities."""
     from fd_open_data_mcp.entity_graph_tools import add_relationship as _add
 
-    return _add(source_entity_type, source_code, relation_type, target_entity_type, target_code, valid_from, valid_to, metadata)
+    result = _add(source_entity_type, source_code, relation_type, target_entity_type, target_code, valid_from, valid_to, metadata)
+    engines.invalidate_graph()
+    engines.invalidate_searches()
+    return result
 
 
 # ─── Graph search (NetworkX) ─────────────────────────────────────────────────
@@ -661,121 +675,124 @@ def graph_search(
         # Get graph statistics
         graph_search("statistics", "")
     """
-    from fd_open_data_mcp.graph.manager import EntityGraphManager
-    from fd_open_data_mcp.db import get_database
+    # Shared singleton: the graph (and its TTL cache) survives across calls
+    # (engines.get_graph_manager; entity writes invalidate it explicitly).
+    from fd_open_data_mcp import engines as _engines
 
-    # Get database URL
-    db = get_database()
-    database_url = db.database_url
+    def _run() -> dict:
+        graph_manager = _engines.get_graph_manager()
+        try:
+            # Validate algorithm
+            valid_algorithms = ["bfs", "dfs", "neighbors", "shortest_path", "subgraph", "ego_graph", "statistics"]
+            if algorithm not in valid_algorithms:
+                return {
+                    "error": f"Invalid algorithm: {algorithm}. Valid options: {valid_algorithms}"
+                }
 
-    # Initialize graph manager
-    graph_manager = EntityGraphManager(database_url)
+            # Handle statistics (doesn't need start_entity_code)
+            if algorithm == "statistics":
+                return graph_manager.get_statistics()
 
-    try:
-        # Validate algorithm
-        valid_algorithms = ["bfs", "dfs", "neighbors", "shortest_path", "subgraph", "ego_graph", "statistics"]
-        if algorithm not in valid_algorithms:
-            return {
-                "error": f"Invalid algorithm: {algorithm}. Valid options: {valid_algorithms}"
-            }
+            # Validate start_entity_code
+            if not start_entity_code:
+                return {"error": "start_entity_code is required for this algorithm"}
 
-        # Handle statistics (doesn't need start_entity_code)
-        if algorithm == "statistics":
-            return graph_manager.get_statistics()
+            # Find start node
+            start_node = graph_manager.find_node_by_code(start_entity_code, entity_type_filter)
+            if start_node is None:
+                return {"error": f"Entity not found: {start_entity_code}"}
 
-        # Validate start_entity_code
-        if not start_entity_code:
-            return {"error": "start_entity_code is required for this algorithm"}
+            # Execute algorithm
+            if algorithm == "bfs":
+                results = graph_manager.bfs_traversal(start_node, max_depth, entity_type_filter)
+                return {
+                    "algorithm": "bfs",
+                    "start_entity": start_entity_code,
+                    "max_depth": max_depth,
+                    "results": results,
+                    "count": len(results)
+                }
 
-        # Find start node
-        start_node = graph_manager.find_node_by_code(start_entity_code, entity_type_filter)
-        if start_node is None:
-            return {"error": f"Entity not found: {start_entity_code}"}
+            elif algorithm == "dfs":
+                results = graph_manager.dfs_traversal(start_node, max_depth, entity_type_filter)
+                return {
+                    "algorithm": "dfs",
+                    "start_entity": start_entity_code,
+                    "max_depth": max_depth,
+                    "results": results,
+                    "count": len(results)
+                }
 
-        # Execute algorithm
-        if algorithm == "bfs":
-            results = graph_manager.bfs_traversal(start_node, max_depth, entity_type_filter)
-            return {
-                "algorithm": "bfs",
-                "start_entity": start_entity_code,
-                "max_depth": max_depth,
-                "results": results,
-                "count": len(results)
-            }
+            elif algorithm == "neighbors":
+                results = graph_manager.get_neighbors(start_node, entity_type_filter)
+                return {
+                    "algorithm": "neighbors",
+                    "entity": start_entity_code,
+                    "results": results,
+                    "count": len(results)
+                }
 
-        elif algorithm == "dfs":
-            results = graph_manager.dfs_traversal(start_node, max_depth, entity_type_filter)
-            return {
-                "algorithm": "dfs",
-                "start_entity": start_entity_code,
-                "max_depth": max_depth,
-                "results": results,
-                "count": len(results)
-            }
+            elif algorithm == "shortest_path":
+                if not end_entity_code:
+                    return {"error": "end_entity_code is required for shortest_path algorithm"}
 
-        elif algorithm == "neighbors":
-            results = graph_manager.get_neighbors(start_node, entity_type_filter)
-            return {
-                "algorithm": "neighbors",
-                "entity": start_entity_code,
-                "results": results,
-                "count": len(results)
-            }
+                end_node = graph_manager.find_node_by_code(end_entity_code, entity_type_filter)
+                if end_node is None:
+                    return {"error": f"Entity not found: {end_entity_code}"}
 
-        elif algorithm == "shortest_path":
-            if not end_entity_code:
-                return {"error": "end_entity_code is required for shortest_path algorithm"}
+                results = graph_manager.shortest_path(start_node, end_node)
+                if not results:
+                    return {
+                        "algorithm": "shortest_path",
+                        "start_entity": start_entity_code,
+                        "end_entity": end_entity_code,
+                        "results": [],
+                        "message": "No path found between entities"
+                    }
 
-            end_node = graph_manager.find_node_by_code(end_entity_code, entity_type_filter)
-            if end_node is None:
-                return {"error": f"Entity not found: {end_entity_code}"}
-
-            results = graph_manager.shortest_path(start_node, end_node)
-            if not results:
                 return {
                     "algorithm": "shortest_path",
                     "start_entity": start_entity_code,
                     "end_entity": end_entity_code,
-                    "results": [],
-                    "message": "No path found between entities"
+                    "results": results,
+                    "path_length": len(results) - 1
                 }
 
-            return {
-                "algorithm": "shortest_path",
-                "start_entity": start_entity_code,
-                "end_entity": end_entity_code,
-                "results": results,
-                "path_length": len(results) - 1
-            }
+            elif algorithm == "subgraph":
+                if not entity_type_filter:
+                    return {"error": "entity_type_filter is required for subgraph algorithm"}
 
-        elif algorithm == "subgraph":
-            if not entity_type_filter:
-                return {"error": "entity_type_filter is required for subgraph algorithm"}
+                results = graph_manager.get_subgraph_by_type(entity_type_filter, max_nodes=100)
+                return {
+                    "algorithm": "subgraph",
+                    "entity_type": entity_type_filter,
+                    "nodes": results["nodes"],
+                    "edges": results["edges"],
+                    "node_count": len(results["nodes"]),
+                    "edge_count": len(results["edges"])
+                }
 
-            results = graph_manager.get_subgraph_by_type(entity_type_filter, max_nodes=100)
-            return {
-                "algorithm": "subgraph",
-                "entity_type": entity_type_filter,
-                "nodes": results["nodes"],
-                "edges": results["edges"],
-                "node_count": len(results["nodes"]),
-                "edge_count": len(results["edges"])
-            }
+            elif algorithm == "ego_graph":
+                results = graph_manager.get_ego_graph(start_node, radius=max_depth)
+                return {
+                    "algorithm": "ego_graph",
+                    "center_entity": start_entity_code,
+                    "radius": max_depth,
+                    "nodes": results["nodes"],
+                    "edges": results["edges"],
+                    "node_count": len(results["nodes"]),
+                    "edge_count": len(results["edges"])
+                }
 
-        elif algorithm == "ego_graph":
-            results = graph_manager.get_ego_graph(start_node, radius=max_depth)
-            return {
-                "algorithm": "ego_graph",
-                "center_entity": start_entity_code,
-                "radius": max_depth,
-                "nodes": results["nodes"],
-                "edges": results["edges"],
-                "node_count": len(results["nodes"]),
-                "edge_count": len(results["edges"])
-            }
-
-    except Exception as e:
-        return {"error": f"Graph search failed: {str(e)}"}
+        except Exception as e:
+            return {"error": f"Graph search failed: {str(e)}"}
+    return cached_search(
+        "graph_search",
+        {"algorithm": algorithm, "start_entity_code": start_entity_code,
+         "end_entity_code": end_entity_code, "max_depth": max_depth,
+         "entity_type_filter": entity_type_filter},
+        _run,
+    )
 
 
 # ─── Semantic search ────────────────────────────────────────────────────────
@@ -785,11 +802,23 @@ def semantic_search(
     entity_type: str | None = None,
     frequency: str | None = None,
     limit: int = 20,
-) -> list[dict]:
-    """Search concepts semantically using vector embeddings."""
+) -> dict:
+    """Search concepts semantically using vector embeddings.
+
+    Returns {cached, count, results}: results are the matching concepts with
+    scores, ordered by similarity; cached=true marks a TTL-cache hit.
+    """
     from fd_open_data_mcp.semantic_search import semantic_search as _search
 
-    return _search(query, entity_type, frequency, limit)
+    def run():
+        results = _search(query, entity_type, frequency, limit)
+        return {"count": len(results), "results": results}
+
+    return cached_search(
+        "semantic_search",
+        {"query": query, "entity_type": entity_type, "frequency": frequency, "limit": limit},
+        run,
+    )
 
 
 @mcp.tool
@@ -797,7 +826,7 @@ def semantic_search_entities(
     query: str,
     entity_type: str | None = None,
     limit: int = 20,
-) -> list[dict]:
+) -> dict:
     """Search entities semantically using vector embeddings.
 
     Args:
@@ -806,15 +835,20 @@ def semantic_search_entities(
         limit: Maximum number of results to return
 
     Returns:
-        List of entities with similarity scores, sorted by relevance
+        {cached, count, results}: entities with similarity scores, sorted by
+        relevance; cached=true marks a TTL-cache hit.
     """
-    from fd_open_data_mcp.semantic.entity_search import EntitySemanticSearch
-    from fd_open_data_mcp.db import get_database
+    search = engines.get_entity_search()
 
-    db = get_database()
-    search = EntitySemanticSearch(db.database_url)
+    def run():
+        results = search.search(query, entity_type, limit)
+        return {"count": len(results), "results": results}
 
-    return search.search(query, entity_type, limit)
+    return cached_search(
+        "semantic_search_entities",
+        {"query": query, "entity_type": entity_type, "limit": limit},
+        run,
+    )
 
 
 @mcp.tool
@@ -822,7 +856,7 @@ def semantic_search_unified(
     query: str,
     entity_type: str | None = None,
     limit: int = 20,
-) -> list[dict]:
+) -> dict:
     """Unified semantic search across both entities and concepts.
 
     Args:
@@ -831,15 +865,20 @@ def semantic_search_unified(
         limit: Maximum number of results to return
 
     Returns:
-        List of results (entities and concepts) with similarity scores
+        {cached, count, results}: entities and concepts with similarity
+        scores, merged and sorted; cached=true marks a TTL-cache hit.
     """
-    from fd_open_data_mcp.semantic.entity_search import EntitySemanticSearch
-    from fd_open_data_mcp.db import get_database
+    search = engines.get_entity_search()
 
-    db = get_database()
-    search = EntitySemanticSearch(db.database_url)
+    def run():
+        results = search.search_unified(query, entity_type, limit)
+        return {"count": len(results), "results": results}
 
-    return search.search_unified(query, entity_type, limit)
+    return cached_search(
+        "semantic_search_unified",
+        {"query": query, "entity_type": entity_type, "limit": limit},
+        run,
+    )
 
 
 @mcp.tool
@@ -847,7 +886,10 @@ def re_embed_concept(concept_id: int) -> dict:
     """Re-embed a single concept."""
     from fd_open_data_mcp.semantic_search import re_embed_concept as _re_embed
 
-    return _re_embed(concept_id)
+    result = _re_embed(concept_id)
+    # Stored embeddings changed: cached search results are stale.
+    engines.invalidate_searches()
+    return result
 
 
 # ─── AI search (orchestrates all layers) ────────────────────────────────────
@@ -871,11 +913,22 @@ def ai_search(
         value_date: Date for values (e.g., "2024-01-01") - only if include_values=True
 
     Returns:
-        Dictionary with concepts, entities, and optionally values
+        Dictionary with concepts, entities, and optionally values; carries a
+        cached=true marker when served from the TTL result cache.
     """
     from fd_open_data_mcp.ai_search import ai_search as _ai_search
 
-    return _ai_search(query, entity_type, limit, include_values, value_date)
+    return cached_search(
+        "ai_search",
+        {
+            "query": query,
+            "entity_type": entity_type,
+            "limit": limit,
+            "include_values": include_values,
+            "value_date": value_date,
+        },
+        lambda: _ai_search(query, entity_type, limit, include_values, value_date),
+    )
 
 
 # ─── Source ranking ─────────────────────────────────────────────────────────

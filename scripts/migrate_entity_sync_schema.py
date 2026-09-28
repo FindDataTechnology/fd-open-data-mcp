@@ -7,11 +7,13 @@ from pathlib import Path
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
-# Database connection
-DATABASE_URL = os.environ.get(
-    "FD_OPEN_DATA_MCP_DATABASE_URL",
-    "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
-)
+# Database connection (explicit env only — no credentials in source)
+DATABASE_URL = os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL")
+if not DATABASE_URL:
+    raise SystemExit(
+        "Set FD_OPEN_DATA_MCP_DATABASE_URL to the target database before "
+        "running this migration."
+    )
 
 def migrate():
     """Run database migrations for entity sync tables."""
