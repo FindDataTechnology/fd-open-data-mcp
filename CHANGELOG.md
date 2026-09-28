@@ -51,6 +51,32 @@ Layer 3 used PostgreSQL-only `ANY()` / `DISTINCT ON`; now portable expanding
 - Dead `.env.example` keys removed (`EMBEDDING_MODEL` → `FD_MCP_EMBEDDING_MODEL`,
   `CACHE_TTL_HOURS` → `SEARCH_RESULT_CACHE_TTL`).
 
+### Added (mcp-search-engine-overhaul 3.x/4.x) — shipped 2026-09-29 as sha-6ff2017..a0f2dec
+
+- **pgvector + HNSW vector engine** (ADR 0001): alembic 0003 adds
+  `embedding_vec vector(384)` columns + batched backfill + HNSW cosine
+  indexes + `registry_indicator_embeddings`; reads execute inside
+  PostgreSQL (`FD_MCP_VECTOR_BACKEND=pgvector`, live since sha-a0f2dec).
+  Dual-read verification passed (concept 1.00/1.00, entity 0.983/1.00
+  Jaccard/Kendall). Two pgvector defaults proved unsafe and are now set
+  per-session: `hnsw.ef_search=200` (beam missed exact neighbors in
+  duplicate clusters) and `hnsw.iterative_scan=relaxed_order` (filtered
+  queries returned EMPTY when the beam neighborhood failed the filter).
+- **Registry corpus in semantic search**: all 57,552 registry entries
+  embedded (57,552 rows / 1,052 s, local inference; 1 all-empty skipped);
+  verified-gated at query time (live JOIN, 3,420 visible, 54,132
+  embedded-but-invisible); registry-only indicators surface with
+  `result_type: "registry"` (verified live: "grain output" → city panel
+  Grain Output ranks first).
+- **Transitional matrix backend** (`FD_MCP_VECTOR_BACKEND=matrix`):
+  in-process numpy cache with `VECTOR_MATRIX_TTL`, equivalence-tested
+  against the json backend on SQLite.
+- **sqlalchemy pinned <2.1**: 2.1.x (fresh on the build mirror) removes the
+  psycopg2 fallback for `postgresql://` and crashed the migrate-schema
+  initContainer; pin restores the tested dialect.
+- Reference k8s manifest aligned with the live fd-official-web deployment
+  (was a stale zihan-era copy: 512Mi / harbor.local / NodePort 30801).
+
 ## [0.5.16] - 2026-09-18
 
 ### Fixed
