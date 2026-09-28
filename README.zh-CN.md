@@ -127,6 +127,23 @@ fd-open-data-mcp serve          # FastMCP，stdio 传输
 | 向量/语义搜索 | `semantic_search`、`semantic_search_entities`、
 `semantic_search_unified`、`ai_search`、`re_embed_concept`、`update_concept` |
 
+## 指标目录扩容与读取边界
+
+`list_concepts` 一族（MCP 工具与 `list-concepts` CLI）现在同时返回**统一指标注册表**
+（`registry_entries` 表）中已通过命名质量门（verified）的条目，来源覆盖
+world_bank / gta_panel / china_city_panel / fd_open_data 镜像；yearbook 的数字占位
+条目尚未完成语义命名，保持 unverified、不进目录。
+
+- **合并语义**：本地概念（`concepts` 表）在前，注册表条目在后（按 domain、
+  semantic_code 排序）；semantic_code 与本地概念 code 重复的条目去重（本地行胜出）。
+  注册表行额外携带 `native_code` 与 `source_db` 身份字段，因此用**原生码或语义码
+  之一**即可检索（`query` 参数做 code/name 子串匹配）。本地数据库没有该表时自动
+  退回纯本地目录，行为不变。
+- **读取边界（重要）**：本服务**不提供**对上述外部源指标观测数据的读取 —— 经
+  business-mcp 转发读取属**后续 change**，当前版本调用 `read`/`fetch` 读取这些
+  注册表指标不会返回其外部源数据。本节的目录扩容只影响「指标字典」，不改变任何
+  数据读取能力。
+
 ## 数据源
 
 分发器 `run_upstream()` 按源名路由到适配器。下表按**真实可达性**而非自报状态排列。
