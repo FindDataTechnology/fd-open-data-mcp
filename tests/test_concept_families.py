@@ -21,8 +21,12 @@ def test_fresh_db_has_family_table_and_variable_column(tmp_path, monkeypatch):
         dbmod.reset_database()
 
 
-def test_migrate_adds_concept_code_to_existing_db_idempotently(tmp_path, monkeypatch):
-    """An existing deployment predates concept_code; migrate adds it, once."""
+def test_migrate_on_legacy_sqlite_db_bootstraps_missing_tables(tmp_path, monkeypatch):
+    """Legacy SQLite DBs are not altered in place: migrate() bootstraps from
+    the models (create_all) — missing tables are created, pre-existing tables
+    are left untouched. In-place upgrades of existing deployments are the
+    Alembic baseline chain's job (PostgreSQL only); the runtime idempotent
+    ALTER mechanism was retired with it (no more ``added_columns``)."""
     url = f"sqlite:///{tmp_path / 'old.db'}"
     monkeypatch.setenv("FD_OPEN_DATA_MCP_DATABASE_URL", url)
     dbmod.reset_database()
@@ -38,8 +42,15 @@ def test_migrate_adds_concept_code_to_existing_db_idempotently(tmp_path, monkeyp
     engine.dispose()
 
     try:
-        assert "concepts.concept_code" in migrate()["added_columns"]
-        assert migrate()["added_columns"] == []  # second run is a no-op
+        result = migrate()
+        tables = set(result["tables"])
+        assert "concept_families" in tables    # missing tables bootstrapped
+        assert "fetch_log" in tables           # pre-existing tables reported
+        assert "added_columns" not in result   # mechanism retired into Alembic
+        engine = create_engine(url)
+        cols = {c["name"] for c in inspect(engine).get_columns("concepts")}
+        engine.dispose()
+        assert "concept_code" not in cols      # no in-place ALTER on SQLite
     finally:
         dbmod.reset_database()
 
