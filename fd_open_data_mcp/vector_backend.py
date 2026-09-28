@@ -445,19 +445,30 @@ def _entities_matrix(session, query_embedding, entity_type, model, limit):
 
 # ─── pgvector backend (indexed in-database similarity, design D4) ───────────
 
-# HNSW search beam width. pgvector's default ef_search=40 loses exact/near
-# neighbors inside tight duplicate clusters (verified on the entity corpus:
-# distance-0 self-matches missed at ef<=100, exact at ef=200), which broke
-# dual-read equivalence. 200 restores exact top-K at this corpus size.
+# HNSW session tuning. Two problems seen on the live corpus (2026-09-29):
+# 1. ef_search=40 (default) misses exact/near neighbors inside tight duplicate
+#    clusters — distance-0 self-matches were missed at ef<=100, exact at 200.
+# 2. iterative_scan=off (default) returns EMPTY results for filtered queries
+#    when the beam's neighborhood fails the filter (verified = 6% of the
+#    registry corpus swamped by unverified neighbors). relaxed_order keeps
+#    scanning until LIMIT is satisfied; ordering is approximate, which the
+#    Python-side rerank absorbs.
 def _hnsw_ef_search() -> int:
     return int(os.environ.get("FD_MCP_HNSW_EF_SEARCH", "200"))
 
 
-def _set_hnsw_ef(session) -> None:
+def _set_hnsw_session(session) -> None:
     try:
         session.execute(text(f"SET hnsw.ef_search = {_hnsw_ef_search()}"))
-    except Exception:  # noqa: BLE001 - non-PG or missing GUC: default still works
+        session.execute(text(
+            f"SET hnsw.iterative_scan = "
+            f"'{os.environ.get('FD_MCP_HNSW_ITERATIVE_SCAN', 'relaxed_order')}'"))
+    except Exception:  # noqa: BLE001 - non-PG or missing GUC: defaults still work
         pass
+
+
+# Backwards-compatible alias (the function predates iterative_scan).
+_set_hnsw_ef = _set_hnsw_session
 
 
 def _concepts_pgvector(session, query_embedding, entity_type, frequency,

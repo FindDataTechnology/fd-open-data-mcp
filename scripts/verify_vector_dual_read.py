@@ -211,6 +211,7 @@ def verify_table(engine, table: str, samples: int, topk: int, seed: int = 0,
         # Wider HNSW beam for recall parity with the exact JSON ranking
         # (default ef_search=40 misses near-duplicate-cluster neighbors).
         conn.execute(text(f"SET hnsw.ef_search = {ef_search}"))
+        conn.execute(text("SET hnsw.iterative_scan = 'relaxed_order'"))
         for i in picked:
             query = vectors[i]
             # Path B: pgvector cosine distance ordering, same top-k. The

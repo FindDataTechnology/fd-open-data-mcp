@@ -111,11 +111,15 @@ def _search_pgvector(session: Session, query: str, limit: int) -> list[dict]:
     """Indexed path: cosine-distance ordering inside PostgreSQL."""
     model = get_model()
     qvec = json.dumps([float(x) for x in model.encode([query])[0]])
-    # Wider HNSW beam: default ef_search=40 misses exact/near neighbors in
-    # tight clusters (same fix as vector_backend._set_hnsw_ef).
+    # Wider HNSW beam + iterative scan: defaults miss near-duplicate clusters
+    # and return EMPTY results for the verified filter when the beam's
+    # neighborhood is all-unverified (same fix as vector_backend).
     try:
         session.execute(text(
             f"SET hnsw.ef_search = {os.environ.get('FD_MCP_HNSW_EF_SEARCH', '200')}"))
+        session.execute(text(
+            f"SET hnsw.iterative_scan = "
+            f"'{os.environ.get('FD_MCP_HNSW_ITERATIVE_SCAN', 'relaxed_order')}'"))
     except Exception:  # noqa: BLE001 - non-PG/missing GUC: default still works
         pass
     stmt = text(f"""
