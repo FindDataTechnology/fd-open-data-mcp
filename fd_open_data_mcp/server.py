@@ -1156,6 +1156,37 @@ def _panel_app():
     return panel_app
 
 
+def _enable_mcp_session_reaping() -> None:
+    """Idle Streamable-HTTP sessions otherwise accumulate until the mcp SDK's
+    hard 10_000-session cap refuses every new session ("Refusing to open a new
+    session" — hit in production 2026-09-26). The SDK already reaps idle
+    sessions when ``session_idle_timeout`` is set, but fastmcp (3.4.x)
+    constructs the manager during lifespan startup and never forwards the
+    knob, so default it on the SDK constructor here. Override with
+    MCP_SESSION_IDLE_TIMEOUT (seconds); set it to 0 to disable.
+    """
+    try:
+        from mcp.server.streamable_http_manager import StreamableHTTPSessionManager
+    except Exception:  # noqa: BLE001 - http transport extras not installed
+        return
+    try:
+        timeout = float(os.environ.get("MCP_SESSION_IDLE_TIMEOUT", "1800") or 0)
+    except ValueError:
+        timeout = 1800.0
+    if timeout <= 0 or getattr(
+        StreamableHTTPSessionManager.__init__, "_fd_reaping_patch", False
+    ):
+        return
+    origin = StreamableHTTPSessionManager.__init__
+
+    def _init_with_idle_timeout(self, *args, **kwargs):
+        kwargs.setdefault("session_idle_timeout", timeout)
+        origin(self, *args, **kwargs)
+
+    _init_with_idle_timeout._fd_reaping_patch = True
+    StreamableHTTPSessionManager.__init__ = _init_with_idle_timeout
+
+
 def _http_asgi():
     """Composite ASGI app: /panel/* -> console panel, everything else -> MCP.
 
@@ -1166,6 +1197,7 @@ def _http_asgi():
     """
     from starlette.middleware import Middleware
 
+    _enable_mcp_session_reaping()
     token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
     if token:
         mcp_asgi = mcp.http_app(middleware=[Middleware(BearerAuthMiddleware)])
