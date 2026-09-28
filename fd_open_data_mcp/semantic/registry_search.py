@@ -111,6 +111,13 @@ def _search_pgvector(session: Session, query: str, limit: int) -> list[dict]:
     """Indexed path: cosine-distance ordering inside PostgreSQL."""
     model = get_model()
     qvec = json.dumps([float(x) for x in model.encode([query])[0]])
+    # Wider HNSW beam: default ef_search=40 misses exact/near neighbors in
+    # tight clusters (same fix as vector_backend._set_hnsw_ef).
+    try:
+        session.execute(text(
+            f"SET hnsw.ef_search = {os.environ.get('FD_MCP_HNSW_EF_SEARCH', '200')}"))
+    except Exception:  # noqa: BLE001 - non-PG/missing GUC: default still works
+        pass
     stmt = text(f"""
         SELECT re.semantic_code, re.name_zh, re.name_en, re.source_db,
                1 - (x.embedding_vec <=> CAST(:qvec AS vector)) AS similarity

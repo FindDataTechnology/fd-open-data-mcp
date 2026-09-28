@@ -445,9 +445,25 @@ def _entities_matrix(session, query_embedding, entity_type, model, limit):
 
 # ─── pgvector backend (indexed in-database similarity, design D4) ───────────
 
+# HNSW search beam width. pgvector's default ef_search=40 loses exact/near
+# neighbors inside tight duplicate clusters (verified on the entity corpus:
+# distance-0 self-matches missed at ef<=100, exact at ef=200), which broke
+# dual-read equivalence. 200 restores exact top-K at this corpus size.
+def _hnsw_ef_search() -> int:
+    return int(os.environ.get("FD_MCP_HNSW_EF_SEARCH", "200"))
+
+
+def _set_hnsw_ef(session) -> None:
+    try:
+        session.execute(text(f"SET hnsw.ef_search = {_hnsw_ef_search()}"))
+    except Exception:  # noqa: BLE001 - non-PG or missing GUC: default still works
+        pass
+
+
 def _concepts_pgvector(session, query_embedding, entity_type, frequency,
                        include_unbound, model, limit):
     _require_postgresql(session)
+    _set_hnsw_ef(session)
 
     params = {
         "model": model,
@@ -509,6 +525,7 @@ def _concepts_pgvector(session, query_embedding, entity_type, frequency,
 
 
 def _entities_pgvector(session, query_embedding, entity_type, model, limit):
+    _set_hnsw_ef(session)
     _require_postgresql(session)
 
     params = {

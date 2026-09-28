@@ -181,7 +181,8 @@ def _require_columns(engine, table: str) -> None:
         )
 
 
-def verify_table(engine, table: str, samples: int, topk: int, seed: int = 0) -> dict[str, Any]:
+def verify_table(engine, table: str, samples: int, topk: int, seed: int = 0,
+                 ef_search: int = 200) -> dict[str, Any]:
     """Dual-read one table; returns a metrics dict (never raises on mismatch)."""
     _require_columns(engine, table)
 
@@ -207,15 +208,18 @@ def verify_table(engine, table: str, samples: int, topk: int, seed: int = 0) -> 
 
     comparisons = []
     with engine.connect() as conn:
+        # Wider HNSW beam for recall parity with the exact JSON ranking
+        # (default ef_search=40 misses near-duplicate-cluster neighbors).
+        conn.execute(text(f"SET hnsw.ef_search = {ef_search}"))
         for i in picked:
             query = vectors[i]
             # Path B: pgvector cosine distance ordering, same top-k. The
             # similarity projection matches the production query shape.
             ranked = conn.execute(
                 text(
-                    f"SELECT id, 1 - (embedding_vec <=> :qv::vector) AS sim "
+                    f"SELECT id, 1 - (embedding_vec <=> CAST(:qv AS vector)) AS sim "
                     f"FROM {table} "
-                    "ORDER BY embedding_vec <=> :qv::vector "
+                    "ORDER BY embedding_vec <=> CAST(:qv AS vector) "
                     "LIMIT :k"
                 ),
                 {"qv": vector_literal(query), "k": topk},
@@ -254,6 +258,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                         help="top-k neighbours compared per sample (default 20)")
     parser.add_argument("--table", choices=("concept", "entity", "both"),
                         default="both", help="which table to verify (default both)")
+    parser.add_argument("--ef-search", type=int, default=200,
+                        help="hnsw.ef_search for the vector path (recall beam)")
     parser.add_argument("--seed", type=int, default=0,
                         help="sampling seed for reproducible runs (default 0)")
     args = parser.parse_args(argv)
@@ -274,7 +280,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     tables = list(TABLES) if args.table == "both" else [args.table]
     engine = create_engine(url)
     try:
-        results = [verify_table(engine, TABLES[t], args.samples, args.topk, args.seed)
+        results = [verify_table(engine, TABLES[t], args.samples, args.topk, args.seed,
+                              ef_search=args.ef_search)
                    for t in tables]
     finally:
         engine.dispose()
