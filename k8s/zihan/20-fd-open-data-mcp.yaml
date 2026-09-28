@@ -1,101 +1,124 @@
-# fd-open-data-mcp MCP server — Streamable HTTP :8300, env-gated bearer auth
-# (MCP_BEARER_TOKEN from the fd-mcp-env Secret). Serves ontology reads from the
-# canonical PG on guangzhou-xinru: FD_OPEN_DATA_MCP_DATABASE_URL and REDIS_URL
-# come from the Secret via envFrom. This pod serves reads only; it does not
-# crawl, so the fd-proxy-service forwarder / proxy pool does not apply here.
+# REFERENCE COPY of the live deployment manifest — aligned 2026-09-29.
+# The CANONICAL source is fd-official-web/deploy/k8s/mcp.yaml (gitee FindDataTechnology/fd-official-web,
+# ArgoCD app fd-mcp auto-syncs from it onto chengsi k3s, ns mcp, NodePort 30899).
+# This file previously described the retired zihan fd-mcp/30801 deployment and had
+# drifted badly (512Mi limit, harbor.local registry, stale sha). It is kept as an accurate
+# in-repo mirror only; release by editing the canonical file, not this one.
+# fd-open-data-mcp on k3s (single-node, 124.220.7.175).
+#
+# The Secret is created out-of-band from the on-box .env so no sensitive
+# values live in git. Run once on the box:
+#   sudo k3s kubectl -n mcp create secret generic fd-mcp-env \
+#     --from-env-file=/opt/fd/finddata/fd-open-data-mcp/.env
+#
+# The whole /opt/fd/finddata tree is hostPath-mounted RW so the container has
+# exact filesystem parity with the systemd unit: the live daas.db (which the
+# server commits to via update_entity/concepts/bindings) + FINDDATA_ROOT
+# provider data both resolve identically. No re-seed.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: mcp
+---
 apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: fd-open-data-mcp
-  namespace: fd-mcp
+  namespace: mcp
   labels:
-    app.kubernetes.io/name: fd-open-data-mcp
-    app.kubernetes.io/part-of: finddata
+    app: fd-open-data-mcp
 spec:
   replicas: 1
   selector:
     matchLabels:
-      app.kubernetes.io/name: fd-open-data-mcp
+      app: fd-open-data-mcp
   template:
     metadata:
       labels:
-        app.kubernetes.io/name: fd-open-data-mcp
-        app.kubernetes.io/part-of: finddata
+        app: fd-open-data-mcp
     spec:
+      nodeSelector:
+        kubernetes.io/hostname: vm-0-9-ubuntu
       # Schema migration stage: alembic upgrade head must complete BEFORE the
       # server starts (initContainers gate the main container). Serialized by
       # a session-level Postgres advisory lock
-      # pg_advisory_lock(hashtext('fd_mcp_schema_migrate')) held for the
-      # whole run, so concurrent pod starts (rollout surge, scale-up) queue
-      # instead of racing; already-at-head is a no-op success (idempotent).
-      # A non-zero exit (bad URL, failed DDL) fails the pod: the new version
-      # never serves and the previous ReplicaSet keeps serving.
+      # pg_advisory_lock(hashtext('fd_mcp_schema_migrate')) held for the whole
+      # run, so concurrent pod starts queue instead of racing; already-at-head
+      # is a no-op success (idempotent). A non-zero exit fails the pod: the new
+      # version never serves and the previous one keeps serving.
       initContainers:
         - name: migrate-schema
-          # Same image as the server: the chain it migrates (/app/alembic,
-          # COPYed by the Dockerfile) is the one this code was built with.
-          image: harbor.local/finddata/fd-open-data-mcp:sha-57cbe29
+          image: harbor.finddatatech.cloud:8080/finddata/fd-open-data-mcp:sha-ce3578b
           imagePullPolicy: IfNotPresent
           # Same database-URL source as the server container:
           # FD_OPEN_DATA_MCP_DATABASE_URL arrives via the fd-mcp-env Secret.
           envFrom:
             - secretRef:
                 name: fd-mcp-env
+          # The sqlite URL points inside the hostPath tree - the stage needs
+          # the same mount as the server to reach (and bootstrap) the db.
+          volumeMounts:
+            - name: finddata
+              mountPath: /opt/fd/finddata
           command: ["python", "-m", "fd_open_data_mcp.db.migrate_stage"]
       containers:
         - name: fd-open-data-mcp
-          # Pinned to the <short-sha> tag pushed by .github/workflows/
-          # docker-publish.yml for commit 57cbe29 — wires the cache read
-          # path to the semantic_observations_read dedup view (FDW-backed
-          # shard rows become visible) + historical-aware is_stale (past
-          # periods are immutable facts → no re-fetch).
-          image: harbor.local/finddata/fd-open-data-mcp:sha-57cbe29
+          # Immutable sha tag (commit 2782733, db-schema-lifecycle rollout:
+          # migrate-schema initContainer + startup schema gate + multi-source
+          # observations). Built by the Jenkins fd-open-data-mcp job from
+          # Gitee main and pushed to the domestic Harbor. New releases =
+          # new sha tags, so IfNotPresent always pulls the referenced digest.
+          image: harbor.finddatatech.cloud:8080/finddata/fd-open-data-mcp:sha-ce3578b
           imagePullPolicy: IfNotPresent
+          # ENTRYPOINT in the image serves :8300 since commit 5455d38; this
+          # deployment's Service/NodePort are pinned to 8899 (gateway upstream
+          # contract), so pin the listen port explicitly.
+          command: ["fd-open-data-mcp", "serve", "--transport", "http", "--host", "0.0.0.0", "--port", "8899"]
           ports:
-            - name: mcp
-              containerPort: 8300
+            - containerPort: 8899
+          env:
+            # MiniLM is baked into the image; never phone home (hf-mirror is
+            # unreachable from the pod and made ai_search hang on HEAD retries).
+            - name: HF_HUB_OFFLINE
+              value: "1"
+            - name: TRANSFORMERS_OFFLINE
+              value: "1"
           envFrom:
             - secretRef:
                 name: fd-mcp-env
+          volumeMounts:
+            - name: finddata
+              mountPath: /opt/fd/finddata
           resources:
-            requests:
-              memory: "256Mi"
-              cpu: "100m"
             limits:
-              memory: "512Mi"
+              # Raised for the torch image: MiniLM CPU inference needs headroom.
+              # ~1.2Gi is observed headroom; revisit if the node OOMs alongside
+              # the LibreChat stack.
+              memory: "2Gi"
               cpu: "1000m"
-          startupProbe:
-            tcpSocket:
-              port: mcp
-            periodSeconds: 5
-            failureThreshold: 12
-          readinessProbe:
-            tcpSocket:
-              port: mcp
-            periodSeconds: 10
-          livenessProbe:
-            tcpSocket:
-              port: mcp
-            periodSeconds: 20
-            failureThreshold: 3
+            requests:
+              memory: "512Mi"
+              cpu: "200m"
+          # ponytail: no liveness/readiness probes yet — add if CrashLoops.
+      volumes:
+        - name: finddata
+          hostPath:
+            path: /opt/fd/finddata
+            type: Directory
 ---
 apiVersion: v1
 kind: Service
 metadata:
   name: fd-open-data-mcp
-  namespace: fd-mcp
-  labels:
-    app.kubernetes.io/name: fd-open-data-mcp
-    app.kubernetes.io/part-of: finddata
+  namespace: mcp
 spec:
-  # NodePort (not ClusterIP): LibreChat lives on a DIFFERENT cluster (chengsi
-  # k3s); the mesh reaches this node, not this cluster's service network.
-  # Endpoint over the mesh: http://100.64.0.4:30801/mcp
   type: NodePort
   selector:
-    app.kubernetes.io/name: fd-open-data-mcp
+    app: fd-open-data-mcp
   ports:
-    - name: mcp
-      port: 8300
-      targetPort: mcp
-      nodePort: 30801
+    - name: http
+      port: 8899
+      targetPort: 8899
+      nodePort: 30899
+      protocol: TCP
