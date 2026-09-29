@@ -44,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 FLAG_ENV = "FD_MCP_FEDERATED_READ"
 ENDPOINT_ENV = "FD_MCP_BUSINESS_URL"
+TOKEN_ENV = "FD_MCP_BUSINESS_TOKEN"
 TIMEOUT_ENV = "FD_MCP_FEDERATION_TIMEOUT"
 COOLDOWN_ENV = "FD_MCP_FEDERATION_COOLDOWN"
 
@@ -151,12 +152,21 @@ def _timeout() -> float:
 
 
 def _attempt_call(url: str, tool: str, args: dict) -> dict:
-    """The network hop: one MCP tool call over Streamable HTTP."""
+    """The network hop: one MCP tool call over Streamable HTTP.
+
+    ``FD_MCP_BUSINESS_TOKEN`` (when set) rides as the bearer credential —
+    production business-mcp is JWT-gated and admits the matching shared
+    service token (FDBIZ_INTERNAL_TOKEN on the far side).
+    """
     async def _call() -> dict:
         from fastmcp import Client
         from fastmcp.client.transports import StreamableHttpTransport
 
-        transport = StreamableHttpTransport(url, timeout=_timeout())
+        headers = {}
+        token = os.environ.get(TOKEN_ENV, "").strip()
+        if token:
+            headers["Authorization"] = f"Bearer {token}"
+        transport = StreamableHttpTransport(url, headers=headers or None, timeout=_timeout())
         async with Client(transport) as client:
             result = await client.call_tool(tool, args)
         data = getattr(result, "data", None)

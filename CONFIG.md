@@ -300,6 +300,10 @@ per-domain rollout):
 # business-mcp Streamable HTTP endpoint (required for federated reads)
 FD_MCP_BUSINESS_URL=http://<business-mcp-host>:8310/mcp
 
+# Shared service token — production business-mcp is JWT-gated and admits the
+# matching FDBIZ_INTERNAL_TOKEN (same random value, both sides' secrets)
+FD_MCP_BUSINESS_TOKEN=<shared-secret>
+
 # Rollout flag — unset/0 = off (default); 1/all = every mapped source;
 # or a comma list for the staged rollout:
 FD_MCP_FEDERATED_READ=yearbook_catalog          # yearbook first…
