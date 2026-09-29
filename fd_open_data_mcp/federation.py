@@ -156,7 +156,9 @@ def _attempt_call(url: str, tool: str, args: dict) -> dict:
 
     ``FD_MCP_BUSINESS_TOKEN`` (when set) rides as the bearer credential —
     production business-mcp is JWT-gated and admits the matching shared
-    service token (FDBIZ_INTERNAL_TOKEN on the far side).
+    service token (FDBIZ_INTERNAL_TOKEN on the far side). ``FD_MCP_FEDERATION_TIMEOUT``
+    caps the whole exchange via wait_for (transport kwargs differ across
+    fastmcp versions; the coroutine cancel is version-independent).
     """
     async def _call() -> dict:
         from fastmcp import Client
@@ -166,7 +168,8 @@ def _attempt_call(url: str, tool: str, args: dict) -> dict:
         token = os.environ.get(TOKEN_ENV, "").strip()
         if token:
             headers["Authorization"] = f"Bearer {token}"
-        transport = StreamableHttpTransport(url, headers=headers or None, timeout=_timeout())
+        transport = StreamableHttpTransport(url, headers=headers or None)
+
         async with Client(transport) as client:
             result = await client.call_tool(tool, args)
         data = getattr(result, "data", None)
@@ -183,7 +186,16 @@ def _attempt_call(url: str, tool: str, args: dict) -> dict:
                     return parsed
         raise FederationUnavailable(f"business-mcp returned no structured payload for {tool}")
 
-    return asyncio.run(_call())
+    timeout = _timeout()
+    try:
+        return asyncio.run(asyncio.wait_for(_call(), timeout=timeout))
+    except (TimeoutError, asyncio.TimeoutError, asyncio.CancelledError) as exc:
+        # wait_for can surface either TimeoutError or a leaked CancelledError
+        # (the inner task and the timer race at the run-loop boundary) — both
+        # mean "the exchange did not complete inside the window".
+        raise FederationUnavailable(
+            f"business-mcp did not answer within {timeout}s ({tool})"
+        ) from exc
 
 
 def _call_domain_tool(tool: str, args: dict) -> dict:
