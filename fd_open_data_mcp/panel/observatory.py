@@ -473,9 +473,10 @@ def graph_neighborhood(session: Session, family: str = "",
             session, text(
                 f"SELECT semantic_code, count(*) AS n, "
                 "max(name_zh) AS name_zh, max(name_en) AS name_en, "
-                # max not bool_or: same any-true semantics, portable to the
-                # SQLite dev/test backend (bool_or is PostgreSQL-only)
-                "max(verified) AS verified "
+                # any-true aggregate portable across PostgreSQL and SQLite:
+                # PG has no max(boolean), SQLite has no bool_or — count(*)
+                # FILTER works on both (found live on PG 2026-09-29)
+                "count(*) FILTER (WHERE verified) > 0 AS verified "
                 f"FROM {REGISTRY_TABLE} WHERE domain = :domain "
                 "AND semantic_code IS NOT NULL "
                 "GROUP BY semantic_code ORDER BY n DESC "

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.33] - 2026-09-29
+
+### Fixed (panel-indicator-observatory)
+
+#### Domain graph view crashed on PostgreSQL
+
+The registry-domain neighborhood query aggregated any-verified with
+`max(verified)` — PostgreSQL has no `max()` for boolean (SQLite, the test
+backend, accepted it, so unit tests stayed green). Replaced with the
+portable `count(*) FILTER (WHERE verified) > 0`; verified against the live
+production database.
+
 ## [0.5.32] - 2026-09-29
 
 ### Added (panel-indicator-observatory wave 2)
