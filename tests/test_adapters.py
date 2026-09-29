@@ -420,3 +420,34 @@ def test_run_upstream_legacy_path_when_no_adapter(monkeypatch):
     out = run_upstream("akshare", "stock_zh_a_hist", {"symbol": "600000"})
     assert out == "DIRECT-OK"
     assert len(fake.calls) == 1                     # no retry on the legacy path
+
+
+# --- macro series reference-month normalization (tencent-crawl-fleet-expansion) ---
+
+def _macro_norm(cls, raw):
+    return cls()._norm(raw)
+
+
+def test_cpi_pub_day_maps_to_prior_month():
+    from fd_open_data_mcp.adapters.akshare import MacroChinaCpiPpiAdapter
+    assert _macro_norm(MacroChinaCpiPpiAdapter, "2025-08-09") == "2025-07-01"
+    assert _macro_norm(MacroChinaCpiPpiAdapter, "2025-01-10") == "2024-12-01"  # year boundary
+
+
+def test_pmi_pub_day_maps_to_same_month():
+    from fd_open_data_mcp.adapters.akshare import MacroChinaPmiAdapter
+    assert _macro_norm(MacroChinaPmiAdapter, "2025-08-31") == "2025-08-01"
+
+
+def test_month_start_rows_pass_through():
+    from fd_open_data_mcp.adapters.akshare import MacroChinaCpiPpiAdapter, MacroChinaPmiAdapter
+    assert _macro_norm(MacroChinaCpiPpiAdapter, "2015-07-01") == "2015-07-01"
+    assert _macro_norm(MacroChinaPmiAdapter, "2015-07-01") == "2015-07-01"
+
+
+def test_macro_series_normalization_in_extract_series():
+    import pandas as pd
+    from fd_open_data_mcp.adapters.akshare import MacroChinaCpiPpiAdapter
+    df = pd.DataFrame({"日期": ["2025-08-09", "2025-09-09"], "今值": [0.1, 0.2]})
+    out = MacroChinaCpiPpiAdapter().extract_series(df, "今值", "2025-07-01", "2025-12-31")
+    assert out == {"2025-07-01": 0.1, "2025-08-01": 0.2}

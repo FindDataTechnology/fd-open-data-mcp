@@ -789,6 +789,44 @@ class MacroChinaSeriesAdapter(_NoArgSeriesAdapter):
     _DATE_COL = "日期"
 
 
+class _MacroChinaRefMonthAdapter(MacroChinaSeriesAdapter):
+    """Publication-day rows normalized to REFERENCE-month starts.
+
+    JIN10 dates are release days; observations must key on the reference
+    month to stay comparable with every other monthly source (money supply
+    normalizes to month starts too). Two release conventions:
+    CPI/PPI for month M-1 release ~the 9th of M (shift back one month);
+    PMI for month M releases on M's last day (keep the month). Rows already
+    on a month start (legacy regime) pass through unchanged. The window
+    filter in extract_series runs AFTER normalization, so a backfill window
+    expressed in reference months keeps the newest rows.
+    """
+
+    _REF_SAME_MONTH = False
+
+    def _norm(self, value: Any) -> str:
+        d = _normalize_date(value)
+        if not d or len(d) < 10:
+            return d
+        y, m, day = int(d[:4]), int(d[5:7]), int(d[8:10])
+        if day == 1:
+            return d
+        if self._REF_SAME_MONTH:
+            return f"{y:04d}-{m:02d}-01"
+        ref_y, ref_m = (y - 1, 12) if m == 1 else (y, m - 1)
+        return f"{ref_y:04d}-{ref_m:02d}-01"
+
+
+class MacroChinaCpiPpiAdapter(_MacroChinaRefMonthAdapter):
+    """CPI/PPI: released ~the 9th-10th for the PRIOR month."""
+
+
+class MacroChinaPmiAdapter(_MacroChinaRefMonthAdapter):
+    """PMI: released on the reference month's last day."""
+
+    _REF_SAME_MONTH = True
+
+
 class MacroMonthStatAdapter(_NoArgSeriesAdapter):
     """月份-keyed China macro tables (macro_china_money_supply, shrzgm).
 
@@ -892,11 +930,10 @@ def register_all() -> None:
     register("akshare", "fund_etf_spot_em", FundEtfSpotEmAdapter())
     register("akshare", "stock_info_bj_name_code", StockInfoBjNameCodeAdapter())
     # no-arg China macro series (country/monthly concepts: CPI/PPI/PMI/M2/LPR)
-    _macro = MacroChinaSeriesAdapter()
-    register("akshare", "macro_china_cpi_yearly", _macro)
-    register("akshare", "macro_china_cpi_monthly", _macro)
-    register("akshare", "macro_china_ppi_yearly", _macro)
-    register("akshare", "macro_china_pmi_yearly", _macro)
+    register("akshare", "macro_china_cpi_yearly", MacroChinaCpiPpiAdapter())
+    register("akshare", "macro_china_cpi_monthly", MacroChinaCpiPpiAdapter())
+    register("akshare", "macro_china_ppi_yearly", MacroChinaCpiPpiAdapter())
+    register("akshare", "macro_china_pmi_yearly", MacroChinaPmiAdapter())
     register("akshare", "macro_china_money_supply", MacroMonthStatAdapter())
     register("akshare", "macro_china_lpr", MacroTradeDateAdapter())
     register("akshare", "fund_etf_hist_em", FundEtfHistEmAdapter())
