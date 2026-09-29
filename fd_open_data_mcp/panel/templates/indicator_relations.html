@@ -1,0 +1,11 @@
+{% extends "base.html" %}
+{% block title %}关系 Relations · 指标观察台{% endblock %}
+{% block content %}
+<h2>关系 <span class="en">Indicator relations</span></h2>
+<p class="muted">跨源绑定等价对与词表映射的可检索清单。Searchable lists of
+cross-source bindings and vocabulary mappings.</p>
+{% include "_indicator_tabs.html" %}
+<div id="indicator-relations">
+  {% include "partial_indicator_relations.html" %}
+</div>
+{% endblock %}

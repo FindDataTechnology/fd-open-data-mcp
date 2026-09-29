@@ -1,0 +1,28 @@
+{% extends "base.html" %}
+{% from "_macros.html" import th %}
+{% block title %}概念族谱 Families · 指标观察台{% endblock %}
+{% block content %}
+<h2>概念族谱 <span class="en">Concept families</span></h2>
+<p class="muted">两级概念模型的第一级：族 → 成员变量。Two-level concept model, first
+level: families → member variables. 点开族看成员与绑定数。Open a family for its
+members and their binding counts.</p>
+{% include "_indicator_tabs.html" %}
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('族代码', 'Family code') }}{{ th('名称', 'Name') }}{{ th('成员概念', 'Members') }}{{ th('绑定数', 'Bindings') }}{{ th('说明', 'Description') }}</tr>
+  </thead>
+  {% for f in families %}
+  <tr>
+    <td><a href="/panel/indicators/families/{{ f.code }}"><code>{{ f.code }}</code></a></td>
+    <td>{{ f.name_zh or '—' }}{% if f.name_en %} <span class="en">{{ f.name_en }}</span>{% endif %}</td>
+    <td>{{ f.n_members }}</td>
+    <td>{{ f.n_bindings }}</td>
+    <td class="muted">{{ (f.description or '')[:80] }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">暂无族 No families.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}

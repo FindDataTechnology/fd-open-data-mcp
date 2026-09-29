@@ -1,0 +1,83 @@
+{% extends "base.html" %}
+{% from "_macros.html" import th %}
+{% block title %}关系图 Graph · 指标观察台{% endblock %}
+{% block content %}
+<h2>关系图 <span class="en">Interactive relation graph</span></h2>
+<p class="muted">按族 / 指标 / 域圈定的邻域图：平移、缩放、点选节点看详情。
+Neighborhood graph scoped by family / indicator / domain — pan, zoom, and
+select a node for its detail. 视图规模有服务端上限。Views are bounded
+server-side.</p>
+{% include "_indicator_tabs.html" %}
+
+<form method="get" action="/panel/indicators/graph" class="chips">
+  <label for="graph-family">族 family</label>
+  <select id="graph-family" name="family">
+    <option value="">—</option>
+    {% for f in families %}
+    <option value="{{ f.code }}" {{ 'selected' if f.code == family }}>{{ f.code }} ({{ f.n_members }})</option>
+    {% endfor %}
+  </select>
+  <label for="graph-indicator">指标 id indicator</label>
+  <input id="graph-indicator" name="indicator" type="number" min="1" value="{{ indicator if indicator is not string else '' }}">
+  <label for="graph-domain">域 domain</label>
+  <select id="graph-domain" name="domain">
+    <option value="">—</option>
+    {% for d in registry_filters.domains %}
+    <option value="{{ d }}" {{ 'selected' if d == domain }}>{{ d }}</option>
+    {% endfor %}
+  </select>
+  <label for="graph-depth">深度 depth</label>
+  <select id="graph-depth" name="depth">
+    {% for d in [1, 2] %}
+    <option value="{{ d }}" {{ 'selected' if d == depth }}>depth {{ d }}</option>
+    {% endfor %}
+  </select>
+  <button type="submit" class="btn">查看 view</button>
+</form>
+
+<div id="graph-wrap" class="graph-wrap"
+     data-graph-src="/panel/indicators/graph.json?family={{ family | urlencode }}&indicator={{ indicator or '' }}&domain={{ domain | urlencode }}&depth={{ depth }}">
+  <div id="graph-canvas" class="graph-canvas" aria-label="关系图画布 relation graph canvas"></div>
+  <aside id="graph-detail" class="graph-detail" aria-live="polite">
+    <h3>节点详情 <span class="en">Node detail</span></h3>
+    <p class="muted" id="graph-detail-body">点选一个节点查看详情 Select a node to see its detail.</p>
+  </aside>
+</div>
+<p class="muted" id="graph-note"></p>
+{#- The sole scripting-dependent visualization: everything above degrades to
+    the server-rendered listing below when scripting is unavailable
+    (panel-ui spec 降级 / 无脚本可视化). -#}
+<noscript>
+  <h3 class="mt">关系列表（无脚本降级）<span class="en">Relation listing (no-script fallback)</span></h3>
+  <p class="muted">客户端脚本不可用——呈现服务端关系列表。Client scripting is
+  unavailable; a server-rendered relation listing is served instead.</p>
+  {% if fallback_family %}
+  <h4>族 → 成员概念 <span class="en">Family → member concepts</span></h4>
+  <div class="table-wrap">
+  <table>
+    <thead><tr>{{ th('族', 'Family') }}{{ th('成员概念', 'Members') }}{{ th('绑定数', 'Bindings') }}</tr></thead>
+    {% for f in families %}
+    <tr><td><code>{{ f.code }}</code></td><td>{{ f.n_members }}</td><td>{{ f.n_bindings }}</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  {% endif %}
+  <h4>最近词表映射 <span class="en">Latest vocabulary mappings</span></h4>
+  <div class="table-wrap">
+  <table>
+    <thead><tr>{{ th('词表', 'Vocabulary') }}{{ th('词条', 'Term') }}{{ th('关系', 'Relation') }}{{ th('概念', 'Concept') }}</tr></thead>
+    {% for m in fallback_mappings %}
+    <tr><td>{{ m.vocabulary }}</td><td><code>{{ m.term }}</code></td><td>{{ m.relation }}</td><td><a href="/panel/indicators/concepts/{{ m.concept_id }}"><code>{{ m.concept_code }}</code></a></td></tr>
+    {% else %}
+    <tr><td colspan="4" class="muted">暂无映射 No mappings.</td></tr>
+    {% endfor %}
+  </table>
+  </div>
+  <p class="muted">完整关系数据可见于 <a href="/panel/indicators/relations">关系 Relations</a> 页。The full relation data is on the Relations page.</p>
+</noscript>
+
+{#- Vendored zero-build graph library from the panel's same-origin static
+    mount (panel-ui 自托管: no CDN, no build step) + the thin glue below. -#}
+<script src="/panel/static/vendor/vis-network.min.js" defer></script>
+<script src="/panel/static/indicator_graph.js" defer></script>
+{% endblock %}

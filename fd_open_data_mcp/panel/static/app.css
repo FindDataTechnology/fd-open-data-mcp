@@ -200,6 +200,9 @@ tr:hover td { background: color-mix(in srgb, var(--accent) 4%, transparent); }
 .no_op     { background: var(--neutral-bg); color: var(--neutral-fg); }
 .redundant { background: var(--redun-bg); color: var(--redun-fg); }
 .cancelled { background: var(--surface-2); color: var(--muted); border: 1px dashed var(--muted); }
+/* indicator observatory: unverified registry entries stay visible to
+   operators but wear an unmistakable badge (design D7) */
+.unverified{ background: var(--warn-bg); color: var(--warn-fg); border: 1px dashed var(--warn-fg); }
 button.badge { cursor: pointer; border: none; }
 
 /* ── buttons & links ──────────────────────────────────────────────────── */
@@ -294,6 +297,8 @@ textarea.mono-block { font-family: var(--mono); font-size: .85rem; }
 .chart .bar { fill: var(--chart-bar); }
 .chart .bar-ok { fill: var(--chart-ok); }
 .chart .bar-err { fill: var(--chart-err); }
+/* observatory coverage: verified series next to registered */
+.chart .bar-verified { fill: var(--chart-ok); }
 .chart .spark { fill: none; stroke: var(--accent); stroke-width: 1.8; }
 .chart .spark-area { fill: color-mix(in srgb, var(--accent) 12%, transparent); stroke: none; }
 .chart .heat-fresh { fill: var(--heat-fresh); }
@@ -315,6 +320,23 @@ textarea.mono-block { font-family: var(--mono); font-size: .85rem; }
 .legend .sw-aging { background: var(--heat-aging); }
 .legend .sw-stale { background: var(--heat-stale); }
 .legend .sw-never { background: var(--heat-never); }
+.legend .sw-registered { background: var(--chart-bar); }
+.legend .sw-verified { background: var(--chart-ok); }
+
+/* ── indicator observatory relation graph ─────────────────────────────── */
+.graph-wrap { display: grid; grid-template-columns: 1fr 260px; gap: 1rem;
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: var(--surface); min-height: 420px; }
+.graph-canvas { height: 420px; }
+.graph-detail { border-left: 1px solid var(--border); padding: .8rem 1rem;
+  overflow-y: auto; max-height: 420px; }
+.graph-detail ul { margin: .4rem 0; padding-left: 1.1rem; }
+.graph-detail li { margin: .25rem 0; font-size: .86rem; }
+@media (max-width: 800px) {
+  .graph-wrap { grid-template-columns: 1fr; }
+  .graph-detail { border-left: none; border-top: 1px solid var(--border);
+    max-height: 220px; }
+}
 
 /* ── two-step inline confirm (design D5: no browser confirm dialogs) ───── */
 .confirm .confirm-arm { display: none; }

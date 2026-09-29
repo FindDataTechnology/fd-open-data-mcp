@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% from "_macros.html" import th, svg_grouped_bars %}
+{% block title %}覆盖率 Coverage · 指标观察台{% endblock %}
+{% block content %}
+<h2>覆盖率 <span class="en">Registry coverage</span></h2>
+<p class="muted">按源库与域的 registered / verified 统计；与 MCP 工具
+<code>registry_coverage</code> 同库同 GROUP BY——同一时刻数字一致。Registered /
+verified counts by source database and domain; the same GROUP BY the
+<code>registry_coverage</code> MCP tool runs on the same database, so the two
+surfaces agree at the same moment.</p>
+{% include "_indicator_tabs.html" %}
+
+{% if not present %}
+<p class="muted">注册目录表在本库不存在——无法统计。The registry table is not
+present on this database; counts are unavailable.</p>
+{% else %}
+{% if by_source %}
+<h3 class="mt">按源库 <span class="en">By source database</span></h3>
+{{ svg_grouped_bars(by_source.chart, label='按源库 registered 与 verified by source db') }}
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('源库', 'Source db') }}{{ th('已登记', 'Registered') }}{{ th('已验证', 'Verified') }}{{ th('未验证', 'Unverified') }}{{ th('验证率', 'Verified %') }}</tr>
+  </thead>
+  {% for r in by_source.rows %}
+  <tr>
+    <td>{{ r.source_db }}</td>
+    <td>{{ r.registered }}</td>
+    <td>{{ r.verified }}</td>
+    <td>{{ r.unverified }}</td>
+    <td>{{ ((100 * r.verified / r.registered) | round(1)) if r.registered else '—' }}%</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+
+{% if by_domain %}
+<h3 class="mt">按域 <span class="en">By domain</span></h3>
+{{ svg_grouped_bars(by_domain.chart, label='按域 registered 与 verified by domain') }}
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('域', 'Domain') }}{{ th('已登记', 'Registered') }}{{ th('已验证', 'Verified') }}{{ th('未验证', 'Unverified') }}{{ th('验证率', 'Verified %') }}</tr>
+  </thead>
+  {% for r in by_domain.rows %}
+  <tr>
+    <td>{{ r.domain or '—' }}</td>
+    <td>{{ r.registered }}</td>
+    <td>{{ r.verified }}</td>
+    <td>{{ r.unverified }}</td>
+    <td>{{ ((100 * r.verified / r.registered) | round(1)) if r.registered else '—' }}%</td>
+  </tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+{% endif %}
+{% endblock %}

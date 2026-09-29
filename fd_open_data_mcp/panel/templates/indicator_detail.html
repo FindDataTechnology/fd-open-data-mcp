@@ -1,0 +1,78 @@
+{% extends "base.html" %}
+{% from "_macros.html" import th %}
+{% block title %}{{ d.code }} · 指标详情{% endblock %}
+{% block content %}
+<h2><code>{{ d.code }}</code> {{ d.name_zh or d.name_en or '' }}</h2>
+{% if d.name_en and d.name_zh %}<p class="en">{{ d.name_en }}</p>{% endif %}
+<p class="muted">实体 entity {{ d.entity_type }} · 频率 freq {{ d.frequency }} ·
+单位 unit {{ d.unit or '—' }} · 口径 measure {{ d.measure or '—' }} ·
+{% if d.verified %}<span class="badge success">verified</span>{% else %}<span class="badge unverified">unverified</span>{% endif %}
+{% if d.family_code %} · 族 family <a href="/panel/indicators/families/{{ d.family_code }}"><code>{{ d.family_code }}</code></a>{% endif %}</p>
+<p><a href="/panel/indicators">← 返回登记表 back to registry</a> ·
+<a href="/panel/indicators/graph?indicator={{ d.id }}">在关系图中打开 open in graph ↗</a></p>
+{% include "_indicator_tabs.html" %}
+
+{% if d.equivalences is not none %}
+<h3 class="mt">跨源等价对 <span class="en">Cross-source equivalence (registry anchors)</span></h3>
+<p class="muted">同一语义代码在各源库的锚点——合起来即该指标的跨源等价集。
+The registry anchors sharing this semantic code; together they are the
+indicator's cross-source equivalence set.</p>
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('源库', 'Source db') }}{{ th('原生代码', 'Native code') }}{{ th('名称', 'Name') }}{{ th('状态', 'State') }}</tr>
+  </thead>
+  {% for e in d.equivalences %}
+  <tr>
+    <td>{{ e.source_db }}</td>
+    <td><code>{{ e.source_table }}.{{ e.source_column }}#{{ e.native_code }}</code></td>
+    <td>{{ e.name_zh or e.name_en or '—' }}</td>
+    <td>{% if e.verified %}<span class="badge success">verified</span>{% else %}<span class="badge unverified">unverified</span>{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4" class="muted">注册目录中无该语义代码的锚点 No registry anchors for this semantic code.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endif %}
+
+<h3 class="mt">本地绑定 <span class="en">Local bindings (native codes)</span></h3>
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('源', 'Source') }}{{ th('列（原生代码）', 'Column (native code)') }}{{ th('置信度', 'Confidence') }}{{ th('来源', 'Provenance') }}{{ th('复核', 'Reviewed') }}</tr>
+  </thead>
+  {% for b in d.bindings %}
+  <tr>
+    <td>{{ b.source }}</td>
+    <td><code>{{ b.column }}</code></td>
+    <td>{{ '%.2f' | format(b.confidence) }}</td>
+    <td>{{ b.provenance }}</td>
+    <td>{{ '✓' if b.reviewed else '—' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">暂无绑定 No bindings.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<h3 class="mt">词表映射 <span class="en">Vocabulary mappings</span></h3>
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('词表', 'Vocabulary') }}{{ th('词条', 'Term') }}{{ th('关系', 'Relation') }}{{ th('置信度', 'Confidence') }}{{ th('来源', 'Provenance') }}</tr>
+  </thead>
+  {% for m in d.mappings %}
+  <tr>
+    <td>{{ m.vocabulary }}</td>
+    <td><code>{{ m.term }}</code></td>
+    <td>{{ m.relation }}</td>
+    <td>{{ '%.2f' | format(m.confidence) }}</td>
+    <td>{{ m.provenance }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5" class="muted">暂无映射 No mappings.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,9 @@
+{#- Indicator observatory board tabs (panel-indicator-observatory D6). -#}
+{% set path = request.url.path %}
+<nav class="chips" aria-label="指标板块 indicators sections">
+  <a class="chip {{ 'active' if path == '/panel/indicators' }}" href="/panel/indicators">登记表 Registry</a>
+  <a class="chip {{ 'active' if path.startswith('/panel/indicators/families') }}" href="/panel/indicators/families">概念族谱 Families</a>
+  <a class="chip {{ 'active' if path.startswith('/panel/indicators/relations') }}" href="/panel/indicators/relations">关系 Relations</a>
+  <a class="chip {{ 'active' if path.startswith('/panel/indicators/coverage') }}" href="/panel/indicators/coverage">覆盖率 Coverage</a>
+  <a class="chip {{ 'active' if path.startswith('/panel/indicators/graph') }}" href="/panel/indicators/graph">关系图 Graph</a>
+</nav>

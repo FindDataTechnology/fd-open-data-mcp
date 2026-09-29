@@ -21,6 +21,23 @@
 </svg>
 {%- endmacro %}
 
+{#- Grouped columns: g = charts.grouped_bar_geometry([(key, vals), ...], labels);
+    series keys feed a tiny legend (registered vs verified — observatory coverage) -#}
+{% macro svg_grouped_bars(g, label=None) -%}
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or '分组柱状图 grouped bar chart' }}" preserveAspectRatio="xMidYMid meet">
+  <line class="axis" x1="{{ g.pad }}" y1="{{ g.h - g.pad }}" x2="{{ g.w - g.pad }}" y2="{{ g.h - g.pad }}"/>
+  {% for grp in g.groups %}
+    {% for b in grp.bars %}
+    <rect class="{{ 'bar' if b.key == g.series_keys[0] else 'bar-verified' }}" x="{{ b.x }}" y="{{ b.y }}" width="{{ b.bw }}" height="{{ b.bh }}" rx="2"><title>{{ b.title }}</title></rect>
+    {% endfor %}
+  <text x="{{ grp.bars[0].x + grp.bars[0].bw * (g.groups[0].bars | length) / 2 }}" y="{{ g.h - g.pad + 14 }}" text-anchor="middle" font-size="10">{{ grp.label | truncate(12, true) }}</text>
+  {% endfor %}
+</svg>
+<div class="legend">
+  {% for key in g.series_keys %}<span><span class="swatch {{ 'sw-registered' if key == g.series_keys[0] else 'sw-verified' }}"></span>{{ key }}</span>{% endfor %}
+</div>
+{%- endmacro %}
+
 {#- Sparkline: g = charts.sparkline_geometry(...) -#}
 {% macro svg_sparkline(g, label=None) -%}
 <svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or '趋势线 sparkline' }}" preserveAspectRatio="none">

@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% from "_macros.html" import th %}
+{% block title %}{{ fam.code }} · 概念族谱{% endblock %}
+{% block content %}
+<h2>族 <code>{{ fam.code }}</code> <span class="en">{{ fam.name_en or '' }}</span> {{ fam.name_zh or '' }}</h2>
+<p class="muted">{{ fam.description or '—' }}</p>
+<p><a href="/panel/indicators/families">← 返回族谱 back to families</a> ·
+<a href="/panel/indicators/graph?family={{ fam.code }}">在关系图中打开 open in graph ↗</a></p>
+{% include "_indicator_tabs.html" %}
+<h3 class="mt">成员概念 <span class="en">Member concepts ({{ fam.members | length }})</span></h3>
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('概念', 'Concept') }}{{ th('实体类型', 'Entity') }}{{ th('频率', 'Freq') }}{{ th('单位', 'Unit') }}{{ th('绑定数', 'Bindings') }}{{ th('状态', 'State') }}</tr>
+  </thead>
+  {% for c in fam.members %}
+  <tr>
+    <td><a href="/panel/indicators/concepts/{{ c.id }}"><code>{{ c.code }}</code></a> {{ c.name_zh or c.name_en or '' }}</td>
+    <td>{{ c.entity_type }}</td>
+    <td>{{ c.frequency }}</td>
+    <td>{{ c.unit or '—' }}</td>
+    <td>{{ c.binding_count }}</td>
+    <td>{% if c.verified %}<span class="badge success">verified</span>{% else %}<span class="badge unverified">unverified</span>{% endif %}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">该族暂无成员概念 No member concepts.</td></tr>
+  {% endfor %}
+</table>
+</div>
+{% endblock %}

@@ -1,0 +1,73 @@
+{% from "_macros.html" import th %}
+<h3>词表映射 <span class="en">Vocabulary mappings ({{ mappings.total }})</span></h3>
+<form method="get" action="/panel/indicators/relations" class="chips"
+      hx-get="/panel/indicators/relations" hx-target="#indicator-relations"
+      hx-swap="innerHTML" hx-push-url="true">
+  <select name="vocabulary" aria-label="词表 vocabulary" hx-get="/panel/indicators/relations" hx-include="closest form">
+    <option value="">全部词表 all vocabularies</option>
+    {% for v in vocabularies %}
+    <option value="{{ v }}" {{ 'selected' if v == vocabulary }}>{{ v }}</option>
+    {% endfor %}
+  </select>
+  <select name="relation" aria-label="关系类型 relation type" hx-get="/panel/indicators/relations" hx-include="closest form">
+    <option value="">全部关系 all relations</option>
+    {% for r in relation_types %}
+    <option value="{{ r }}" {{ 'selected' if r == relation }}>{{ r }}</option>
+    {% endfor %}
+  </select>
+  <input type="search" name="q" value="{{ q }}" placeholder="概念/词条关键词 keyword"
+         aria-label="关键词 keyword" hx-get="/panel/indicators/relations"
+         hx-include="closest form" hx-trigger="search">
+  <noscript><button type="submit" class="btn">筛选 Filter</button></noscript>
+</form>
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('词表', 'Vocabulary') }}{{ th('词条', 'Term') }}{{ th('关系', 'Relation') }}{{ th('概念', 'Concept') }}{{ th('置信度', 'Confidence') }}{{ th('来源', 'Provenance') }}</tr>
+  </thead>
+  {% for m in mappings.rows %}
+  <tr>
+    <td>{{ m.vocabulary }}</td>
+    <td><code>{{ m.term }}</code></td>
+    <td>{{ m.relation }}</td>
+    <td><a href="/panel/indicators/concepts/{{ m.concept_id }}"><code>{{ m.concept_code }}</code></a> {{ m.concept_name or '' }}</td>
+    <td>{{ '%.2f' | format(m.confidence) }}</td>
+    <td>{{ m.provenance }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">无匹配映射 No matching mappings.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<h3 class="mt">跨源绑定 <span class="en">Cross-source bindings ({{ bindings.total }})</span></h3>
+<form method="get" action="/panel/indicators/relations" class="chips"
+      hx-get="/panel/indicators/relations" hx-target="#indicator-relations"
+      hx-swap="innerHTML" hx-push-url="true">
+  <select name="source" aria-label="源 source" hx-get="/panel/indicators/relations" hx-include="closest form">
+    <option value="">全部源 all sources</option>
+    {% for src in binding_sources %}
+    <option value="{{ src }}" {{ 'selected' if src == source }}>{{ src }}</option>
+    {% endfor %}
+  </select>
+  <noscript><button type="submit" class="btn">筛选 Filter</button></noscript>
+</form>
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('源', 'Source') }}{{ th('列（原生代码）', 'Column (native code)') }}{{ th('概念', 'Concept') }}{{ th('置信度', 'Confidence') }}{{ th('来源', 'Provenance') }}{{ th('复核', 'Reviewed') }}</tr>
+  </thead>
+  {% for b in bindings.rows %}
+  <tr>
+    <td>{{ b.source }}</td>
+    <td><code>{{ b.column }}</code></td>
+    <td><a href="/panel/indicators/concepts/{{ b.concept_id }}"><code>{{ b.concept_code }}</code></a> {{ b.concept_name or '' }}</td>
+    <td>{{ '%.2f' | format(b.confidence) }}</td>
+    <td>{{ b.provenance }}</td>
+    <td>{{ '✓' if b.reviewed else '—' }}</td>
+  </tr>
+  {% else %}
+  <tr><td colspan="6" class="muted">无匹配绑定 No matching bindings.</td></tr>
+  {% endfor %}
+</table>
+</div>

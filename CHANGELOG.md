@@ -2,6 +2,47 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.30] - 2026-09-29
+
+### Added (panel-indicator-observatory)
+
+#### Indicator observatory board
+
+New panel board「指标 Indicators」under `/panel/indicators/*` — the observability
+surface over the 57k-entry unified indicator registry and the concept layer.
+Reads the same tables the MCP tools serve through the same session (a view,
+never a fork); sits behind the existing auth/role gate like every board.
+Five views:
+
+- **Registry table** (`/panel/indicators`): domain / source_db / verified /
+  keyword filters, server-side paging (50/page), unverified entries visible
+  with an unmistakable badge (ops caliber — distinct from the public
+  catalog's verified-only gate).
+- **Concept family tree** (`…/families`): families → member concepts, each
+  with its binding count; per-family drill-down.
+- **Relation browsing** (`…/relations`): cross-source binding list (native
+  codes) + mappings searchable by external vocabulary, SKOS relation type
+  and keyword; per-indicator pages list the registry anchors sharing a
+  semantic code — the indicator's cross-source equivalence set.
+- **Coverage** (`…/coverage`): registered/verified per source database and
+  domain as grouped SVG bars + tables — the identical GROUP BY
+  `registry_coverage` runs on the same database, so the two surfaces agree
+  at the same moment.
+- **Interactive relation graph** (`…/graph`): vendored zero-build
+  vis-network 9.1.9 (UMD, ~675KB) served from the panel's same-origin
+  static mount — no CDN, no build step; bounded neighborhood views by
+  family / indicator / domain with server-side depth (≤2) and node (≤200)
+  caps; node detail panel; theme tokens and bilingual labels follow the
+  panel's active settings; degrades to a server-rendered relation listing
+  inside `<noscript>` when client scripting is unavailable.
+
+New module `panel/observatory.py` (fail-soft registry reads like
+`semantic.registry_catalog`), `charts.grouped_bar_geometry`, 15 tests in
+`tests/test_panel_indicators.py` covering every spec scenario incl. the
+same-source fork guard and the self-hosted/no-CDN page-source contract.
+Scope management pages are deliberately out of this wave — they wait for
+change `registry-transparent-read-and-scope` to land.
+
 ## [0.5.29] - 2026-09-29
 
 ### Fixed (mcp-search-engine-overhaul P0)

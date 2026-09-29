@@ -37,6 +37,37 @@ def bar_geometry(values: list[float], labels: list[str] | None = None,
     return {"bars": bars, "w": w, "h": h, "pad": pad, "max": mx}
 
 
+def grouped_bar_geometry(series: list[tuple[str, list[float]]],
+                         labels: list[str], w: int = 560, h: int = 170,
+                         pad: int = 30, gap: float = 0.3) -> dict:
+    """Grouped column geometry for same-axis series (e.g. registered vs
+    verified per source — panel-indicator-observatory coverage view).
+
+    ``series`` is ``[(series_key, values), ...]`` aligned with ``labels``;
+    within a label, series bars sit side by side.
+    """
+    n = len(labels)
+    n_series = max(len(series), 1)
+    mx = max((v for _, vals in series for v in vals), default=0) or 1
+    inner_w, inner_h = w - 2 * pad, h - 2 * pad
+    slot = inner_w / n if n else inner_w
+    bw = slot * (1 - gap) / n_series
+    groups = []
+    for i, label in enumerate(labels):
+        bars = []
+        for s_i, (key, vals) in enumerate(series):
+            v = vals[i] if i < len(vals) else 0
+            bh = inner_h * (v / mx)
+            x = pad + i * slot + (slot * gap) / 2 + s_i * bw
+            bars.append({
+                "key": key, "x": round(x, 1), "bw": round(bw, 1),
+                "y": round(h - pad - bh, 1), "bh": round(bh, 1),
+                "value": v, "title": f"{label} {key}: {int(v)}"})
+        groups.append({"label": label, "bars": bars})
+    return {"groups": groups, "w": w, "h": h, "pad": pad, "max": mx,
+            "series_keys": [k for k, _ in series]}
+
+
 def sparkline_geometry(values: list[float], w: int = 200, h: int = 48,
                        pad: int = 4) -> dict:
     """Line geometry: `points` is an SVG polyline points string."""

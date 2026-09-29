@@ -1359,6 +1359,174 @@ def create_app() -> FastAPI:
         ``path=websockify`` resolves to from the embedded page."""
         await _relay_station_ws(websocket, station_id)
 
+    # ── indicator observatory (panel-indicator-observatory) ──────────────────
+    # Same-session reads of the same tables the MCP tools serve (registry +
+    # concept layer) — the board observes, never forks (spec 数据同源). All
+    # routes sit behind the gate above like every other board (spec 门禁).
+    from fd_open_data_mcp.panel import observatory as obs
+
+    RELATION_TYPES = ("exact", "close", "broader", "narrower", "related")
+
+    @app.get("/panel/indicators", response_class=HTMLResponse)
+    def indicators_home(request: Request, domain: str = "", source_db: str = "",
+                        verified: str = "", q: str = "", page: int = 1):
+        """Board home: the registry filter table (design D2/D7)."""
+        s = _session()
+        try:
+            ctx = {
+                "page_data": obs.entries_page(s, domain=domain,
+                                              source_db=source_db,
+                                              verified=verified, q=q, page=page),
+                "filters": obs.filter_options(s),
+                "domain": domain, "source_db": source_db,
+                "verified": verified, "q": q}
+            if request.headers.get("hx-request") == "true":
+                return templates.TemplateResponse(
+                    request, "partial_indicator_results.html", ctx)
+            return templates.TemplateResponse(request, "indicators.html", ctx)
+        finally:
+            s.close()
+
+    @app.get("/panel/indicators/families", response_class=HTMLResponse)
+    def indicator_families(request: Request):
+        s = _session()
+        try:
+            return templates.TemplateResponse(
+                request, "indicator_families.html",
+                {"families": obs.families_overview(s)})
+        finally:
+            s.close()
+
+    @app.get("/panel/indicators/families/{code}", response_class=HTMLResponse)
+    def indicator_family(request: Request, code: str):
+        s = _session()
+        try:
+            fam = obs.family_detail(s, code)
+            if fam is None:
+                raise HTTPException(404, f"family {code} not found")
+            return templates.TemplateResponse(
+                request, "indicator_family.html", {"fam": fam})
+        finally:
+            s.close()
+
+    @app.get("/panel/indicators/concepts/{concept_id}",
+             response_class=HTMLResponse)
+    def indicator_detail(request: Request, concept_id: int):
+        s = _session()
+        try:
+            d = obs.concept_detail(s, concept_id)
+            if d is None:
+                raise HTTPException(404, f"concept {concept_id} not found")
+            return templates.TemplateResponse(
+                request, "indicator_detail.html", {"d": d})
+        finally:
+            s.close()
+
+    @app.get("/panel/indicators/relations", response_class=HTMLResponse)
+    def indicator_relations(request: Request, vocabulary: str = "",
+                            relation: str = "", source: str = "",
+                            q: str = "", page: int = 1):
+        """Relation browsing: cross-source bindings + searchable mappings."""
+        s = _session()
+        try:
+            ctx = {
+                "mappings": obs.mappings_page(s, vocabulary=vocabulary,
+                                              relation=relation, q=q, page=page),
+                "bindings": obs.bindings_page(s, source=source, q=q, page=page),
+                "vocabularies": obs.mapping_vocabularies(s),
+                "binding_sources": obs.binding_sources(s),
+                "relation_types": RELATION_TYPES,
+                "vocabulary": vocabulary, "relation": relation,
+                "source": source, "q": q}
+            if request.headers.get("hx-request") == "true":
+                return templates.TemplateResponse(
+                    request, "partial_indicator_relations.html", ctx)
+            return templates.TemplateResponse(
+                request, "indicator_relations.html", ctx)
+        finally:
+            s.close()
+
+    @app.get("/panel/indicators/coverage", response_class=HTMLResponse)
+    def indicator_coverage(request: Request):
+        """Coverage statistics: same GROUP BY registry_coverage runs, on the
+        same database — the two surfaces agree at the same moment."""
+        from fd_open_data_mcp.panel.charts import grouped_bar_geometry
+
+        s = _session()
+        try:
+            by_source = obs.coverage_by_source(s)
+            by_domain = obs.coverage_by_domain(s)
+
+            def _charts(rows, key):
+                if not rows:
+                    return None
+                labels = [str(r[key] or "—") for r in rows]
+                return {
+                    "rows": rows,
+                    "chart": grouped_bar_geometry(
+                        [("registered", [r["registered"] for r in rows]),
+                         ("verified", [r["verified"] for r in rows])],
+                        labels),
+                }
+
+            return templates.TemplateResponse(
+                request, "indicator_coverage.html",
+                {"by_source": _charts(by_source, "source_db"),
+                 "by_domain": _charts(by_domain, "domain"),
+                 "present": by_source is not None})
+        finally:
+            s.close()
+
+    @app.get("/panel/indicators/graph", response_class=HTMLResponse)
+    def indicator_graph(request: Request, family: str = "",
+                        indicator: str = "", domain: str = "", depth: int = 1):
+        """Interactive relation graph page (design D1/D3). The <noscript>
+        fallback carries a server-rendered relation listing — no empty or
+        broken page without client scripting (spec panel-ui 降级)."""
+        s = _session()
+        try:
+            try:
+                iid = int(indicator) if indicator else None
+            except ValueError:
+                iid = None
+            depth = min(max(1, depth), obs.GRAPH_MAX_DEPTH)
+            fams = obs.families_overview(s)
+            latest = obs.mappings_page(s, page=1).get("rows", [])
+            ctx = {
+                "family": family, "indicator": iid if iid is not None else "",
+                "domain": domain, "depth": depth,
+                "families": fams[:30],
+                "fallback_family": next(
+                    (f for f in fams if f["n_members"]), None),
+                "fallback_mappings": latest[:obs.RELATIONS_PAGE_SIZE],
+                "registry_filters": obs.filter_options(s)}
+            return templates.TemplateResponse(
+                request, "indicator_graph.html", ctx)
+        finally:
+            s.close()
+
+    @app.get("/panel/indicators/graph.json")
+    def indicator_graph_json(family: str = "", indicator: str = "",
+                             domain: str = "", depth: int = 1):
+        """Bounded neighborhood JSON for the relation graph (design D3):
+        one of family/indicator/domain selects the view; depth and node
+        count are clamped server-side."""
+        try:
+            iid = int(indicator) if indicator else None
+        except ValueError:
+            iid = None
+        s = _session()
+        try:
+            data = obs.graph_neighborhood(
+                s, family=family or None, indicator=iid,
+                domain=domain or None, depth=depth)
+        finally:
+            s.close()
+        if data is None:
+            return {"nodes": [], "edges": [], "truncated": False,
+                    "error": "unknown family/indicator/domain"}
+        return data
+
     # ── editor ─────────────────────────────────────────────────────────────
     def _editor_context(s, policy: CrawlPolicy | None):
         selected = set(policy.concept_ids) if policy else set()
