@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.32] - 2026-09-29
+
+### Added (panel-indicator-observatory wave 2)
+
+#### Scope management pages
+
+`/panel/indicators/scopes` completes the observatory board now that
+`registry-transparent-read-and-scope` has landed: scope list with rules and
+7-day hit totals, create / edit / delete forms over the four allow-list
+dimensions (source_dbs / domains / semantic_codes / native_codes,
+comma-separated, blank = unconstrained), and a per-scope detail page with
+per-day hit statistics. The routes call the same `scoping` service functions
+the MCP scope tools call (no HTTP hop), so a scope created in the panel is
+immediately usable via the tools; empty-scope and reserved-name refusals
+surface as explicit errors.
+
 ## [0.5.31] - 2026-09-29
 
 ### Added (registry-transparent-read-and-scope)

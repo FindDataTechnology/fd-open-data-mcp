@@ -1,0 +1,39 @@
+{% extends "base.html" %}
+{% from "_macros.html" import th %}
+{% block title %}{{ sc.name }} · 检索范围{% endblock %}
+{% block content %}
+<h2><code>{{ sc.name }}</code> <span class="en">scope</span></h2>
+<p class="muted">{{ sc.description or '—' }}</p>
+<p><a href="/panel/indicators/scopes">← 返回 scope 列表 back to scopes</a></p>
+{% include "_indicator_tabs.html" %}
+{% if err %}<p class="badge failed">{{ err }}</p>{% endif %}
+
+<h3>命中统计 <span class="en">Hit statistics ({{ stats.days | length }} days, totals: {{ stats.total_calls }} calls / {{ stats.total_results_returned }} results)</span></h3>
+<div class="table-wrap">
+<table>
+  <thead>
+  <tr>{{ th('日期', 'Day') }}{{ th('调用次数', 'Calls') }}{{ th('返回行数', 'Results returned') }}</tr>
+  </thead>
+  {% for d in stats.days %}
+  <tr><td>{{ d.day }}</td><td>{{ d.calls }}</td><td>{{ d.results_returned }}</td></tr>
+  {% else %}
+  <tr><td colspan="3" class="muted">暂无命中记录 No hit statistics yet.</td></tr>
+  {% endfor %}
+</table>
+</div>
+
+<h3 class="mt">编辑规则 <span class="en">Edit rules</span></h3>
+<form method="post" action="/panel/indicators/scopes/{{ sc.name }}/update" class="chips">
+  <input type="text" name="description" value="{{ sc.description or '' }}" placeholder="说明 description" aria-label="说明 description">
+  {% for dim in dimensions %}
+  <input type="text" name="{{ dim }}" value="{{ sc.rules.get(dim) | join(', ') }}" placeholder="{{ dim }}（逗号分隔 comma-separated，留空=不限 all）" aria-label="{{ dim }}">
+  {% endfor %}
+  <button type="submit" class="btn">保存 save</button>
+</form>
+
+<form method="post" action="/panel/indicators/scopes/{{ sc.name }}/delete" class="mt">
+  <button type="submit" class="btn">删除此 scope delete this scope</button>
+</form>
+<p class="muted">删除会同时解除调用方默认绑定；命中统计保留为历史。Deleting removes
+caller default bindings too; hit statistics remain as history.</p>
+{% endblock %}

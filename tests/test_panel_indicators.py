@@ -557,11 +557,90 @@ def test_missing_registry_degrades(session):
     assert "error" in body
 
 
-# ── scenario 12: scope 管理面 wave boundary ───────────────────────────────────
+# ── scenario 12: scope 管理面 (wave 2 — B landed as scoping.py) ───────────────
 
-def test_no_scopes_route_registered(session):
-    """Scope management (scope 管理面) is a later wave — pin its absence so the
-    boundary is explicit."""
-    paths = {getattr(route, "path", "") for route in app.routes}
-    assert "/panel/indicators/scopes" not in paths
-    assert not any(p.startswith("/panel/indicators/scopes") for p in paths)
+def _seed_for_scopes(session):
+    """Registry rows so a source_dbs-pinned scope validates non-empty."""
+    _make_registry(session, [
+        _reg("macro.gdp", "world_bank", "NY.GDP.MKTP", "macro", True, "GDP"),
+        _reg("macro.pop", "world_bank", "SP.POP.TOTL", "macro", True, "人口"),
+        _reg("yearbook.urban", "cnstats", "A0A01", "yearbook", True, "城镇化率"),
+    ])
+
+
+def test_scope_create_from_panel_usable_by_tool_functions(session):
+    """「Create scope from the panel」: a scope created via the panel POST is
+    immediately usable via the MCP scope tool path — the panel calls the same
+    scoping service functions the tools call (design D5), so consistency is
+    by construction; pinned here by resolving the scope exactly as a tool
+    call would."""
+    from fd_open_data_mcp import scoping
+
+    _seed_for_scopes(session)
+    r = client.post("/panel/indicators/scopes/create", data={
+        "name": "wb-only", "description": "world_bank only",
+        "source_dbs": "world_bank", "domains": "", "semantic_codes": "",
+        "native_codes": ""}, follow_redirects=False)
+    assert r.status_code == 303
+    assert r.headers["location"].startswith("/panel/indicators/scopes")
+
+    # the tool path (same function server.py's scope_* tools call) sees it
+    listed = {s["name"]: s for s in scoping.scope_list(session)}
+    assert "wb-only" in listed
+    resolved = scoping.resolve_scope(session, explicit="wb-only")
+    assert resolved["name"] == "wb-only"
+    assert resolved["rules"]["source_dbs"] == ["world_bank"]
+
+    # the list page renders it with its rules
+    page = client.get("/panel/indicators/scopes")
+    assert page.status_code == 200
+    assert "wb-only" in page.text
+    assert "world_bank" in page.text
+
+
+def test_scope_empty_rules_refused(session):
+    """Empty-scope guard through the panel: rules matching nothing known are
+    refused with the explicit error surfaced."""
+    _seed_for_scopes(session)
+    r = client.post("/panel/indicators/scopes/create", data={
+        "name": "bogus", "source_dbs": "no_such_db", "domains": "",
+        "semantic_codes": "", "native_codes": ""}, follow_redirects=False)
+    assert r.status_code == 303
+    assert "err=" in r.headers["location"]
+    follow = client.get("/panel/indicators/scopes")
+    assert "bogus" not in follow.text
+
+
+def test_scope_detail_stats_and_update_delete(session):
+    """「Scope stats visible」+ update/delete roundtrip: the detail page shows
+    hit statistics recorded through the shared record_hit path, rule edits
+    persist, and deletion removes the scope."""
+    from fd_open_data_mcp import scoping
+
+    _seed_for_scopes(session)
+    client.post("/panel/indicators/scopes/create", data={
+        "name": "wb-only", "source_dbs": "world_bank", "domains": "",
+        "semantic_codes": "", "native_codes": ""})
+    scoping.record_hit(session, "wb-only", results_returned=7)
+    scoping.record_hit(session, "wb-only", results_returned=3)
+
+    detail = client.get("/panel/indicators/scopes/wb-only")
+    assert detail.status_code == 200
+    assert "命中统计" in detail.text
+    assert "2" in detail.text and "10" in detail.text  # calls / results totals
+
+    # update: narrow to one semantic code
+    r = client.post("/panel/indicators/scopes/wb-only/update", data={
+        "description": "", "source_dbs": "world_bank",
+        "semantic_codes": "macro.gdp", "domains": "", "native_codes": ""},
+        follow_redirects=False)
+    assert r.status_code == 303
+    sc = {s["name"]: s for s in scoping.scope_list(session)}["wb-only"]
+    assert sc["rules"]["semantic_codes"] == ["macro.gdp"]
+
+    # delete -> gone, detail 404
+    assert client.post("/panel/indicators/scopes/wb-only/delete",
+                       follow_redirects=False).status_code == 303
+    assert client.get("/panel/indicators/scopes/wb-only").status_code == 404
+    assert all(s["name"] != "wb-only" for s in scoping.scope_list(session))
+

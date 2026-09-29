@@ -1527,6 +1527,120 @@ def create_app() -> FastAPI:
                     "error": "unknown family/indicator/domain"}
         return data
 
+    # ── scope management (panel-indicator-observatory 3.1; wave 2 — depends
+    # on registry-transparent-read-and-scope, now landed as scoping.py).
+    # Same-process direct calls to the indicator-scope service functions —
+    # the exact functions the MCP scope tools call (design D5) — so a scope
+    # created here is immediately usable via the tools, by construction.
+    from fd_open_data_mcp import scoping as _scoping
+
+    SCOPE_DIMENSIONS = ("source_dbs", "domains", "semantic_codes",
+                        "native_codes")
+
+    def _scope_rules_from_form(form) -> dict:
+        """Four comma-separated inputs -> the rules dict normalize_rules
+        consumes (empty strings become empty lists = no constraint)."""
+        return {dim: [v.strip() for v in (form.get(dim) or "").split(",")
+                      if v.strip()]
+                for dim in SCOPE_DIMENSIONS}
+
+    def _scopes_redirect(msg: str = "", err: str = "") -> RedirectResponse:
+        from urllib.parse import quote
+        q = f"?msg={quote(msg)}" if msg else (f"?err={quote(err)}" if err else "")
+        return RedirectResponse(f"/panel/indicators/scopes{q}", status_code=303)
+
+    @app.get("/panel/indicators/scopes", response_class=HTMLResponse)
+    def scope_list_page(request: Request, msg: str = "", err: str = ""):
+        s = _session()
+        try:
+            scopes = []
+            for sc in _scoping.scope_list(s):
+                try:
+                    stats = _scoping.scope_stats(s, sc["name"], days=7)
+                    totals = {"calls": stats["total_calls"],
+                              "results": stats["total_results_returned"]}
+                except Exception:  # noqa: BLE001 - stats must never sink the list
+                    totals = {"calls": 0, "results": 0}
+                scopes.append({**sc, "week_totals": totals})
+            return templates.TemplateResponse(
+                request, "indicator_scopes.html",
+                {"scopes": scopes, "msg": msg, "err": err,
+                 "dimensions": SCOPE_DIMENSIONS})
+        finally:
+            s.close()
+
+    @app.post("/panel/indicators/scopes/create")
+    async def scope_create_page(request: Request):
+        form = await request.form()
+        name = (form.get("name") or "").strip()
+        rules = _scope_rules_from_form(form)
+        s = _session()
+        try:
+            out = _scoping.scope_create(
+                s, name, rules, description=form.get("description") or None)
+        except ValueError as e:  # empty scope / reserved / duplicate
+            return _scopes_redirect(err=str(e))
+        finally:
+            s.close()
+        return _scopes_redirect(
+            msg=f"scope {out['name']} 已创建 created — 匹配 matched "
+                f"{out.get('matched')} 指标 indicators，立即可供 MCP scope "
+                f"工具使用 immediately usable via the MCP scope tools")
+
+    @app.get("/panel/indicators/scopes/{scope_name}",
+             response_class=HTMLResponse)
+    def scope_detail_page(request: Request, scope_name: str, err: str = ""):
+        s = _session()
+        try:
+            scopes = {sc["name"]: sc for sc in _scoping.scope_list(s)}
+            sc = scopes.get(scope_name)
+            if sc is None:
+                raise HTTPException(404, f"scope {scope_name} not found")
+            try:
+                stats = _scoping.scope_stats(s, scope_name, days=30)
+            except _scoping.ScopeNotFound:
+                stats = {"days": [], "total_calls": 0,
+                         "total_results_returned": 0}
+            return templates.TemplateResponse(
+                request, "indicator_scope_detail.html",
+                {"sc": sc, "stats": stats, "err": err,
+                 "dimensions": SCOPE_DIMENSIONS})
+        finally:
+            s.close()
+
+    @app.post("/panel/indicators/scopes/{scope_name}/update")
+    async def scope_update_page(scope_name: str, request: Request):
+        form = await request.form()
+        rules = _scope_rules_from_form(form)
+        from urllib.parse import quote
+
+        s = _session()
+        try:
+            _scoping.scope_update(
+                s, scope_name, rules, description=form.get("description") or None)
+        except ValueError as e:
+            return RedirectResponse(
+                f"/panel/indicators/scopes/{scope_name}?err={quote(str(e))}",
+                status_code=303)
+        except _scoping.ScopeNotFound as e:
+            raise HTTPException(404, str(e)) from e
+        finally:
+            s.close()
+        return RedirectResponse(
+            f"/panel/indicators/scopes/{scope_name}?msg="
+            + quote("scope 规则已更新 rules updated"), status_code=303)
+
+    @app.post("/panel/indicators/scopes/{scope_name}/delete")
+    def scope_delete_page(scope_name: str):
+        s = _session()
+        try:
+            _scoping.scope_delete(s, scope_name)
+        except _scoping.ScopeNotFound as e:
+            raise HTTPException(404, str(e))
+        finally:
+            s.close()
+        return _scopes_redirect(msg=f"scope {scope_name} 已删除 deleted")
+
     # ── editor ─────────────────────────────────────────────────────────────
     def _editor_context(s, policy: CrawlPolicy | None):
         selected = set(policy.concept_ids) if policy else set()
