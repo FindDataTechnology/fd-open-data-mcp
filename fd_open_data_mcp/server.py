@@ -327,12 +327,14 @@ def list_concepts(
     (world_bank / gta_panel / china_city_panel / fd_open_data mirror sources).
     Registry rows are appended after the native rows, ordered by
     (domain, semantic_code); they carry additive ``native_code`` and
-    ``source_db`` fields, so an entry is findable by either identifier.
+    ``source_db`` fields, so an entry is findable by either identifier, and a
+    ``read_via`` hint naming the domain tool that serves its values. Reading
+    a registry-only indicator: pass its semantic_code (or native_code) as
+    ``concept_id`` to ``read`` / ``read_series`` — the read routes
+    transparently through the indicator's source-database read channel.
     Entries whose semantic_code duplicates a non-deprecated native concept
     code are deduped (native row wins); deprecated legacy rows never shadow a
-    verified entry. Note: reading the underlying observations of
-    registry-only indicators is NOT available here (a later change forwards
-    those reads via business-mcp).
+    verified entry.
 
     Args:
         entity_type: restrict to one entity type (country, stock, ...)
@@ -796,23 +798,84 @@ def graph_search(
 
 
 # ─── Semantic search ────────────────────────────────────────────────────────
+def _resolve_scope_for_search(scope: str | None) -> tuple[dict | None, dict | None]:
+    """Resolve the effective scope for a search tool.
+
+    Returns ``(resolved, error)``: ``error`` is the explicit unknown-scope
+    payload when the caller named a scope that does not exist (never an empty
+    result set — spec「Unknown scope errors clearly」). Resolution happens
+    BEFORE the result cache so the cache key carries the effective scope and
+    differently-scoped callers never share an entry.
+    """
+    from fd_open_data_mcp import scoping
+
+    s = _session()
+    try:
+        try:
+            return scoping.resolve_scope(s, scope), None
+        except scoping.ScopeNotFound as exc:
+            return None, {
+                "error": "unknown_scope", "scope": exc.name,
+                "detail": str(exc),
+                "hint": "list known scopes with scope_list",
+            }
+    finally:
+        s.close()
+
+
+def _scope_cache_key(resolved: dict | None) -> str | None:
+    return resolved["name"] if resolved else None
+
+
+def _finish_scoped_search(resolved: dict | None, out: dict,
+                          result_key: str = "results") -> dict:
+    """Filter a search payload by the scope in effect + disclose it + count it.
+
+    Filtering happens after the merge with registry hits so both corpora are
+    constrained; the response always names the scope when one is in effect —
+    including (especially) when filtering leaves zero results (spec「Scoped
+    emptiness is explainable」). Unscoped calls return the payload untouched.
+    """
+    if resolved is None:
+        return out
+    from fd_open_data_mcp import scoping
+
+    filtered = scoping.filter_result_rows(out.get(result_key) or [], resolved["rules"])
+    out[result_key] = filtered
+    out["count"] = len(filtered)
+    out["scope"] = scoping.scope_metadata(resolved)
+    s = _session()
+    try:
+        scoping.record_hit(s, resolved["name"], len(filtered))
+    finally:
+        s.close()
+    return out
+
+
 @mcp.tool
 def semantic_search(
     query: str,
     entity_type: str | None = None,
     frequency: str | None = None,
     limit: int = 20,
+    scope: str | None = None,
 ) -> dict:
     """Search concepts semantically using vector embeddings.
 
     Returns {cached, count, results}: results are the matching concepts with
-    scores, ordered by similarity; cached=true marks a TTL-cache hit.
+    scores, ordered by similarity; cached=true marks a TTL-cache hit. Pass
+    ``scope`` to constrain retrieval to a named scope (see scope_list); a
+    scoped response names the scope that governed it.
     """
     from fd_open_data_mcp.semantic_search import semantic_search as _search
     from fd_open_data_mcp.semantic.registry_search import (
         merge_registry_hits,
         search_registry,
     )
+
+    resolved, error = _resolve_scope_for_search(scope)
+    if error is not None:
+        return error
 
     def run():
         results = _search(query, entity_type, frequency, limit)
@@ -829,11 +892,13 @@ def semantic_search(
         merged = merge_registry_hits(results, registry_hits, limit=limit, key=_rank)
         return {"count": len(merged), "results": merged}
 
-    return cached_search(
+    out = cached_search(
         "semantic_search",
-        {"query": query, "entity_type": entity_type, "frequency": frequency, "limit": limit},
+        {"query": query, "entity_type": entity_type, "frequency": frequency,
+         "limit": limit, "scope": _scope_cache_key(resolved)},
         run,
     )
+    return _finish_scoped_search(resolved, out)
 
 
 @mcp.tool
@@ -871,6 +936,7 @@ def semantic_search_unified(
     query: str,
     entity_type: str | None = None,
     limit: int = 20,
+    scope: str | None = None,
 ) -> dict:
     """Unified semantic search across both entities and concepts.
 
@@ -878,6 +944,7 @@ def semantic_search_unified(
         query: Natural language query
         entity_type: Optional filter by entity type (applies to entities only)
         limit: Maximum number of results to return
+        scope: Optional named retrieval scope constraining concept results
 
     Returns:
         {cached, count, results}: entities and concepts with similarity
@@ -888,6 +955,10 @@ def semantic_search_unified(
         merge_registry_hits,
         search_registry,
     )
+
+    resolved, error = _resolve_scope_for_search(scope)
+    if error is not None:
+        return error
 
     def run():
         results = search.search_unified(query, entity_type, limit)
@@ -900,11 +971,13 @@ def semantic_search_unified(
         )
         return {"count": len(merged), "results": merged}
 
-    return cached_search(
+    out = cached_search(
         "semantic_search_unified",
-        {"query": query, "entity_type": entity_type, "limit": limit},
+        {"query": query, "entity_type": entity_type, "limit": limit,
+         "scope": _scope_cache_key(resolved)},
         run,
     )
+    return _finish_scoped_search(resolved, out)
 
 
 @mcp.tool
@@ -926,6 +999,7 @@ def ai_search(
     limit: int = 20,
     include_values: bool = False,
     value_date: str | None = None,
+    scope: str | None = None,
 ) -> dict:
     """Default search entry point — call this for fuzzy/natural-language discovery.
     Superset of semantic_search/semantic_search_entities/semantic_search_unified
@@ -937,6 +1011,8 @@ def ai_search(
         limit: Maximum number of concepts to return
         include_values: If True, fetch actual values from semantic_observations
         value_date: Date for values (e.g., "2024-01-01") - only if include_values=True
+        scope: Optional named retrieval scope constraining the concepts list;
+            the response names the scope that governed it (see scope_list)
 
     Returns:
         Dictionary with concepts, entities, and optionally values; carries a
@@ -947,6 +1023,10 @@ def ai_search(
         merge_registry_hits,
         search_registry,
     )
+
+    resolved, error = _resolve_scope_for_search(scope)
+    if error is not None:
+        return error
 
     def _run():
         result = _ai_search(query, entity_type, limit, include_values, value_date)
@@ -959,7 +1039,7 @@ def ai_search(
         )
         return result
 
-    return cached_search(
+    out = cached_search(
         "ai_search",
         {
             "query": query,
@@ -967,9 +1047,11 @@ def ai_search(
             "limit": limit,
             "include_values": include_values,
             "value_date": value_date,
+            "scope": _scope_cache_key(resolved),
         },
         _run,
     )
+    return _finish_scoped_search(resolved, out, result_key="concepts")
 
 
 # ─── Source ranking ─────────────────────────────────────────────────────────
@@ -985,20 +1067,224 @@ def rank_sources(concept_id: int, requested_date: str | None = None) -> list[dic
         s.close()
 
 
-# ─── Concept-fetch ──────────────────────────────────────────────────────────
-@mcp.tool
-def read(concept_id: int, entity_type: str, entity_id: int, dates: list[str],
-         source: str | None = None, all_sources: bool = False) -> list[dict]:
-    """Read a concept for an entity over dates (read-through cache + ranked dispatch).
+# ─── Retrieval scopes (indicator-scope) ─────────────────────────────────────
+def _scope_error(exc: Exception) -> dict:
+    """CRUD/validation failures as explicit payloads, not raises."""
+    from fd_open_data_mcp import scoping
 
-    source: pin the read (and any dispatch) to one source. all_sources: return
-    every held row per date, best-ranked first, without dispatching — for
-    cross-source comparison.
+    if isinstance(exc, scoping.ScopeNotFound):
+        return {"error": "unknown_scope", "scope": exc.name, "detail": str(exc)}
+    return {"error": "invalid_scope", "detail": str(exc)}
+
+
+@mcp.tool
+def scope_create(name: str, rules: dict, description: str | None = None) -> dict:
+    """Create a named retrieval scope.
+
+    rules: allow-lists over the registry dimensions —
+    ``{source_dbs: [...], domains: [...], semantic_codes: [...],
+    native_codes: [...]}`` (every list optional; a scope with no allow-lists
+    is rejected). Allow-list values are validated against the live
+    registry_entries/concepts tables: a scope matching nothing known is
+    rejected; the number of matched indicators is returned. ``unscoped`` is
+    reserved. Scope is a precision/cost tool, not a permission wall.
     """
-    from fd_open_data_mcp.fetch.dispatch import read as _read
+    from fd_open_data_mcp import scoping
 
     s = _session()
     try:
+        return scoping.scope_create(s, name, rules, description)
+    except Exception as exc:  # noqa: BLE001 — surfaced as explicit payloads
+        s.rollback()
+        return _scope_error(exc)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def scope_list() -> list[dict]:
+    """List every retrieval scope with its allow-list rules."""
+    from fd_open_data_mcp import scoping
+
+    s = _session()
+    try:
+        return scoping.scope_list(s)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def scope_update(name: str, rules: dict | None = None,
+                 description: str | None = None) -> dict:
+    """Update a scope's rules and/or description (same validation as create)."""
+    from fd_open_data_mcp import scoping
+
+    s = _session()
+    try:
+        return scoping.scope_update(s, name, rules, description)
+    except Exception as exc:  # noqa: BLE001
+        s.rollback()
+        return _scope_error(exc)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def scope_delete(name: str) -> dict:
+    """Delete a scope (its caller default bindings go with it; stats remain)."""
+    from fd_open_data_mcp import scoping
+
+    s = _session()
+    try:
+        return scoping.scope_delete(s, name)
+    except Exception as exc:  # noqa: BLE001
+        s.rollback()
+        return _scope_error(exc)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def scope_bind_caller(caller_key: str, scope_name: str) -> dict:
+    """Bind a caller's default scope (applies when the caller passes no
+    explicit scope; an explicit parameter — or the reserved ``unscoped`` —
+    always wins). ``caller_key`` is opaque: the ``X-FD-Caller`` request
+    header value for HTTP callers, or the FD_MCP_CALLER_KEY env identity for
+    integrations.
+    """
+    from fd_open_data_mcp import scoping
+
+    s = _session()
+    try:
+        return scoping.bind_caller(s, caller_key, scope_name)
+    except Exception as exc:  # noqa: BLE001
+        s.rollback()
+        return _scope_error(exc)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def scope_unbind_caller(caller_key: str) -> dict:
+    """Drop a caller's default scope binding."""
+    from fd_open_data_mcp import scoping
+
+    s = _session()
+    try:
+        return scoping.unbind_caller(s, caller_key)
+    except Exception as exc:  # noqa: BLE001
+        s.rollback()
+        return _scope_error(exc)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def scope_list_bindings(caller_key: str | None = None) -> list[dict]:
+    """List caller default-scope bindings (optionally one caller's)."""
+    from fd_open_data_mcp import scoping
+
+    s = _session()
+    try:
+        return scoping.list_bindings(s, caller_key)
+    finally:
+        s.close()
+
+
+@mcp.tool
+def scope_stats(scope_name: str, days: int = 30) -> dict:
+    """Per-day hit counters for one scope (calls, results_returned), most
+    recent first — the cost-savings evidence (spec「Scope effectiveness is
+    observable」). An unknown scope is an explicit error naming it."""
+    from fd_open_data_mcp import scoping
+
+    s = _session()
+    try:
+        return scoping.scope_stats(s, scope_name, days)
+    except Exception as exc:  # noqa: BLE001
+        s.rollback()
+        return _scope_error(exc)
+    finally:
+        s.close()
+
+
+# ─── Concept-fetch ──────────────────────────────────────────────────────────
+@mcp.tool
+def read(concept_id: int | str, entity_type: str | None = None,
+         entity_id: int | None = None, dates: list[str] | None = None,
+         source: str | None = None, all_sources: bool = False,
+         entity: str | None = None, scope: str | None = None) -> list[dict]:
+    """Read a concept for an entity over dates (read-through cache + ranked dispatch).
+
+    Local concepts: concept_id is the numeric id; entity_type/entity_id/dates
+    are required; ``source`` pins the read (and any dispatch) to one source;
+    ``all_sources`` returns every held row per date, best-ranked first, without
+    dispatching — for cross-source comparison.
+
+    Registry-only indicators (catalog rows with id=None): pass the
+    semantic_code (or native_code) as ``concept_id`` — the read is routed
+    transparently through the indicator's source-database read channel and
+    returns the same row shape; ``entity`` carries the region/country/city
+    name when the channel needs one (world_bank requires it). Provenance
+    travels in ``source_used``.
+
+    ``scope`` (optional): restrict this call to a named retrieval scope — an
+    indicator outside the scope returns an explicit out-of-scope response;
+    the reserved name ``unscoped`` forces the full corpus.
+    """
+    from fd_open_data_mcp import federation, scoping
+    from fd_open_data_mcp.fetch.dispatch import read as _read
+    from fd_open_data_mcp.models import Concept
+
+    if dates is None:
+        raise ValueError("dates is required (list of 'YYYY-MM-DD' or 'YYYY')")
+
+    s = _session()
+    try:
+        try:
+            resolved = scoping.resolve_scope(s, scope)
+        except scoping.ScopeNotFound as exc:
+            return [{"error": "unknown_scope", "scope": exc.name, "detail": str(exc)}]
+
+        cid = concept_id if isinstance(concept_id, int) else None
+        if cid is None and isinstance(concept_id, str) and concept_id.strip().isdigit():
+            cid = int(concept_id.strip())
+        concept = s.get(Concept, cid) if cid is not None else None
+
+        if concept is not None:
+            # Local concept — the federation path is never consulted, so a
+            # business-mcp outage cannot touch this branch (spec「Local reads
+            # unaffected by federation outage」).
+            violation = scoping.check_read_scope(
+                resolved, code=concept.code, category=concept.category,
+            ) if resolved else None
+            if violation:
+                return [violation]
+            rows = _read(s, cid, entity_type, entity_id, dates,
+                         source=source, all_sources=all_sources)
+            if resolved:
+                scoping.record_hit(s, resolved["name"],
+                                   sum(1 for r in rows if not r.get("error")))
+            return rows
+
+        entry = federation.resolve_registry_entry(s, concept_id)
+        if entry is not None:
+            # Registry-only indicator — route by source_db (design D1).
+            violation = scoping.check_read_scope(
+                resolved, code=entry.get("semantic_code"),
+                category=entry.get("domain"), source_db=entry.get("source_db"),
+                native_code=entry.get("native_code"),
+            ) if resolved else None
+            if violation:
+                return [violation]
+            rows = federation.federated_read(s, concept_id, dates, entity=entity)
+            if resolved:
+                scoping.record_hit(s, resolved["name"],
+                                   sum(1 for r in rows if not r.get("error")))
+            return rows
+
+        # Neither local nor registry: keep the local path's exact error
+        # behavior (check_applicability raises "concept X not found").
         return _read(s, concept_id, entity_type, entity_id, dates,
                      source=source, all_sources=all_sources)
     finally:
@@ -1009,26 +1295,41 @@ MAX_SERIES_ROWS = 5000
 
 
 @mcp.tool
-def read_series(concept_id: int, entity_type: str, entity_id: int,
-                start: str, end: str) -> dict:
-    """Read a stored series (cache only) for one concept x entity over [start, end].
+def read_series(concept_id: int | str, entity_type: str | None = None,
+                entity_id: int | None = None, start: str = "", end: str = "",
+                entity: str | None = None, scope: str | None = None) -> dict:
+    """Read a series for one concept x entity over [start, end].
 
-    The bulk counterpart to ``read``: returns every observation already held,
+    Local concepts (numeric ``concept_id``): serves the stored cache only,
     highest-ranked source per point, ordered by date. It NEVER dispatches
     upstream — an empty window is a coverage fact reported as such, not a
-    failure. Use ``read`` for a point read (cache + live dispatch) or ``fetch``
-    to force a refresh of one point.
+    failure. Use ``read`` for a point read (cache + live dispatch) or
+    ``fetch`` to force a refresh of one point.
+
+    Registry-only indicators (semantic_code / native_code as ``concept_id``):
+    the window is routed transparently through the indicator's source
+    database read channel (same response shape; ``entity`` carries the
+    region/country/city when the channel needs one). Provenance travels in
+    each point's ``source_used``.
+
+    ``scope`` (optional): restrict this call to a named retrieval scope —
+    out-of-scope indicators return an explicit out-of-scope response; the
+    reserved name ``unscoped`` forces the full corpus.
 
     Args:
-        concept_id: concept to read
-        entity_type: entity type (country, stock, fund, ...)
-        entity_id: entity id
-        start: window start, inclusive ('YYYY-MM-DD'; a bare 'YYYY' works for yearly concepts)
+        concept_id: concept (local numeric id, or registry semantic_code)
+        entity_type: entity type (country, stock, fund, ...) — local reads
+        entity_id: entity id — local reads
+        start: window start, inclusive ('YYYY-MM-DD'; a bare 'YYYY' works)
         end: window end, inclusive
+        entity: region / country / city name for registry-only reads
+        scope: optional named retrieval scope
     """
+    from fd_open_data_mcp import federation, scoping
     from fd_open_data_mcp.entities.resolver import check_applicability
     from fd_open_data_mcp.fetch.cache import read_cache_range
     from fd_open_data_mcp.fetch.dispatch import _coerce_value
+    from fd_open_data_mcp.models import Concept
 
     if not start or not end:
         raise ValueError("start and end are required (e.g. '2020-01-01')")
@@ -1037,8 +1338,41 @@ def read_series(concept_id: int, entity_type: str, entity_id: int,
 
     s = _session()
     try:
-        check_applicability(s, concept_id, entity_type)
-        rows = read_cache_range(s, concept_id, entity_type, entity_id, start, end)
+        try:
+            resolved = scoping.resolve_scope(s, scope)
+        except scoping.ScopeNotFound as exc:
+            return {"error": "unknown_scope", "scope": exc.name, "detail": str(exc)}
+
+        cid = concept_id if isinstance(concept_id, int) else None
+        if cid is None and isinstance(concept_id, str) and concept_id.strip().isdigit():
+            cid = int(concept_id.strip())
+        concept = s.get(Concept, cid) if cid is not None else None
+
+        if concept is None:
+            entry = federation.resolve_registry_entry(s, concept_id)
+            if entry is not None:
+                violation = scoping.check_read_scope(
+                    resolved, code=entry.get("semantic_code"),
+                    category=entry.get("domain"), source_db=entry.get("source_db"),
+                    native_code=entry.get("native_code"),
+                ) if resolved else None
+                if violation:
+                    return violation
+                out = federation.federated_read_series(
+                    s, concept_id, start, end, entity=entity,
+                )
+                if resolved:
+                    scoping.record_hit(s, resolved["name"], out.get("count", 0))
+                return out
+            cid = concept_id  # neither local nor registry: local error behavior
+
+        check_applicability(s, cid, entity_type)
+        violation = scoping.check_read_scope(
+            resolved, code=concept.code, category=concept.category,
+        ) if (resolved and concept is not None) else None
+        if violation:
+            return violation
+        rows = read_cache_range(s, cid, entity_type, entity_id, start, end)
         truncated = len(rows) > MAX_SERIES_ROWS
         kept = rows[-MAX_SERIES_ROWS:] if truncated else rows
         points = [
@@ -1047,7 +1381,7 @@ def read_series(concept_id: int, entity_type: str, entity_id: int,
             for r in kept
         ]
         out: dict = {
-            "concept_id": concept_id, "entity_type": entity_type, "entity_id": entity_id,
+            "concept_id": cid, "entity_type": entity_type, "entity_id": entity_id,
             "start": start, "end": end, "count": len(points), "points": points,
         }
         if not points:
@@ -1056,6 +1390,8 @@ def read_series(concept_id: int, entity_type: str, entity_id: int,
         elif truncated:
             out["note"] = (f"window holds more than {MAX_SERIES_ROWS} points; returned the most "
                            f"recent {MAX_SERIES_ROWS} — narrow the window for the rest")
+        if resolved:
+            scoping.record_hit(s, resolved["name"], len(points))
         return out
     finally:
         s.close()

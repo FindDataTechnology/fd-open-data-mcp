@@ -178,7 +178,8 @@ def test_verified_registry_only_indicator_discoverable(session):
     assert direct[0]["result_type"] == "registry"
     assert set(direct[0]) == {
         "semantic_code", "name_zh", "name_en",
-        "source_db", "similarity", "result_type",
+        "source_db", "native_code", "domain",
+        "similarity", "result_type", "read_via",
     }
 
 

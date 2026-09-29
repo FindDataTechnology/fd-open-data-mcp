@@ -62,17 +62,20 @@ def mig():
 # Chain wiring
 # ---------------------------------------------------------------------------
 
-def test_revision_is_new_head_of_shipped_chain(mig):
-    head = ScriptDirectory(str(ALEMBIC_DIR)).get_current_head()
-    assert head == "0003_pgvector_embedding_columns"
-    assert mig.down_revision == "0002_sem_obs_source_aware_key"
-    assert mig.revision == head
+def test_revision_is_new_head_of_shipped_chain():
+    """The shipped head is 0004 (indicator-scope scope tables); 0003 keeps
+    its own down_revision wiring (its contract tests live above)."""
+    script = ScriptDirectory(str(ALEMBIC_DIR))
+    assert script.get_current_head() == "0004_scope_tables"
+    rev = script.get_revision("0004_scope_tables")
+    assert rev.down_revision == "0003_pgvector_embedding_columns"
 
 
-def test_chain_is_linear_to_0003():
+def test_chain_is_linear_to_0004():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0004_scope_tables",
         "0003_pgvector_embedding_columns",
         "0002_sem_obs_source_aware_key",
         "0001_schema_baseline",
@@ -330,6 +333,6 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0003_pgvector_embedding_columns"
+    assert version == "0004_scope_tables"
     # Guarded no-op: only the alembic ledger exists; no app tables were built.
     assert tables == {"alembic_version"}

@@ -228,8 +228,12 @@ def _registry_concept_row(entry: dict) -> dict:
     consume native and registry rows uniformly; identity is additive —
     ``native_code`` / ``source_db`` exist only on registry-derived rows, and
     ``id`` is ``None`` because these are not ``concepts`` table rows (do not
-    use it for ``concept_id`` lookups).
+    use it for ``concept_id`` lookups). ``read_via`` (design D2) names the
+    domain tool + native-code argument that reads the entry — local rows
+    never carry it, so a missing ``read_via`` means "directly readable".
     """
+    from fd_open_data_mcp.federation import read_via_hint
+
     return {
         "id": None,
         "code": entry.get("semantic_code"),
@@ -247,6 +251,7 @@ def _registry_concept_row(entry: dict) -> dict:
         "deprecated": False,
         "native_code": entry.get("native_code"),
         "source_db": entry.get("source_db"),
+        "read_via": read_via_hint(entry),
     }
 
 

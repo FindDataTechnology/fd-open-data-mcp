@@ -207,9 +207,10 @@ def test_registry_row_renders_identity_fields(registry):
     assert gta["name_zh"] == "行业代码C-治理结构子库"
     assert gta["category"] == "finance"  # domain renders as category
     assert gta["verified"] is True
-    # key parity with native rows (plus the additive identity fields)
+    # key parity with native rows (plus the additive identity fields and the
+    # read_via hint — registry-transparent-read-and-scope)
     native = next(r for r in rows if r["code"] == "gdp")
-    assert set(gta) - set(native) == {"native_code", "source_db"}
+    assert set(gta) - set(native) == {"native_code", "source_db", "read_via"}
 
 
 # --- (c) unverified entries never returned ------------------------------------

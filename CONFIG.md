@@ -288,3 +288,54 @@ links = scrape_with_selector(
 )
 ```
 
+
+### 13. Federated registry reads (registry-transparent-read-and-scope)
+
+Registry-only indicators (catalog rows with `id=None`) are read by routing
+to the business-mcp domain read tools over MCP HTTP. Off by default — the
+a→b service dependency goes live deliberately (flag defaults closed, staged
+per-domain rollout):
+
+```bash
+# business-mcp Streamable HTTP endpoint (required for federated reads)
+FD_MCP_BUSINESS_URL=http://<business-mcp-host>:8310/mcp
+
+# Rollout flag — unset/0 = off (default); 1/all = every mapped source;
+# or a comma list for the staged rollout:
+FD_MCP_FEDERATED_READ=yearbook_catalog          # yearbook first…
+FD_MCP_FEDERATED_READ=1                          # …then all mapped domains
+
+# Per-call timeout (seconds) and the post-failure retry cooldown (seconds —
+# a down business-mcp is not re-dialed per date within the window)
+FD_MCP_FEDERATION_TIMEOUT=20
+FD_MCP_FEDERATION_COOLDOWN=30
+```
+
+Mapped channels: `yearbook_catalog → yearbook_read`,
+`world_bank → wb_read`, `gta_panel → gta_read`,
+`china_city_panel → city_read`. Sources without a channel report
+`no_read_channel`; an unreachable business-mcp reports
+`federation_unavailable` — both explicit, never empty values. Local concept
+reads never touch this path.
+
+### 14. Retrieval scopes (indicator-scope)
+
+Named allow-list filters over `{source_dbs, domains, semantic_codes,
+native_codes}`, stored in `fd_open_data` (`scopes` / `scope_bindings` /
+`scope_stats` — migration `0004_scope_tables`). Managed via the
+`scope_create/list/update/delete` MCP tools; consumed by the optional
+`scope` parameter on `ai_search` / `semantic_search` /
+`semantic_search_unified` / `read` / `read_series` and on business-mcp's
+domain search tools.
+
+```bash
+# Caller identity for default-scope bindings (opaque string; the deployment
+# decides granularity). HTTP callers may alternatively send X-FD-Caller.
+FD_MCP_CALLER_KEY=tok-report-bot
+```
+
+- Explicit `scope` parameter always wins over the caller default; the
+  reserved name `unscoped` forces the full corpus.
+- Every scoped response carries `scope: {name, summary}` — scoped emptiness
+  is distinguishable from true absence.
+- `scope_stats(scope_name)` returns per-day `calls` / `results_returned`.

@@ -61,13 +61,29 @@ def _backend() -> str:
 
 
 def _hit(row: Any, similarity: Any) -> dict:
+    """A registry hit with its read_via hint (design D2) — the hint names the
+    domain tool + native-code argument; sources without a read channel carry
+    ``read_via: null`` rather than a wrong hint."""
+    from fd_open_data_mcp.federation import read_via_hint
+
+    entry = {
+        "semantic_code": row.semantic_code,
+        "name_zh": row.name_zh,
+        "name_en": row.name_en,
+        "source_db": row.source_db,
+        "native_code": getattr(row, "native_code", None),
+        "domain": getattr(row, "domain", None),
+    }
     return {
         "semantic_code": row.semantic_code,
         "name_zh": row.name_zh,
         "name_en": row.name_en,
         "source_db": row.source_db,
+        "native_code": entry["native_code"],
+        "domain": entry["domain"],
         "similarity": float(similarity),
         "result_type": "registry",
+        "read_via": read_via_hint(entry),
     }
 
 
@@ -81,7 +97,8 @@ def _search_json(session: Session, query: str, limit: int) -> list[dict]:
 
     rows = session.execute(
         text(f"""
-            SELECT re.semantic_code, re.name_zh, re.name_en, re.source_db, x.embedding
+            SELECT re.semantic_code, re.name_zh, re.name_en, re.source_db,
+                   re.native_code, re.domain, x.embedding
             FROM registry_indicator_embeddings x
             JOIN registry_entries re ON re.id = x.registry_entry_id
             WHERE x.model = :model AND re.verified AND {_NON_EMPTY_CLAUSE}
@@ -124,6 +141,7 @@ def _search_pgvector(session: Session, query: str, limit: int) -> list[dict]:
         pass
     stmt = text(f"""
         SELECT re.semantic_code, re.name_zh, re.name_en, re.source_db,
+               re.native_code, re.domain,
                1 - (x.embedding_vec <=> CAST(:qvec AS vector)) AS similarity
         FROM registry_indicator_embeddings x
         JOIN registry_entries re ON re.id = x.registry_entry_id
@@ -142,11 +160,13 @@ def search_registry(
 ) -> list[dict]:
     """Semantic search over verified registry entries.
 
-    Returns ``{semantic_code, name_zh, name_en, source_db, similarity,
-    result_type: "registry"}`` sorted by similarity desc. ``verified`` is
-    evaluated live via the JOIN — never a snapshot from embed time. When
-    ``session`` is omitted, one is opened against the configured database.
-    Fail-soft: missing tables or an unreadable corpus return ``[]``.
+    Returns ``{semantic_code, name_zh, name_en, source_db, native_code,
+    domain, similarity, result_type: "registry", read_via}`` sorted by
+    similarity desc (``read_via`` per design D2; ``null`` when the source has
+    no domain read channel). ``verified`` is evaluated live via the JOIN —
+    never a snapshot from embed time. When ``session`` is omitted, one is
+    opened against the configured database. Fail-soft: missing tables or an
+    unreadable corpus return ``[]``.
     """
     if session is None:
         from fd_open_data_mcp import db as dbmod

@@ -2,6 +2,49 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.31] - 2026-09-29
+
+### Added (registry-transparent-read-and-scope)
+
+#### Transparent federated reads (concept-fetch delta)
+
+`read` / `read_series` now accept registry-only indicators — pass the
+semantic_code (or native_code) as `concept_id` — and route them, by the
+entry's source_db, to the business-mcp domain read tool (`yearbook_read` /
+`wb_read` / `gta_read` / `china_city_panel → city_read`), projecting results
+into the standard read row shape; provenance travels in `source_used`.
+Rollout flag `FD_MCP_FEDERATED_READ` defaults OFF (staged per-domain
+rollout; endpoint via `FD_MCP_BUSINESS_URL`). Failure semantics are loud and
+explicit: `federated_read_disabled`, `no_read_channel` (names the source),
+`federation_unavailable` (with a short retry cooldown). Local concept reads
+never touch the federation path.
+
+#### read_via hints (open-data-catalog delta)
+
+Catalog (`list_concepts`) and search (`ai_search` / `semantic_search` /
+`semantic_search_unified`) outputs attach to every registry entry a
+`read_via {tool, args}` hint naming the domain tool + native-code argument;
+sources without a read channel carry `read_via: null` rather than a wrong
+hint. Local concepts are never labeled registry-only.
+
+#### Retrieval scopes (indicator-scope)
+
+Named allow-list scopes `{source_dbs, domains, semantic_codes, native_codes}`
+stored in `fd_open_data` (`scopes` / `scope_bindings` / `scope_stats`,
+migration `0004_scope_tables`). Management tools `scope_create` /
+`scope_list` / `scope_update` / `scope_delete` (empty-scope validation
+against live tables with the match count returned; unknown code values
+warn without blocking; `unscoped` reserved). All search/read tools take an
+optional `scope` parameter — out-of-scope reads return an explicit
+`out_of_scope` response, scoped responses disclose `{name, summary}`, scoped
+emptiness is explainable. Caller default bindings via `scope_bind_caller` /
+`scope_unbind_caller` (opaque caller key from `X-FD-Caller` or
+`FD_MCP_CALLER_KEY`; explicit parameter and the reserved `unscoped` always
+win). Per-(scope, day) hit counters served by `scope_stats`. The same
+scope semantics run inside business-mcp's domain search tools
+(single-source: admit → disclose+count, exclude → explainable empty).
+
+
 ## [0.5.30] - 2026-09-29
 
 ### Added (panel-indicator-observatory)

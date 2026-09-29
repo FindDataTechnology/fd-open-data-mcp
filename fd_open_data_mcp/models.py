@@ -1347,3 +1347,65 @@ class SourceManifest(Base):
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
+
+
+class Scope(Base):
+    """A named retrieval scope (indicator-scope spec): allow-lists over the
+    registry/source dimensions. ``rules`` is a single JSON object —
+    ``{source_dbs: [], domains: [], semantic_codes: [], native_codes: []}`` —
+    CRUD stays atomic and per-item statistics are not needed (design D3)."""
+    __tablename__ = "scopes"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    name = Column(String(128), nullable=False, unique=True, index=True)
+    description = Column(Text, nullable=True)
+    rules = Column(JSONB, nullable=False, default=dict)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "name": self.name, "description": self.description,
+            "rules": self.rules,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ScopeBinding(Base):
+    """A caller's default scope (design D5): applies when the caller passes no
+    explicit scope; ``caller_key`` is an opaque string (token name / panel
+    user / integration id) — the deployment decides the granularity."""
+    __tablename__ = "scope_bindings"
+
+    caller_key = Column(String(255), primary_key=True)
+    scope_name = Column(String(128), nullable=False, index=True)
+    created_at = Column(DateTime, default=_now)
+    updated_at = Column(DateTime, default=_now, onupdate=_now)
+
+    def toDict(self) -> dict:
+        return {
+            "caller_key": self.caller_key, "scope_name": self.scope_name,
+            "created_at": self.created_at.isoformat() if self.created_at else None,
+            "updated_at": self.updated_at.isoformat() if self.updated_at else None,
+        }
+
+
+class ScopeStat(Base):
+    """Per-scope daily hit counters (design D6): one row per (scope, day),
+    incremented per scoped retrieval — quantifies the cost saved."""
+    __tablename__ = "scope_stats"
+    __table_args__ = (
+        PrimaryKeyConstraint("scope_name", "day", name="pk_scope_stats_scope_day"),
+    )
+
+    scope_name = Column(String(128), nullable=False)
+    day = Column(String(10), nullable=False)  # 'YYYY-MM-DD' — portable across PG/SQLite
+    calls = Column(Integer, nullable=False, default=0)
+    results_returned = Column(Integer, nullable=False, default=0)
+
+    def toDict(self) -> dict:
+        return {
+            "scope_name": self.scope_name, "day": self.day,
+            "calls": self.calls, "results_returned": self.results_returned,
+        }
