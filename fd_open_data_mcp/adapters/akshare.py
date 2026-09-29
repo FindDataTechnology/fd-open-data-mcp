@@ -935,6 +935,11 @@ def register_all() -> None:
     register("akshare", "macro_china_ppi_yearly", MacroChinaCpiPpiAdapter())
     register("akshare", "macro_china_pmi_yearly", MacroChinaPmiAdapter())
     register("akshare", "macro_china_money_supply", MacroMonthStatAdapter())
+    # east-money 月份-keyed macro tables (CPI/PPI/PMI rebind 2026-09-29: the
+    # JIN10 feeds stopped updating 2025-09; these carry current months)
+    register("akshare", "macro_china_cpi", MacroMonthStatAdapter())
+    register("akshare", "macro_china_ppi", MacroMonthStatAdapter())
+    register("akshare", "macro_china_pmi", MacroMonthStatAdapter())
     register("akshare", "macro_china_lpr", MacroTradeDateAdapter())
     register("akshare", "fund_etf_hist_em", FundEtfHistEmAdapter())
     register("akshare", "fund_lof_hist_em", FundLofHistEmAdapter())
