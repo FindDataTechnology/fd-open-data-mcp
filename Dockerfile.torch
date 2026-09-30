@@ -9,9 +9,15 @@ FROM python:3.12-slim
 ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
-    PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple \
     PIP_DEFAULT_TIMEOUT=120 \
     PIP_RETRIES=10
+# Upstream sources by default (GitHub-hosted runners); CN build boxes pass
+#   --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple
+#   --build-arg PIP_EXTRA_INDEX=https://mirrors.aliyun.com/pypi/simple/
+#   --build-arg HF_ENDPOINT=https://hf-mirror.com
+ARG PIP_INDEX_URL=""
+ARG PIP_EXTRA_INDEX=""
+ARG HF_ENDPOINT=
 
 WORKDIR /build
 COPY . .
@@ -19,15 +25,18 @@ COPY . .
 # CPU-only torch wheel ferried into the build context (download.pytorch.org
 # is unreachable at usable speed from domestic networks); remaining deps via
 # the Aliyun PyPI mirror.
-RUN pip install --no-cache-dir wheels/torch-*.whl && \
-    pip install --no-cache-dir -i https://mirrors.aliyun.com/pypi/simple/ . sentence-transformers
+RUN PIP_FLAGS=""; [ -n "$PIP_INDEX_URL" ] && PIP_FLAGS="-i $PIP_INDEX_URL"; \
+    EXTRA_FLAGS=""; [ -n "$PIP_EXTRA_INDEX" ] && EXTRA_FLAGS="--extra-index-url $PIP_EXTRA_INDEX"; \
+    pip install --no-cache-dir $PIP_FLAGS $EXTRA_FLAGS wheels/torch-*.whl && \
+    pip install --no-cache-dir $PIP_FLAGS $EXTRA_FLAGS . sentence-transformers
 
 RUN useradd --create-home --uid 1000 appuser
 USER appuser
 
-# CN-side build: huggingface.co is unreachable from domestic hosts.
-ENV HF_ENDPOINT=https://hf-mirror.com
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
+# CN-side builds export HF_ENDPOINT=https://hf-mirror.com (see ARG above);
+# hosted runners reach huggingface.co directly.
+RUN if [ -n "$HF_ENDPOINT" ]; then export HF_ENDPOINT="$HF_ENDPOINT"; fi; \
+    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
 ENV HF_HOME=/home/appuser/.cache/huggingface
 
