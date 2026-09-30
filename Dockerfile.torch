@@ -43,11 +43,11 @@ RUN PIP_FLAGS=""; [ -n "$PIP_INDEX_URL" ] && PIP_FLAGS="-i $PIP_INDEX_URL"; \
 RUN useradd --create-home --uid 1000 appuser
 
 # MiniLM embedding model, two ways in: CI ferries a prebuilt HF hub cache
-# into hf-cache/ (the same hub layout fastembed resolves through
-# huggingface_hub — snapshot includes the ONNX graph); an empty ferry
-# (in-country Jenkins context, hf-cache holds only .keep) falls back to a
-# build-time fetch via HF_ENDPOINT, where the mirror behaves. The model must
-# live in the runtime user's cache either way — k8s sets HF_HUB_OFFLINE=1.
+# into hf-cache/ — for qdrant/all-MiniLM-L6-v2-onnx, fastembed's actual HF
+# source (model.onnx at repo root); an empty ferry (in-country Jenkins
+# context, hf-cache holds only .keep) falls back to a build-time fetch via
+# HF_ENDPOINT, where the mirror behaves. The model must live in the runtime
+# user's cache either way — k8s sets HF_HUB_OFFLINE=1.
 COPY hf-cache/ /tmp/hf-ferry/
 RUN if [ -d /tmp/hf-ferry/hub ] && [ -n "$(ls -A /tmp/hf-ferry/hub 2>/dev/null)" ]; then \
         mkdir -p /home/appuser/.cache/huggingface && \
@@ -57,7 +57,7 @@ RUN if [ -d /tmp/hf-ferry/hub ] && [ -n "$(ls -A /tmp/hf-ferry/hub 2>/dev/null)"
 
 USER appuser
 ENV HF_HOME=/home/appuser/.cache/huggingface
-RUN if [ -d "$HF_HOME/hub/models--sentence-transformers--all-MiniLM-L6-v2" ]; then \
+RUN if [ -d "$HF_HOME/hub/models--qdrant--all-MiniLM-L6-v2-onnx" ]; then \
         HF_HUB_OFFLINE=1 python -c "from fd_open_data_mcp.embeddings.fastembed_backend import FastembedEncoder; FastembedEncoder('all-MiniLM-L6-v2')"; \
     else \
         if [ -n "$HF_ENDPOINT" ]; then export HF_ENDPOINT="$HF_ENDPOINT"; fi; \

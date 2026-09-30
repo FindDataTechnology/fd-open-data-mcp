@@ -48,11 +48,16 @@ jobs:
           python - <<'EOF'
           import os
           from huggingface_hub import snapshot_download
+          # fastembed resolves this model from qdrant/all-MiniLM-L6-v2-onnx
+          # (model.onnx at repo root) — its HF source, NOT the
+          # sentence-transformers repo; the ferry must cache exactly that or
+          # the offline bake misses.
+          repo = "qdrant/all-MiniLM-L6-v2-onnx"
           last = None
           for endpoint in ("https://huggingface.co", "https://hf-mirror.com"):
               os.environ["HF_ENDPOINT"] = endpoint
               try:
-                  p = snapshot_download("sentence-transformers/all-MiniLM-L6-v2")
+                  p = snapshot_download(repo)
                   print("fetched via", endpoint, "->", p)
                   break
               except Exception as e:
