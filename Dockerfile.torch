@@ -42,22 +42,25 @@ RUN PIP_FLAGS=""; [ -n "$PIP_INDEX_URL" ] && PIP_FLAGS="-i $PIP_INDEX_URL"; \
 
 RUN useradd --create-home --uid 1000 appuser
 
-# MiniLM embedding model, two ways in: CI ferries a prebuilt HF hub cache
-# into hf-cache/ — for qdrant/all-MiniLM-L6-v2-onnx, fastembed's actual HF
-# source (model.onnx at repo root); an empty ferry (in-country Jenkins
-# context, hf-cache holds only .keep) falls back to a build-time fetch via
-# HF_ENDPOINT, where the mirror behaves. The model must live in the runtime
-# user's cache either way — k8s sets HF_HUB_OFFLINE=1.
+# MiniLM model, two ways in: CI ferries a prebuilt HF hub cache for qdrant/
+# all-MiniLM-L6-v2-onnx (fastembed's HF source, model.onnx at repo root).
+# fastembed passes its cache_dir to huggingface_hub explicitly, which
+# OVERRIDES HF_HOME — so the hub layout must sit DIRECTLY under
+# FD_MCP_FASTEMBED_CACHE, not under HF_HOME/hub. An empty ferry (CN Jenkins
+# context, hf-cache holds only .keep) falls back to a build-time fastembed
+# fetch via HF_ENDPOINT into the same dir. The k8s deployment sets
+# HF_HUB_OFFLINE=1 and resolves everything from the baked dir.
 COPY hf-cache/ /tmp/hf-ferry/
+ENV FD_MCP_FASTEMBED_CACHE=/home/appuser/.cache/fastembed-model
 RUN if [ -d /tmp/hf-ferry/hub ] && [ -n "$(ls -A /tmp/hf-ferry/hub 2>/dev/null)" ]; then \
-        mkdir -p /home/appuser/.cache/huggingface && \
-        cp -r /tmp/hf-ferry/hub /home/appuser/.cache/huggingface/ && \
+        mkdir -p "$FD_MCP_FASTEMBED_CACHE" && \
+        cp -r /tmp/hf-ferry/hub/models--* "$FD_MCP_FASTEMBED_CACHE/" && \
         chown -R 1000:1000 /home/appuser/.cache; \
     fi && rm -rf /tmp/hf-ferry
 
 USER appuser
 ENV HF_HOME=/home/appuser/.cache/huggingface
-RUN if [ -d "$HF_HOME/hub/models--qdrant--all-MiniLM-L6-v2-onnx" ]; then \
+RUN if [ -d "$FD_MCP_FASTEMBED_CACHE/models--qdrant--all-MiniLM-L6-v2-onnx" ]; then \
         HF_HUB_OFFLINE=1 python -c "from fd_open_data_mcp.embeddings.fastembed_backend import FastembedEncoder; FastembedEncoder('all-MiniLM-L6-v2')"; \
     else \
         if [ -n "$HF_ENDPOINT" ]; then export HF_ENDPOINT="$HF_ENDPOINT"; fi; \

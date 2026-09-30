@@ -46,10 +46,17 @@ class FastembedEncoder:
 
         self.model_name = model_name
         self.resolved_id = resolve_model_id(model_name)
+        # fastembed hands its cache_dir to huggingface_hub's snapshot_download,
+        # where an explicit cache_dir OVERRIDES HF_HOME — a model baked under
+        # HF_HOME/hub is invisible to it offline. FD_MCP_FASTEMBED_CACHE pins
+        # one explicit dir holding the hub layout directly (what the image
+        # bakes); unset = fastembed's own defaults (networked dev machines).
+        cache_dir = os.environ.get("FD_MCP_FASTEMBED_CACHE") or None
         # HF_HUB_OFFLINE=1 must short-circuit fastembed's model_info()/
         # list_repo_tree() metadata calls, not just the file downloads.
         self._model = TextEmbedding(
             model_name=self.resolved_id,
+            cache_dir=cache_dir,
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "") == "1",
         )
 
