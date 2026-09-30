@@ -119,6 +119,35 @@ def test_encoder_str_and_list_semantics(monkeypatch):
     assert single.tolist() == [0.0, 0.0, 0.0, 0.0]
 
 
+def test_encoder_surface_covers_sentence_transformer_contract(monkeypatch):
+    """Every model.* method the search paths call must exist on the encoder.
+
+    semantic_search calls get_embedding_dimension() on every query (found
+    missing in production regression 2026-10-01); this test pins the full
+    consumed surface so a future backend swap can't miss one again.
+    """
+
+    class FakeTextEmbedding:
+        def __init__(self, **kwargs):
+            pass
+
+        def embed(self, seq):
+            for _ in seq:
+                yield np.zeros(4, dtype=np.float32)
+
+    fake_module = types.ModuleType("fastembed")
+    fake_module.TextEmbedding = FakeTextEmbedding
+    monkeypatch.setitem(sys.modules, "fastembed", fake_module)
+
+    encoder = FastembedEncoder("all-MiniLM-L6-v2")
+    # Methods referenced across ai_search/semantic_search/entity_search/generator
+    for attr in ("encode", "get_embedding_dimension"):
+        assert hasattr(encoder, attr), f"missing SentenceTransformer API: {attr}"
+    assert encoder.get_embedding_dimension() == 4
+    # dimension probe must be cached, not re-embedded per call
+    assert encoder.get_embedding_dimension() == 4
+
+
 @pytest.mark.network
 def test_real_backend_dims():
     """Real fastembed run: the default model embeds to 384 dims (downloads)."""

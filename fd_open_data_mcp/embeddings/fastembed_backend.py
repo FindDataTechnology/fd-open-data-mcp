@@ -46,6 +46,7 @@ class FastembedEncoder:
 
         self.model_name = model_name
         self.resolved_id = resolve_model_id(model_name)
+        self._dim: int | None = None
         # fastembed hands its cache_dir to huggingface_hub's snapshot_download,
         # where an explicit cache_dir OVERRIDES HF_HOME — a model baked under
         # HF_HOME/hub is invisible to it offline. FD_MCP_FASTEMBED_CACHE pins
@@ -59,6 +60,12 @@ class FastembedEncoder:
             cache_dir=cache_dir,
             local_files_only=os.environ.get("HF_HUB_OFFLINE", "") == "1",
         )
+
+    def get_embedding_dimension(self) -> int:
+        """SentenceTransformer-compatible dimension probe (cached)."""
+        if self._dim is None:
+            self._dim = int(self.encode(["dimension probe"]).shape[1])
+        return self._dim
 
     def encode(self, texts: Any, show_progress_bar: bool = False, **_: Any) -> np.ndarray:
         single = isinstance(texts, str)
