@@ -18,7 +18,8 @@
 # 1) 从 PyPI 安装完整栈。
 #    fd-open-data-protocol 被传递引入；fd-polygon 与 fd-cn-report 经 entry-point
 #    自动注册。去掉 "[data]" 可轻量安装（仅 MCP 服务器 + CLI，不含
-#    akshare/yfinance/playwright SDK）。
+#    akshare/yfinance SDK）。"[data]" 不含浏览器渲染栈；需要
+#    scrapling/playwright 时装 "[data,browser]"。
 pip install "fd-open-data-mcp[data]" fd-polygon fd-cn-report
 
 # 2) 初始化本体数据库并接通每一层：目录 -> 概念 -> 列绑定 -> 每源实体 id

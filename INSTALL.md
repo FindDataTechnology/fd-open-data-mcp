@@ -26,7 +26,9 @@ installed — no manual wiring.
 
 ```bash
 # Drop "[data]" for a lighter install (MCP server + CLI only,
-# without the akshare/yfinance/playwright SDKs).
+# without the akshare/yfinance SDKs). "[data]" excludes browser
+# rendering; add "[data,browser]" when scrapling/playwright are
+# needed (browser-rendering sources).
 pip install "fd-open-data-mcp[data]" fd-polygon fd-cn-report
 ```
 

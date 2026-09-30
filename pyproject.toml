@@ -45,6 +45,10 @@ markers = [
 ]
 
 [project.optional-dependencies]
+# Data-source stack WITHOUT browser rendering (image-slimming, 2026-10-01):
+# scrapling/playwright moved to [browser] — nothing in the crawl fleet imports
+# them; the industry line installs its own browser stack. Keep this extra
+# browser-free so the fleet image stays slim across future releases.
 data = [
     "akshare>=1.17",
     "yfinance>=0.2",
@@ -53,15 +57,23 @@ data = [
     "wbgapi>=1.0",
     "requests>=2.31",
     "beautifulsoup4>=4.12",
+]
+# Opt-in browser rendering (industry-line sources, browser-based scraping).
+# Install as fd-open-data-mcp[data,browser] where a browser stack is needed.
+browser = [
     "scrapling>=0.4.7",
     "playwright>=1.40",
 ]
 dev = ["pytest>=8.0"]
-# Semantic search (ai_search / semantic_search). torch is sentence-transformers'
-# backend; CN builds take the CPU wheel from the Aliyun pytorch-wheels mirror
-# (the default PyPI linux wheel is the multi-GB CUDA build) or sit on the
-# fd-open-data-mcp:torch image, which bakes both the package and the model.
+# Semantic search (ai_search / semantic_search). fastembed runs the same
+# MiniLM weights on onnxruntime (~15MB) where torch needed ~195MB; vectors
+# stay compatible (same model, same dims — see openspec image-slimming).
+# [search-legacy] keeps the sentence-transformers/torch path for exotic
+# models fastembed does not carry.
 search = [
+    "fastembed>=0.3",
+]
+search-legacy = [
     "sentence-transformers>=2.7",
 ]
 
