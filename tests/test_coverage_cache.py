@@ -106,6 +106,31 @@ class TestAggregationEquivalence:
                 for r in coverage_by_concept(session, concept_id=1)] == [1]
 
 
+class TestFreshnessParsing:
+    """Dirty date shapes in semantic_observations.date that the fast
+    aggregate finally surfaces (panel-data-coverage-cache apply round 3)."""
+
+    def test_bare_year_reads_as_year_end(self):
+        from fd_open_data_mcp.panel.charts import freshness_days
+        d = freshness_days("2025", today=dt.date(2026, 9, 30))
+        assert d == (dt.date(2026, 9, 30) - dt.date(2025, 12, 31)).days
+
+    def test_unparseable_buckets_stale_not_raise(self):
+        from fd_open_data_mcp.panel.charts import freshness_bucket, freshness_days
+        assert freshness_days("garbage") == float("inf")
+        assert freshness_bucket(freshness_days("garbage")) == "stale"
+
+    def test_page_renders_with_dirty_dates(self, session):
+        from fd_open_data_mcp.panel.app import app
+        client = TestClient(app)
+        _seed_concept(session, 1)
+        _obs(session, 1, date="2025")            # bare-year row
+        _obs(session, 1, entity_id=2, date="junk-d8")
+        session.commit()
+        r = client.get("/panel/data")
+        assert r.status_code == 200
+
+
 class TestRefreshCache:
     def test_refresh_populates_and_reads(self, session):
         _seed_concept(session, 1)

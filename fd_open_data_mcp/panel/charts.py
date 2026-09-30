@@ -107,11 +107,22 @@ def freshness_bucket(days: float | None) -> str:
 
 
 def freshness_days(latest_date, today: dt.date | None = None) -> float | None:
-    """Days since `latest_date` (a date / ISO string); None when never observed."""
+    """Days since `latest_date` (a date / ISO string); None when never observed.
+
+    Tolerates two real shapes in ``semantic_observations.date``: bare years
+    ('2025' from some yearly writers — read as the canonical year-end 12-31)
+    and unparseable strings (observed but unknown freshness -> inf, which
+    buckets as stale instead of raising or inflating "never")."""
     if latest_date is None:
         return None
     if isinstance(latest_date, str):
-        latest_date = dt.date.fromisoformat(latest_date[:10])
+        s = latest_date[:10].strip()
+        if len(s) == 4 and s.isdigit():
+            s += "-12-31"
+        try:
+            latest_date = dt.date.fromisoformat(s)
+        except ValueError:
+            return float("inf")
     if isinstance(latest_date, dt.datetime):
         latest_date = latest_date.date()
     today = today or dt.date.today()
