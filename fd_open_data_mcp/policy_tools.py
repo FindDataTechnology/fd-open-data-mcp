@@ -394,15 +394,34 @@ def register_policy_tools(mcp: FastMCP) -> None:
             entity_type: Restrict the per-concept listing to one entity type.
             detail: Return the full per-concept listing even without filters.
         """
-        from fd_open_data_mcp.visibility.coverage import coverage_by_concept
+        from fd_open_data_mcp.visibility.coverage import (
+            cached_concept_coverage, coverage_by_concept)
         from fd_open_data_mcp.visibility.census import latest_census
 
         s = _session()
         try:
-            if concept_id is not None or entity_type is not None or detail:
+            # filtered listings are sub-second live (point-column group-by
+            # under the uq index prefix); the unfiltered full listing reads
+            # the concept_coverage cache and reports its sample time
+            # (panel-data-coverage-cache design D6)
+            if concept_id is not None or entity_type is not None:
                 return {
                     "concepts": coverage_by_concept(s, concept_id=concept_id,
                                                     entity_type=entity_type),
+                    "stores": latest_census(s),
+                }
+            if detail:
+                cached = cached_concept_coverage(s)
+                if cached["concepts"]:
+                    return {
+                        "concepts": cached["concepts"],
+                        "sampled_at": (cached["sampled_at"].isoformat()
+                                       if cached["sampled_at"] else None),
+                        "stores": latest_census(s),
+                    }
+                return {
+                    "concepts": coverage_by_concept(s),
+                    "live": True,
                     "stores": latest_census(s),
                 }
             return {**_observation_summary(s), "stores": latest_census(s)}

@@ -4,7 +4,12 @@
 {% block content %}
 <h2>数据覆盖 <span class="en">Data coverage</span></h2>
 <p class="muted">{{ n_concepts }} 个概念有观测 concepts with observations · {{ total_rows }} local rows 本地行 ·
+   {% if coverage_live %}覆盖为实时 live coverage{% else %}覆盖采样于 coverage sampled {{ coverage_age_hours }}h 前{% if coverage_stale %} <span class="badge refused">陈旧 stale</span>{% endif %}{% endif %} ·
    {% if census %}{{ "{:,}".format(census_total) }} across all stores 全部存储合计{% else %}census 尚未采样 not yet sampled{% endif %}</p>
+
+<form class="inline-form" method="post" action="/panel/data/coverage/refresh">
+  <button class="btn" type="submit">刷新覆盖 Refresh coverage</button>
+</form>
 
 {% if census %}
 <h3>存储 <span class="en">Stores</span> <span class="muted">（最新普查 latest census）</span></h3>

@@ -617,6 +617,29 @@ class DataCensus(Base):
         }
 
 
+class ConceptCoverage(Base):
+    """Per-concept coverage cache (panel-data-coverage-cache).
+
+    One row per concept with observations; ``/panel/data`` and the
+    ``data_stats`` unfiltered detail read these rows instead of aggregating
+    6M+ ``semantic_observations`` live (~102 s as previously formulated).
+    ``rows`` counts covered observation POINTS (five-column tuple, coexisting
+    sources deduped to one), matching ``coverage_by_concept``. Refreshed
+    hourly by the panel background task (single-flight across instances via
+    advisory lock) and by an explicit panel action; pages compute live only
+    while this cache is empty (first-boot bounded fallback).
+    """
+    __tablename__ = "concept_coverage"
+
+    concept_id = Column(Integer, ForeignKey("concepts.id", ondelete="CASCADE"),
+                        primary_key=True)
+    rows = Column(Integer, nullable=False)           # covered observation points
+    latest_date = Column(String(64), nullable=True)  # canonical YYYY-MM-DD
+    last_fetch = Column(DateTime, nullable=True)
+    sources = Column(Integer, nullable=False, default=0)
+    computed_at = Column(DateTime, nullable=False, default=_now)
+
+
 class CoverageWave(Base):
     """Crawl-coverage expansion wave bookkeeping (expand-crawl-coverage).
 

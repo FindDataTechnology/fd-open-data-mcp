@@ -7,11 +7,13 @@ or mounted under /panel via ``mcp.http_app().mount``. All routes hit the same
 """
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import json
 import logging
 import os
 import urllib.request
+from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request, Response, WebSocket
@@ -46,6 +48,12 @@ POLL_SECONDS = 15
 RECONCILER_QUIET_HOURS = 24
 # census rows older than this show a staleness marker (add-shard-aware-coverage)
 CENSUS_STALE_HOURS = 24
+# coverage cache rows older than this show a staleness marker
+# (panel-data-coverage-cache design D7: hourly refresh × 6 consecutive
+# misses before the badge fires — anomaly signal, not noise)
+COVERAGE_STALE_HOURS = 6
+# off-round minute for the hourly coverage-cache refresh (scheduler convention)
+COVERAGE_REFRESH_MINUTE = 23
 
 # panel-ops-console 6.x: frequency-template proposals. The cron proposals and
 # the daily trailing-1d date policy are input aids only — the saved artifact is
@@ -299,8 +307,45 @@ def _policy_from_form(form) -> dict:
     }
 
 
+async def _coverage_refresh_loop() -> None:
+    """Hourly concept-coverage cache refresh (panel-data-coverage-cache D2).
+
+    One kick ~30 s after boot so a fresh deploy populates the cache without
+    waiting up to an hour; the advisory lock inside refresh_concept_coverage
+    dedups when several instances share one database. DB work runs in a
+    worker thread — the aggregate takes seconds and must not block the loop.
+    """
+    from fd_open_data_mcp.visibility.coverage import refresh_concept_coverage
+
+    await asyncio.sleep(30)
+    while True:
+        try:
+            def _run() -> dict:
+                s = _session()
+                try:
+                    return refresh_concept_coverage(s)
+                finally:
+                    s.close()
+            logger.info("coverage refresh: %s", await asyncio.to_thread(_run))
+        except Exception:
+            logger.exception("coverage refresh failed")
+        now = dt.datetime.utcnow()
+        nxt = now.replace(minute=COVERAGE_REFRESH_MINUTE, second=0,
+                          microsecond=0)
+        if nxt <= now:
+            nxt += dt.timedelta(hours=1)
+        await asyncio.sleep((nxt - now).total_seconds())
+
+
 def create_app() -> FastAPI:
-    app = FastAPI(title="Crawl Control Center")
+    @asynccontextmanager
+    async def _lifespan(app: FastAPI):
+        task = asyncio.get_running_loop().create_task(
+            _coverage_refresh_loop())
+        yield
+        task.cancel()
+
+    app = FastAPI(title="Crawl Control Center", lifespan=_lifespan)
     app.mount("/panel/static", StaticFiles(directory=str(HERE / "static")),
               name="panel_static")
 
@@ -631,26 +676,36 @@ def create_app() -> FastAPI:
             cid = None
         from fd_open_data_mcp.panel.charts import (
             freshness_bucket, freshness_days, heatmap_tiles)
-        from fd_open_data_mcp.visibility.coverage import coverage_by_concept
+        from fd_open_data_mcp.visibility.coverage import (
+            cached_concept_coverage, coverage_by_concept)
 
         s = _session()
         try:
-            # heatmap counts come from the unfiltered universe; never-observed
+            # heatmap counts come from the unfiltered universe, served from
+            # the coverage cache; one live pass only while the cache is empty
+            # (first-boot bounded fallback, design D5). never-observed
             # concepts appear in no observation row, so count them from Concept
-            all_rows = coverage_by_concept(s)
+            cached = cached_concept_coverage(s)
+            universe_rows = cached["concepts"] or coverage_by_concept(s)
+            coverage_live = not cached["concepts"]
             universe = (s.query(Concept)
                         .filter_by(deprecated=False).count())
             counts: dict[str, int] = {}
-            for r in all_rows:
+            for r in universe_rows:
                 key = freshness_bucket(freshness_days(r["latest_date"]))
                 counts[key] = counts.get(key, 0) + 1
             counts["never"] = max(
-                0, universe - len({r["concept_id"] for r in all_rows}))
+                0, universe - len({r["concept_id"] for r in universe_rows}))
             heat = heatmap_tiles(counts)
 
-            rows = (coverage_by_concept(s, concept_id=cid,
-                                        entity_type=entity_type or None)
-                    if cid or entity_type else all_rows)
+            # filtered listings are sub-second live (point-column group-by
+            # under the uq index prefix); unfiltered listings read the cache
+            if cid or entity_type:
+                rows = coverage_by_concept(s, concept_id=cid,
+                                           entity_type=entity_type or None)
+                coverage_live = True
+            else:
+                rows = universe_rows
             if freshness:
                 rows = [r for r in rows
                         if freshness_bucket(freshness_days(r["latest_date"])) == freshness]
@@ -663,9 +718,25 @@ def create_app() -> FastAPI:
                  "census": census_rows,
                  "census_total": sum(r.get("approx_rows") or 0 for r in census_rows),
                  "concept_id": cid, "entity_type": entity_type,
-                 "freshness": freshness, "heat": heat})
+                 "freshness": freshness, "heat": heat,
+                 "coverage_age_hours": cached["age_hours"],
+                 "coverage_stale": (cached["age_hours"] is not None
+                                    and cached["age_hours"] > COVERAGE_STALE_HOURS),
+                 "coverage_live": coverage_live})
         finally:
             s.close()
+
+    @app.post("/panel/data/coverage/refresh")
+    def data_coverage_refresh():
+        from fd_open_data_mcp.visibility.coverage import refresh_concept_coverage
+
+        s = _session()
+        try:
+            out = refresh_concept_coverage(s)
+        finally:
+            s.close()
+        logger.info("manual coverage refresh: %s", out)
+        return RedirectResponse("/panel/data", status_code=303)
 
     @app.post("/panel/data/census/refresh")
     def data_census_refresh():
