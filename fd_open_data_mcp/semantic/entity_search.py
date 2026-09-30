@@ -38,16 +38,11 @@ class EntitySemanticSearch:
         self.engine = create_engine(database_url)
         self.Session = sessionmaker(bind=self.engine)
 
-        # Load embedding model
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(model_name)
-            logger.info(f"Loaded embedding model: {model_name}")
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers is required. Install with: "
-                "pip install sentence-transformers"
-            )
+        # Load embedding model through the shared facade (fastembed first,
+        # sentence-transformers fallback — openspec image-slimming).
+        from fd_open_data_mcp.embeddings.model import get_model
+        self.model = get_model(model_name)
+        logger.info(f"Loaded embedding model: {model_name}")
 
         # Embedding cache: query_text -> embedding_vector
         self._embedding_cache: Dict[str, List[float]] = {}

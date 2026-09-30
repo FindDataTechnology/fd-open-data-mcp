@@ -1,4 +1,4 @@
-"""Entity embedding generator using sentence transformers."""
+"""Entity embedding generator over the shared embedding facade."""
 from __future__ import annotations
 
 import logging
@@ -8,29 +8,24 @@ import json
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker
 
+from fd_open_data_mcp.embeddings.model import get_model
+
 logger = logging.getLogger(__name__)
 
 
 class EntityEmbeddingGenerator:
-    """Generate vector embeddings for entities using sentence transformers."""
+    """Generate vector embeddings for entities via the shared model facade."""
 
     def __init__(self, model_name: str = "all-MiniLM-L6-v2"):
         """
         Initialize the embedding generator.
 
         Args:
-            model_name: Name of the sentence transformer model to use
+            model_name: Name of the embedding model to use
         """
-        try:
-            from sentence_transformers import SentenceTransformer
-            self.model = SentenceTransformer(model_name)
-            self.model_name = model_name
-            logger.info(f"Loaded embedding model: {model_name}")
-        except ImportError:
-            raise ImportError(
-                "sentence-transformers is required. Install with: "
-                "pip install sentence-transformers"
-            )
+        self.model = get_model(model_name)
+        self.model_name = model_name
+        logger.info(f"Loaded embedding model: {model_name}")
 
     def generate_embedding(self, text: str) -> List[float]:
         """
