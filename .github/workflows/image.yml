@@ -35,17 +35,11 @@ jobs:
           username: ${{ secrets.TCR_USERNAME }}
           password: ${{ secrets.TCR_PASSWORD }}
 
-      # Dockerfile.torch expects the CPU torch wheel inside the build context
-      # (COPY . .); GitHub runners reach download.pytorch.org at full speed.
-      - name: Ferry CPU torch wheel into build context
-        run: |
-          mkdir -p wheels
-          pip download torch --index-url https://download.pytorch.org/whl/cpu -d wheels/
-          ls -lh wheels/
-
       # hf-mirror's relative redirects break under buildx on GitHub runners
       # (httpx UnsupportedProtocol), so the MiniLM model is ferried as a
-      # prebuilt hub cache instead of fetched during the image build.
+      # prebuilt hub cache instead of fetched during the image build. The
+      # same hub layout serves fastembed (the snapshot includes the ONNX
+      # graph) — no torch wheel ferry since image-slimming.
       - name: Ferry MiniLM embedding model into build context
         env:
           HF_HOME: ${{ github.workspace }}/hf-cache
