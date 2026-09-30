@@ -2,6 +2,43 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.34] - 2026-10-01
+
+### Changed (image-slimming)
+
+#### Browser stack split out of the `[data]` extra
+
+`scrapling` and `playwright` move from `[data]` to a new `[browser]` extra.
+Nothing in the crawl fleet imports them (verified 2026-10-01: zero
+`scrapling` references in fd-open-data-mcp and scraw-fd-open-data-mcp;
+playwright only in the uncalled `scraping/browser.py` helper, which also
+speaks the remote-browser `BROWSER_CDP_URL` mode), and the industry line
+installs its own playwright+chromium stack in its image. Since the fleet
+image resolves `fd-open-data-mcp[data]` from PyPI at build time, keeping
+the browser packages in `[data]` would have silently re-fattened every
+future fleet rebuild. `pip install fd-open-data-mcp[data]` no longer pulls
+the browser stack; `pip install fd-open-data-mcp[data,browser]` restores
+it where browser rendering is actually needed.
+
+#### Embedding backend chain: fastembed (onnxruntime) first, sentence-transformers fallback
+
+`[search]` now installs `fastembed`, serving the same MiniLM weights
+(`sentence-transformers/all-MiniLM-L6-v2`) as official ONNX exports on a
+~15MB onnxruntime instead of torch's ~195MB compressed runtime;
+`sentence-transformers` moves to `[search-legacy]` for exotic
+`FD_MCP_EMBEDDING_MODEL` values outside fastembed's catalog. The shared
+facade (`fd_open_data_mcp.embeddings.model`) resolves fastembed first and
+falls back to sentence-transformers; `generator.py` and
+`semantic/entity_search.py` no longer instantiate `SentenceTransformer`
+directly, so no backend bypass remains. The vector contract is unchanged —
+same model identity, same 384 dims, `encode(str)` 1-D / `encode(list)` 2-D
+semantics — and failures still surface naming the model.
+
+#### Slim image runtime env cleanup
+
+The plain (non-torch) Dockerfile no longer bakes the tuna pip index into
+the runtime image's ENV; CN mirrors are build-time concerns only.
+
 ## [0.5.33] - 2026-09-29
 
 ### Fixed (panel-indicator-observatory)
