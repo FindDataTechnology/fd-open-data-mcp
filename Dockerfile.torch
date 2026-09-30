@@ -17,7 +17,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 #   --build-arg HF_ENDPOINT=https://hf-mirror.com
 ARG PIP_INDEX_URL=""
 ARG PIP_EXTRA_INDEX=""
-ARG HF_ENDPOINT=
+# hf-mirror by default: it works from both CN and CI runners, while
+# huggingface.co rate-limits anonymous requests from shared GitHub-runner
+# IP ranges (429 metadata errors). Override with --build-arg if needed.
+ARG HF_ENDPOINT="https://hf-mirror.com"
 
 WORKDIR /build
 COPY . .
@@ -33,8 +36,8 @@ RUN PIP_FLAGS=""; [ -n "$PIP_INDEX_URL" ] && PIP_FLAGS="-i $PIP_INDEX_URL"; \
 RUN useradd --create-home --uid 1000 appuser
 USER appuser
 
-# CN-side builds export HF_ENDPOINT=https://hf-mirror.com (see ARG above);
-# hosted runners reach huggingface.co directly.
+# HF_ENDPOINT (ARG above, hf-mirror default) keeps model fetches working from
+# any builder network.
 RUN if [ -n "$HF_ENDPOINT" ]; then export HF_ENDPOINT="$HF_ENDPOINT"; fi; \
     python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
 
