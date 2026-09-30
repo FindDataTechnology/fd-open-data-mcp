@@ -757,13 +757,36 @@ def create_app() -> FastAPI:
         return RedirectResponse("/panel/data", status_code=303)
 
     @app.get("/panel/policies", response_class=HTMLResponse)
-    def policy_list(request: Request):
+    def policy_list(request: Request, q: str = "", page: int = 1):
+        # server-side pagination + search (panel-policies-search-pagination):
+        # the catalog hit 2,485 rows and one giant table froze the browser
+        PAGE_SIZE = 50
+        page = max(1, page)
         s = _session()
         try:
-            policies = s.query(CrawlPolicy).order_by(CrawlPolicy.id).all()
+            from sqlalchemy import or_
+
+            base = s.query(CrawlPolicy)
+            term = q.strip()
+            if term:
+                like = f"%{term}%"
+                filters = [CrawlPolicy.name.ilike(like),
+                           CrawlPolicy.entity_type.ilike(like)]
+                if term.isdigit():
+                    filters.append(CrawlPolicy.id == int(term))
+                base = base.filter(or_(*filters))
+            filtered = base.count()
+            total = s.query(CrawlPolicy).count()
+            policies = (base.order_by(CrawlPolicy.id)
+                        .limit(PAGE_SIZE).offset((page - 1) * PAGE_SIZE).all())
+            pages = max(1, -(-filtered // PAGE_SIZE))
             return templates.TemplateResponse(
                 request, "policies.html",
-                {"policies": [p.toDict() for p in policies], "entity_types": _entity_types(s)})
+                {"policies": [p.toDict() for p in policies],
+                 "entity_types": _entity_types(s),
+                 "q": term, "page": page, "pages": pages,
+                 "filtered": filtered, "total": total,
+                 "page_size": PAGE_SIZE})
         finally:
             s.close()
 

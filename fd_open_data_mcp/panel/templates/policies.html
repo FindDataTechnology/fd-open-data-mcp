@@ -9,14 +9,29 @@
   <a class="btn" href="/panel/policies/template?frequency={{ f }}">{{ f }}</a>
   {% endfor %}
 </p>
+<form method="get" action="/panel/policies">
+  <div class="pill-row">
+    <input type="text" name="q" placeholder="搜索 名称/实体/id search name/entity/id" aria-label="搜索策略" value="{{ q or '' }}" class="filter-w">
+    <button class="btn" type="submit">搜索 Search</button>
+    {% if q %}<a class="btn" href="/panel/policies">清除 Clear</a>{% endif %}
+    <span class="muted">{{ filtered }}{% if q %} / {{ total }}{% endif %} 条 policies · 第 {{ page }}/{{ pages }} 页</span>
+  </div>
+</form>
 <div class="table-wrap">
 <table>
   <thead>
   <tr>{{ th('ID') }}{{ th('名称', 'Name') }}{{ th('实体', 'Entity') }}{{ th('概念', 'Concepts') }}{{ th('模式', 'Mode') }}{{ th('频率', 'Freq') }}{{ th('Cron', 'tz') }}{{ th('上次运行', 'Last run') }}{{ th('启用', 'Enabled') }}<th></th></tr>
   </thead>
   {% for p in policies %}{% include "_policy_row.html" %}  {% else %}
-  <tr><td colspan="10" class="muted">暂无策略 No policies yet. <a href="/panel/policies/new">创建一个 Create one</a>.</td></tr>
+  <tr><td colspan="10" class="muted">没有匹配的策略 No policies match.{% if not total %} <a href="/panel/policies/new">创建一个 Create one</a>.{% endif %}</td></tr>
   {% endfor %}
 </table>
 </div>
+{% if pages > 1 %}
+<p class="pill-row">
+  {% if page > 1 %}<a class="btn" href="/panel/policies?q={{ q }}&page={{ page - 1 }}">‹ 上一页 Prev</a>{% endif %}
+  {% if page < pages %}<a class="btn" href="/panel/policies?q={{ q }}&page={{ page + 1 }}">下一页 Next ›</a>{% endif %}
+  <span class="muted">共 {{ pages }} 页</span>
+</p>
+{% endif %}
 {% endblock %}
