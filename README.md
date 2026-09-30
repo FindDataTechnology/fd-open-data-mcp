@@ -27,3 +27,8 @@ coexisted).
 New schema changes never land here. They land as revisions in
 `alembic/versions/`; `alembic upgrade --sql` produces a reviewable psql
 runbook when one is wanted.
+
+## Image publish
+
+Images are built by GitHub Actions (`.github/workflows/image.yml`) and pushed to
+Tencent TCR personal edition: `ccr.ccs.tencentyun.com/finddata/fd-open-data-mcp:sha-<short>` (+ rolling `main`). Release ritual: dev pushes go to gitee; publishing = `git push github main`. The Jenkins→Harbor path is the fallback channel only.
