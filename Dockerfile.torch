@@ -34,14 +34,28 @@ RUN PIP_FLAGS=""; [ -n "$PIP_INDEX_URL" ] && PIP_FLAGS="-i $PIP_INDEX_URL"; \
     pip install --no-cache-dir $PIP_FLAGS $EXTRA_FLAGS . sentence-transformers
 
 RUN useradd --create-home --uid 1000 appuser
+
+# MiniLM embedding model, two ways in: CI ferries a prebuilt HF hub cache
+# into hf-cache/ (hf-mirror's relative redirects break on GitHub runners —
+# httpx UnsupportedProtocol); an empty ferry (in-country Jenkins context,
+# hf-cache holds only .keep) falls back to a build-time fetch via
+# HF_ENDPOINT, where the mirror behaves. The model must live in the runtime
+# user's cache either way — k8s sets HF_HUB_OFFLINE=1.
+COPY hf-cache/ /tmp/hf-ferry/
+RUN if [ -d /tmp/hf-ferry/hub ] && [ -n "$(ls -A /tmp/hf-ferry/hub 2>/dev/null)" ]; then \
+        mkdir -p /home/appuser/.cache/huggingface && \
+        cp -r /tmp/hf-ferry/hub /home/appuser/.cache/huggingface/ && \
+        chown -R 1000:1000 /home/appuser/.cache; \
+    fi && rm -rf /tmp/hf-ferry
+
 USER appuser
-
-# HF_ENDPOINT (ARG above, hf-mirror default) keeps model fetches working from
-# any builder network.
-RUN if [ -n "$HF_ENDPOINT" ]; then export HF_ENDPOINT="$HF_ENDPOINT"; fi; \
-    python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"
-
 ENV HF_HOME=/home/appuser/.cache/huggingface
+RUN if [ -d "$HF_HOME/hub/models--sentence-transformers--all-MiniLM-L6-v2" ]; then \
+        HF_HUB_OFFLINE=1 python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"; \
+    else \
+        if [ -n "$HF_ENDPOINT" ]; then export HF_ENDPOINT="$HF_ENDPOINT"; fi; \
+        python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('all-MiniLM-L6-v2')"; \
+    fi
 
 # Alembic migration chain, not part of the site-packages install; same
 # rationale as the plain Dockerfile — the deploy-time migration stage

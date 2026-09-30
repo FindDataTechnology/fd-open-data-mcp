@@ -71,3 +71,7 @@ Thumbs.db
 
 # Stray templating dirs
 {{pkgetc}}/
+
+# ferried HF hub cache for CI image builds (workflow fills it; .keep stays)
+hf-cache/*
+!hf-cache/.keep
