@@ -113,6 +113,22 @@ def authorize_url(cfg: dict, state: str) -> str:
     return f"{cfg['issuer']}/auth?{q}"
 
 
+def end_session_url(cfg: dict) -> str:
+    """OIDC RP-initiated logout: Logto clears its own SSO cookie.
+
+    Clearing only the panel session cookie "logs out" into an instant silent
+    re-login — authorize (no ``prompt=login``) rides the still-alive IdP
+    session and hands back a fresh code. ``post_logout_redirect_uri`` is
+    honored when registered in the Logto app config; otherwise Logto shows
+    its own signed-out page — the IdP session is ended either way."""
+    q = urllib.parse.urlencode({
+        "client_id": cfg["client_id"],
+        "post_logout_redirect_uri": cfg["redirect_uri"].replace(
+            "/panel/auth/callback", "/panel"),
+    })
+    return f"{cfg['issuer']}/session/end?{q}"
+
+
 def exchange_code(cfg: dict, code: str) -> dict:
     """Back-channel code→token exchange (D1). Returns the parsed token response."""
     body = urllib.parse.urlencode({

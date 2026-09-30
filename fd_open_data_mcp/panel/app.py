@@ -459,7 +459,14 @@ def create_app() -> FastAPI:
 
     @app.get("/panel/auth/logout")
     def auth_logout():
-        resp = RedirectResponse("/panel", status_code=302)
+        # RP-initiated logout when Logto is configured: the IdP session must
+        # end too, or the next /panel hit silently re-authenticates through
+        # the still-alive SSO cookie (authorize has no prompt=login) and the
+        # user never actually logs out.
+        cfg = _auth.logto_config()
+        target = (_auth.end_session_url(cfg)
+                  if cfg else "/panel")
+        resp = RedirectResponse(target, status_code=302)
         resp.delete_cookie(_auth.SESSION_COOKIE)
         resp.delete_cookie("panel_token")  # clear pre-role-gate browsers
         return resp

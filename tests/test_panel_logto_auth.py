@@ -367,3 +367,35 @@ def test_logout_clears_both_cookies(session, oidc_env):
     names = {v.decode().split("=")[0]
              for k, v in r.headers.raw if k.decode().lower() == "set-cookie"}
     assert {"panel_token", _auth.SESSION_COOKIE} <= names
+
+
+def test_logout_redirects_to_idp_end_session(session, oidc_env):
+    """RP-initiated logout: the IdP session must end too — a local cookie
+    clear alone silently re-authenticates through the alive SSO session."""
+    c = _client()
+    r = c.get("/panel/auth/logout")
+    assert r.status_code == 302
+    loc = r.headers["location"]
+    assert loc.startswith("https://auth.example.com/oidc/session/end?")
+    assert "client_id=cid" in loc
+    assert ("post_logout_redirect_uri="
+            "http%3A%2F%2Fpanel.example.com%2Fpanel") in loc
+
+
+def test_logout_without_logto_stays_local(session, monkeypatch):
+    for k in ("LOGTO_ISSUER", "LOGTO_CLIENT_ID"):
+        monkeypatch.delenv(k, raising=False)
+    c = _client()
+    r = c.get("/panel/auth/logout")
+    assert r.status_code == 302
+    assert r.headers["location"] == "/panel"
+
+
+def test_end_session_url_shape():
+    cfg = {"issuer": "https://auth.example.com/oidc", "client_id": "cid",
+           "client_secret": "s",
+           "redirect_uri": "http://panel.example.com/panel/auth/callback"}
+    url = _auth.end_session_url(cfg)
+    assert url == ("https://auth.example.com/oidc/session/end"
+                   "?client_id=cid"
+                   "&post_logout_redirect_uri=http%3A%2F%2Fpanel.example.com%2Fpanel")
