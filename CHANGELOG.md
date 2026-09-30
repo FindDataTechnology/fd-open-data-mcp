@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.35] - 2026-10-01
+
+### Fixed (image-slimming)
+
+#### FastembedEncoder implements get_embedding_dimension
+
+0.5.34's encoder missed the SentenceTransformer dimension probe that
+semantic_search calls on every query — every semantic_search call on the
+fastembed backend failed with AttributeError. The probe is now computed
+once and cached, and a surface-contract unit test pins every model.* method
+the search paths call so a backend swap cannot silently miss one.
+
 ## [0.5.34] - 2026-10-01
 
 ### Changed (image-slimming)
