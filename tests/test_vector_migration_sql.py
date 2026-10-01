@@ -63,18 +63,21 @@ def mig():
 # ---------------------------------------------------------------------------
 
 def test_revision_is_new_head_of_shipped_chain():
-    """The shipped head is 0004 (indicator-scope scope tables); 0003 keeps
-    its own down_revision wiring (its contract tests live above)."""
+    """The shipped head is 0005 (panel concept-coverage cache); each revision
+    keeps its own down_revision wiring (their contract tests live above)."""
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0004_scope_tables"
-    rev = script.get_revision("0004_scope_tables")
-    assert rev.down_revision == "0003_pgvector_embedding_columns"
+    assert script.get_current_head() == "0005_concept_coverage"
+    rev = script.get_revision("0005_concept_coverage")
+    assert rev.down_revision == "0004_scope_tables"
+    rev4 = script.get_revision("0004_scope_tables")
+    assert rev4.down_revision == "0003_pgvector_embedding_columns"
 
 
-def test_chain_is_linear_to_0004():
+def test_chain_is_linear_head_to_baseline():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0005_concept_coverage",
         "0004_scope_tables",
         "0003_pgvector_embedding_columns",
         "0002_sem_obs_source_aware_key",
@@ -333,6 +336,6 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0004_scope_tables"
+    assert version == "0005_concept_coverage"
     # Guarded no-op: only the alembic ledger exists; no app tables were built.
     assert tables == {"alembic_version"}
