@@ -2,6 +2,45 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Changed (schema-drift-closure)
+
+#### 15 externally-bootstrapped tables adopted into the migration chain
+
+`alembic check` revealed 15 model tables living entirely outside the
+versioned chain (crawl control-plane family, discovery mirrors, scopes,
+registry_entries), masked by the EXTERNALLY_MANAGED_TABLES bridge since
+74963fa. They are now chain-owned:
+
+- **0006_control_plane_adoption**: guarded `CREATE ... IF NOT EXISTS` for
+  the 12 control-plane tables, DDL taken from the live authoritative shapes
+  (per-table reconciliation in the change's reports/adoption-diff.md), so a
+  bootstrapped production migrates as a verified no-op while a fresh
+  database builds the complete schema from the chain alone.
+- **0003** gains a guarded `registry_entries` create before its
+  FK-carrying `registry_indicator_embeddings` (fresh replays need the FK
+  target; the "deliberately not created here" convention is officially
+  overturned). Downgrade still never drops it — the registry pipeline owns
+  the data.
+- Models aligned to production truth: NOT NULLs, deployed constraint/index
+  names (`crawl_items_pkey`, `crawl_identities_source_account_alias_key`,
+  …), the missing `crawl_items.run_id` FK, DESC composite indexes, and
+  drifted defaults (`requested_by 'console'`, `max_attempts 2`,
+  `params '{}'`). scopes keeps the deployed UNIQUE CONSTRAINT
+  (`scopes_name_key`) — the model's unique-index form was the drift.
+- `alembic/env.py` exemption narrowed to the two no-model registry tables;
+  drift detection is back for all 13 model tables (model edits without a
+  revision fail `alembic check` again).
+- CI no longer bootstraps registry_entries: the chain itself satisfies the
+  precondition (Build Check runs upgrade → check → vocabulary on a bare
+  pgvector database).
+
+Verified end-to-end 2026-10-01: empty-DB upgrade, `alembic check` green,
+catalog-digest no-op proof on a bootstrapped database, and a post-rollout
+`\d+` export of the authoritative database byte-identical to the
+pre-rollout snapshot.
+
 ## [0.5.35] - 2026-10-01
 
 ### Fixed (image-slimming)
