@@ -1,5 +1,7 @@
 # fd-open-data-mcp
 
+> **柏讯 Wire 产品线** · [FindData](https://www.finddatatech.cloud/products/wire) 的开放数据供给线——柏讯线开源核心：开放数据本体与语义供给。
+
 [English](README.md) | **中文**
 
 一个**开放数据本体 MCP**：在多数据源的金融/经济数据之上构建语义概念层。你用
