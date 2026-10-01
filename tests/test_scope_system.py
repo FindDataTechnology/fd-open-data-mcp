@@ -106,7 +106,8 @@ def test_pg_revision_0004_contract():
 
 def test_sqlite_chain_upgrade_runs_green(tmp_path, monkeypatch):
     """The acceptance command on the SQLite backend: 'alembic upgrade head'
-    stays green (0004 is a guarded no-op there), and the chain head is 0004."""
+    stays green (PG-only revisions are guarded no-ops there), and the chain
+    head is 0006 (stale 0004 pin caught up 2026-10-01, schema-drift-closure)."""
     from alembic.config import Config
     from alembic import command
     from alembic.script import ScriptDirectory
@@ -116,7 +117,7 @@ def test_sqlite_chain_upgrade_runs_green(tmp_path, monkeypatch):
     monkeypatch.setenv("FD_OPEN_DATA_MCP_DATABASE_URL", f"sqlite:///{tmp_path/'m.db'}")
     command.upgrade(cfg, "head")
     script = ScriptDirectory(str(PROJECT_ROOT / "alembic"))
-    assert script.get_current_head() == "0004_scope_tables"
+    assert script.get_current_head() == "0006_control_plane_adoption"
 
 
 # ─── 3.2 CRUD + 空集校验 + unscoped 保留名 ──────────────────────────────────

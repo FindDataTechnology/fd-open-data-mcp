@@ -26,6 +26,19 @@ consumers build their schema from the models with ``create_all``, never from
 this chain. Downgrade drops the indexes, the vector columns and the new
 table; it does NOT touch ``registry_entries`` and does NOT drop the vector
 extension (other databases on the cluster may depend on it).
+
+registry_entries (schema-drift-closure, 2026-10-01): the old convention of
+"deliberately not created here" is officially overturned — creation is a
+chain responsibility now. Its guarded create had to live in THIS revision
+rather than 0006 because _REGISTRY_DDL carries a hard FK to it and a fresh
+database replays 0003 before any adoption revision could run. The DDL is
+byte-equal to the registry pipeline's guarded one
+(fd_open_data_protocol/registry_store.py REGISTRY_ENTRIES_DDL) and to the
+authoritative production shape (verified_at included — the CI bootstrap this
+replaces had drifted and lacked it). The registry pipeline remains the
+writer; the chain only owns creation, and both sides are IF NOT EXISTS so
+they coexist. Downgrade still never drops it — 57k+ registry rows belong to
+the pipeline, not to this revision's lifecycle.
 """
 from __future__ import annotations
 
@@ -40,8 +53,8 @@ _EMBEDDING_DIM = 384  # all-MiniLM-L6-v2 (fd_open_data_mcp.embeddings.model)
 _BACKFILL_BATCH = 1000
 
 # Cross-task contract (mcp-search-engine-overhaul): other agents code against
-# this DDL verbatim. registry_entries already exists in the authoritative
-# database and is deliberately not created here.
+# this DDL verbatim. registry_entries is created guarded below (see docstring)
+# before this table so the hard FK resolves on a fresh replay.
 _REGISTRY_DDL = """CREATE TABLE IF NOT EXISTS registry_indicator_embeddings (
   id SERIAL PRIMARY KEY,
   registry_entry_id BIGINT NOT NULL UNIQUE REFERENCES registry_entries(id) ON DELETE CASCADE,
@@ -52,6 +65,34 @@ _REGISTRY_DDL = """CREATE TABLE IF NOT EXISTS registry_indicator_embeddings (
   updated_at TIMESTAMP DEFAULT NOW(),
   UNIQUE (model, registry_entry_id)
 );"""
+
+# Byte-equal to the registry pipeline's guarded DDL (registry_store.py) and to
+# the authoritative production shape (\d export 2026-10-01, live-schema-dump).
+# Do not reshape without the pipeline repo in the same change.
+_REGISTRY_ENTRIES_DDL = """CREATE TABLE IF NOT EXISTS registry_entries (
+    id            BIGSERIAL PRIMARY KEY,
+    source_db     TEXT NOT NULL,
+    source_table  TEXT NOT NULL,
+    source_column TEXT NOT NULL DEFAULT '',
+    native_code   TEXT NOT NULL,
+    semantic_code TEXT,
+    name_zh       TEXT,
+    name_en       TEXT,
+    unit          TEXT,
+    frequency     TEXT,
+    domain        TEXT,
+    provenance    JSONB,
+    verified      BOOLEAN NOT NULL DEFAULT FALSE,
+    verified_at   TIMESTAMPTZ,
+    verified_by   TEXT,
+    registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+    updated_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
+    CONSTRAINT uq_registry_anchor UNIQUE (source_db, source_table, source_column, native_code)
+)"""
+_REGISTRY_ENTRIES_INDEX = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_registry_semantic_code "
+    "ON registry_entries (semantic_code) WHERE semantic_code IS NOT NULL"
+)
 
 # Backfill batches: each pass converts at most _BACKFILL_BATCH rows from the
 # JSON payload. concept_embeddings.embedding is JSONB (needs the ::text hop),
@@ -117,6 +158,10 @@ def upgrade() -> None:
             "ALTER TABLE entity_embeddings "
             f"ADD COLUMN IF NOT EXISTS embedding_vec vector({_EMBEDDING_DIM})"
         )
+        # registry_entries first: _REGISTRY_DDL's hard FK resolves against it
+        # (no-op where the registry pipeline already created the table).
+        bind.exec_driver_sql(_REGISTRY_ENTRIES_DDL)
+        bind.exec_driver_sql(_REGISTRY_ENTRIES_INDEX)
         bind.exec_driver_sql(_REGISTRY_DDL)
         _backfill(bind)
         # Indexes after the backfill: HNSW maintenance during a bulk fill is

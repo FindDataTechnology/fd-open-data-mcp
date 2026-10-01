@@ -63,12 +63,14 @@ def mig():
 # ---------------------------------------------------------------------------
 
 def test_revision_is_new_head_of_shipped_chain():
-    """The shipped head is 0005 (panel concept-coverage cache); each revision
+    """The shipped head is 0006 (control-plane adoption); each revision
     keeps its own down_revision wiring (their contract tests live above)."""
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0005_concept_coverage"
-    rev = script.get_revision("0005_concept_coverage")
-    assert rev.down_revision == "0004_scope_tables"
+    assert script.get_current_head() == "0006_control_plane_adoption"
+    rev = script.get_revision("0006_control_plane_adoption")
+    assert rev.down_revision == "0005_concept_coverage"
+    rev5 = script.get_revision("0005_concept_coverage")
+    assert rev5.down_revision == "0004_scope_tables"
     rev4 = script.get_revision("0004_scope_tables")
     assert rev4.down_revision == "0003_pgvector_embedding_columns"
 
@@ -77,6 +79,7 @@ def test_chain_is_linear_head_to_baseline():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0006_control_plane_adoption",
         "0005_concept_coverage",
         "0004_scope_tables",
         "0003_pgvector_embedding_columns",
@@ -195,6 +198,10 @@ def test_upgrade_pg_branch_emits_contract_sql_in_order(mig):
     col_entity = first_index_of(
         "ALTER TABLE entity_embeddings ADD COLUMN IF NOT EXISTS embedding_vec vector(384)"
     )
+    entries = first_index_of("CREATE TABLE IF NOT EXISTS registry_entries")
+    entries_idx = first_index_of(
+        "CREATE UNIQUE INDEX IF NOT EXISTS uq_registry_semantic_code"
+    )
     registry = first_index_of("CREATE TABLE IF NOT EXISTS registry_indicator_embeddings")
     backfill_concept = first_index_of(
         "UPDATE concept_embeddings t SET embedding_vec = t.embedding::text::vector"
@@ -214,10 +221,42 @@ def test_upgrade_pg_branch_emits_contract_sql_in_order(mig):
         "CREATE INDEX IF NOT EXISTS hnsw_registry_indicator_embeddings_vec "
         "ON registry_indicator_embeddings USING hnsw (embedding_vec vector_cosine_ops)"
     )
-    # order: extension -> columns -> registry table -> backfill -> HNSW indexes
+    # order: extension -> columns -> registry_entries -> rie (FK!) -> backfill
+    # -> HNSW indexes. registry_entries MUST precede rie: the hard FK in
+    # _REGISTRY_DDL resolves against it on a fresh replay.
     assert ext < col_concept < col_entity < registry
+    assert entries < entries_idx < registry
     assert registry < backfill_concept < backfill_entity
     assert backfill_entity < index_concept < index_entity < index_registry
+
+
+def test_registry_entries_created_guarded_before_rie(mig):
+    """schema-drift-closure: 0003 owns registry_entries' guarded create (the
+    0006 adoption could not — it runs after the FK). The DDL must be the
+    production shape, including verified_at, which the old CI bootstrap had
+    drifted and lacked."""
+    bind = _run_on_fake_pg(mig)
+    entries = next(
+        s for s in bind.statements
+        if s.startswith("CREATE TABLE IF NOT EXISTS registry_entries")
+    )
+    for fragment in (
+        "verified_at   TIMESTAMPTZ",
+        "CONSTRAINT uq_registry_anchor",
+        "source_column TEXT NOT NULL DEFAULT ''",
+    ):
+        assert fragment in entries, fragment
+    semantic_idx = next(
+        s for s in bind.statements
+        if s.startswith("CREATE UNIQUE INDEX IF NOT EXISTS uq_registry_semantic_code")
+    )
+    assert "WHERE semantic_code IS NOT NULL" in semantic_idx
+    rie = next(
+        s for s in bind.statements
+        if s.startswith("CREATE TABLE IF NOT EXISTS registry_indicator_embeddings")
+    )
+    assert bind.statements.index(entries) < bind.statements.index(rie)
+    assert bind.statements.index(semantic_idx) < bind.statements.index(rie)
 
 
 def test_registry_ddl_matches_contract_verbatim(mig):
@@ -336,6 +375,6 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0005_concept_coverage"
+    assert version == "0006_control_plane_adoption"
     # Guarded no-op: only the alembic ledger exists; no app tables were built.
     assert tables == {"alembic_version"}

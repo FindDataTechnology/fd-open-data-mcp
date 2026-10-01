@@ -31,36 +31,23 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-# Tables that live in the models but are created OUTSIDE this chain: the
-# registry pipeline's catalog (registry_entries), the cross-task DDL contract
-# 0003 creates without models (registry_indicator_embeddings), and the crawl
-# control-plane family bootstrapped out-of-band (scopes included — its model
-# declares a unique index where the bootstrap made a unique constraint).
-# Autogenerate/`alembic check` must not propose drops for them. Tracked for
-# chain takeover by openspec change schema-drift-closure (2026-10-01).
-EXTERNALLY_MANAGED_TABLES = frozenset(
+# Tables with NO model in this repository. They are created by the chain
+# itself (registry_entries since 0003's guarded section, per the
+# schema-drift-closure adoption; registry_indicator_embeddings by 0003's DDL
+# contract) but read/written through raw SQL, so without this exemption
+# autogenerate/`alembic check` would propose DROP TABLE for them. This list
+# no longer masks model drift: every model-declared table was adopted into
+# the chain by 0006_control_plane_adoption and is fully compared.
+_EXTERNALLY_OWNED_NO_MODEL = frozenset(
     {
         "registry_entries",
         "registry_indicator_embeddings",
-        "scopes",
-        "analyses",
-        "candidates",
-        "crawl_identities",
-        "crawl_identity_events",
-        "crawl_items",
-        "crawl_login_stations",
-        "crawl_runs",
-        "crawl_sites",
-        "crawl_sources",
-        "discoveries",
-        "manifests",
-        "pending_runs",
     }
 )
 
 
 def _include_object(obj, name, type_, reflected, compare_to):
-    if type_ == "table" and name in EXTERNALLY_MANAGED_TABLES:
+    if type_ == "table" and name in _EXTERNALLY_OWNED_NO_MODEL:
         return False
     # 0003's expand-contract vector columns: DDL-contract only, deliberately
     # not declared on the models (pgvector types are read via raw SQL in

@@ -43,6 +43,9 @@ from sqlalchemy import (
     String,
     Text,
     UniqueConstraint,
+    func,
+    text,
+    true,
 )
 from sqlalchemy.dialects.postgresql import JSONB as _PG_JSONB
 from sqlalchemy.orm import declarative_base, relationship
@@ -961,12 +964,16 @@ class CrawlSite(Base):
     not registered here (FK)."""
     __tablename__ = "crawl_sites"
 
+    # Column shapes mirror the deployed central DDL exactly (adopted into the
+    # chain by 0006_control_plane_adoption; reports/adoption-diff.md is the
+    # per-column reconciliation record).
     id = Column(Text, primary_key=True)               # e.g. "tencent"
-    description = Column(Text, nullable=True)
-    kind = Column(Text, nullable=True)
-    enabled = Column(Boolean, nullable=True)
+    description = Column(Text, nullable=False, server_default="")
+    kind = Column(Text, nullable=False, server_default="docker")
+    enabled = Column(Boolean, nullable=False, server_default=true())
     last_seen_at = Column(DateTime(timezone=True), nullable=True)
-    created_at = Column(DateTime(timezone=True), default=_now)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=_now, server_default=func.now())
 
     def toDict(self) -> dict:
         return {
@@ -983,14 +990,17 @@ class CrawlSource(Base):
     __tablename__ = "crawl_sources"
 
     source = Column(Text, primary_key=True)
-    site = Column(Text, ForeignKey("crawl_sites.id"), nullable=True, index=True)
+    # No index on site: the deployed table carries none (adoption-diff #5) —
+    # crawl_sources is a few dozen rows, a seq scan beats an index.
+    site = Column(Text, ForeignKey("crawl_sites.id"), nullable=True)
     schedule = Column(Text, nullable=True)            # NULL = 未点亮
-    enabled = Column(Boolean, nullable=False, default=True)
+    enabled = Column(Boolean, nullable=False, default=True, server_default=true())
     last_commit = Column(Text, nullable=True)
     # session-pool: the source's login profile (spiders/<source>/login.py
     # declares it); NULL = anonymous crawl, no identity pool consulted.
     auth_profile = Column(Text, nullable=True)
-    updated_at = Column(DateTime(timezone=True), default=_now)
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        default=_now, server_default=func.now())
 
     def toDict(self) -> dict:
         return {
@@ -1008,10 +1018,10 @@ class CrawlRun(Base):
     __tablename__ = "crawl_runs"
 
     id = Column(Bigint, primary_key=True, autoincrement=True)
-    source = Column(Text, nullable=False, index=True)
+    source = Column(Text, nullable=False)
     kind = Column(Text, nullable=False, default="runtime", server_default="runtime")
-    status = Column(Text, nullable=False, index=True)  # running|success|failed|cancelled|skipped
-    started_at = Column(DateTime(timezone=True), nullable=True)
+    status = Column(Text, nullable=False)  # running|success|failed|cancelled|skipped
+    started_at = Column(DateTime(timezone=True), nullable=False)
     finished_at = Column(DateTime(timezone=True), nullable=True)
     # Prod column is NOT NULL DEFAULT 0 (unknown yield records 0, the same
     # convention federation rows use); the model must match or sqlite fixtures
@@ -1026,7 +1036,16 @@ class CrawlRun(Base):
     # run was injected with (NULL = anonymous run). Alias, not FK — the pool
     # table is keyed (source, account_alias) and rows outlive runs.
     identity_alias = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=_now)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=_now, server_default=func.now())
+
+    # Deployed index (adoption-diff #6): source-scoped run history, newest
+    # first — DESC participates in alembic's index comparison, so it is
+    # declared, not just documented. No standalone status/source indexes:
+    # production has none. Sits after the columns: it references created_at.
+    __table_args__ = (
+        Index("crawl_runs_source_idx", "source", created_at.desc()),
+    )
 
     def toDict(self) -> dict:
         return {
@@ -1047,10 +1066,11 @@ class CrawlItem(Base):
     """Per-run payload rows (crawl_items): item batch jsonb keyed (run, idx)."""
     __tablename__ = "crawl_items"
     __table_args__ = (
-        PrimaryKeyConstraint("run_id", "idx", name="pk_crawl_items"),
+        PrimaryKeyConstraint("run_id", "idx", name="crawl_items_pkey"),
     )
 
-    run_id = Column(Bigint, nullable=False)
+    run_id = Column(Bigint, ForeignKey("crawl_runs.id", ondelete="CASCADE"),
+                    nullable=False)
     idx = Column(Integer, nullable=False)
     payload = Column(JSONB, nullable=False)
 
@@ -1066,24 +1086,28 @@ class PendingRun(Base):
     __table_args__ = (
         CheckConstraint(
             "status in ('pending','claimed','done','failed','cancelled')",
-            name="ck_pending_runs_status"),
-        Index("idx_pending_runs_site_status", "site", "status"),
+            name="pending_runs_status_check"),
+        Index("pending_runs_site_idx", "site", "status", "created_at"),
     )
 
     id = Column(Bigint, primary_key=True, autoincrement=True)
-    source = Column(Text, nullable=False, index=True)
-    site = Column(Text, ForeignKey("crawl_sites.id"), nullable=True, index=True)
-    params = Column(JSONB, nullable=True)             # param overrides for the run
-    requested_by = Column(Text, nullable=False, default="panel")
-    status = Column(Text, nullable=False, default="pending", index=True)
+    source = Column(Text, nullable=False)
+    site = Column(Text, ForeignKey("crawl_sites.id"), nullable=False,
+                  server_default="tencent")
+    params = Column(JSONB, nullable=False, default=dict)  # param overrides; prod DEFAULT '{}' (sqlite can't compile the ::jsonb server default)
+    requested_by = Column(Text, nullable=False, default="console",
+                          server_default="console")
+    status = Column(Text, nullable=False, default="pending",
+                    server_default="pending")
     claimed_by = Column(Text, nullable=True)
     claimed_at = Column(DateTime(timezone=True), nullable=True)
     lease_until = Column(DateTime(timezone=True), nullable=True)
-    attempts = Column(Integer, nullable=False, default=0)
-    max_attempts = Column(Integer, nullable=False, default=3)
+    attempts = Column(Integer, nullable=False, default=0, server_default="0")
+    max_attempts = Column(Integer, nullable=False, default=2, server_default="2")
     run_id = Column(Bigint, nullable=True)            # -> crawl_runs.id once started
     error_head = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=_now)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=_now, server_default=func.now())
     finished_at = Column(DateTime(timezone=True), nullable=True)
 
     def toDict(self) -> dict:
@@ -1124,20 +1148,27 @@ class CrawlIdentity(Base):
     credentials in k8s secrets (credentials_secret_ref) — neither here."""
     __tablename__ = "crawl_identities"
     __table_args__ = (
-        UniqueConstraint("source", "account_alias", name="uq_identity_source_alias"),
+        # Constraint/index names are the deployed ones (adoption-diff #9) so
+        # the adopted revision, production and these models stay byte-equal.
+        UniqueConstraint("source", "account_alias",
+                         name="crawl_identities_source_account_alias_key"),
         CheckConstraint(
             "status in ('login_required','active','cooldown','banned','retired')",
-            name="ck_identity_status"),
+            name="crawl_identities_status_check"),
         CheckConstraint("automation in ('auto','assisted')",
-                        name="ck_identity_automation"),
-        Index("idx_identities_source_status", "source", "status"),
+                        name="crawl_identities_automation_check"),
+        Index("crawl_identities_pool_idx", "source", "status"),
+        Index("crawl_identities_lease_idx", "lease_expires_at",
+              postgresql_where=text("lease_token IS NOT NULL")),
     )
 
     id = Column(Bigint, primary_key=True, autoincrement=True)
     source = Column(Text, nullable=False)
     account_alias = Column(Text, nullable=False)
-    status = Column(Text, nullable=False, default="login_required")
-    automation = Column(Text, nullable=False, default="assisted")  # auto | assisted
+    status = Column(Text, nullable=False, default="login_required",
+                    server_default="login_required")
+    automation = Column(Text, nullable=False, default="assisted",
+                        server_default="assisted")  # auto | assisted
     egress_ref = Column(Text, nullable=True)            # identity-level egress binding
     credentials_secret_ref = Column(Text, nullable=True)
     session_ref = Column(Text, nullable=True)           # encrypted jar in RustFS
@@ -1147,10 +1178,14 @@ class CrawlIdentity(Base):
     last_login_at = Column(DateTime(timezone=True), nullable=True)
     last_probe_at = Column(DateTime(timezone=True), nullable=True)
     last_success_at = Column(DateTime(timezone=True), nullable=True)
-    consecutive_zero_runs = Column(Integer, nullable=False, default=0)
-    failure_count = Column(Integer, nullable=False, default=0)
-    created_at = Column(DateTime(timezone=True), default=_now)
-    updated_at = Column(DateTime(timezone=True), default=_now, onupdate=_now)
+    consecutive_zero_runs = Column(Integer, nullable=False, default=0,
+                                   server_default="0")
+    failure_count = Column(Integer, nullable=False, default=0,
+                           server_default="0")
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=_now, server_default=func.now())
+    updated_at = Column(DateTime(timezone=True), nullable=False,
+                        default=_now, onupdate=_now, server_default=func.now())
 
     def toDict(self) -> dict:
         return {
@@ -1174,14 +1209,6 @@ class CrawlIdentityEvent(Base):
     login/probe/lease trail the spec requires. lease_token correlates the
     event with the lease it belongs to."""
     __tablename__ = "crawl_identity_events"
-    __table_args__ = (
-        CheckConstraint(
-            "kind in ('login','probe','small_batch','lease_acquired',"
-            "'lease_released','lease_expired','auth_failed','suspect_yield',"
-            "'banned','note')",
-            name="ck_identity_event_kind"),
-        Index("idx_identity_events_identity_created", "identity_id", "created_at"),
-    )
 
     id = Column(Bigint, primary_key=True, autoincrement=True)
     identity_id = Column(Bigint,
@@ -1190,7 +1217,20 @@ class CrawlIdentityEvent(Base):
     kind = Column(Text, nullable=False)
     detail = Column(Text, nullable=True)
     lease_token = Column(Text, nullable=True)
-    created_at = Column(DateTime(timezone=True), default=_now)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=_now, server_default=func.now())
+
+    # Deployed index (adoption-diff #10); DESC is compared by alembic, hence
+    # declared on the column object (placed after the columns it references).
+    __table_args__ = (
+        CheckConstraint(
+            "kind in ('login','probe','small_batch','lease_acquired',"
+            "'lease_released','lease_expired','auth_failed','suspect_yield',"
+            "'banned','note')",
+            name="crawl_identity_events_kind_check"),
+        Index("crawl_identity_events_identity_idx", "identity_id",
+              created_at.desc()),
+    )
 
     def toDict(self) -> dict:
         return {
@@ -1224,8 +1264,7 @@ class CrawlLoginStation(Base):
         CheckConstraint(
             "status in ('launching','waiting_operator','completed','failed',"
             "'timeout','reclaimed')",
-            name="ck_login_station_status"),
-        Index("idx_login_stations_identity", "identity_id"),
+            name="crawl_login_stations_status_check"),
     )
 
     id = Column(Bigint, primary_key=True, autoincrement=True)
@@ -1234,10 +1273,12 @@ class CrawlLoginStation(Base):
                          nullable=False)
     source = Column(Text, nullable=False)
     account_alias = Column(Text, nullable=False)
-    status = Column(Text, nullable=False, default="launching")
+    status = Column(Text, nullable=False, default="launching",
+                    server_default="launching")
     proxy_url = Column(Text, nullable=True)     # the identity egress the station dials through
     note = Column(Text, nullable=True)          # job/service/progress notes (runtime overwrites)
-    created_at = Column(DateTime(timezone=True), default=_now)
+    created_at = Column(DateTime(timezone=True), nullable=False,
+                        default=_now, server_default=func.now())
     deadline_at = Column(DateTime(timezone=True), nullable=True)
     finished_at = Column(DateTime(timezone=True), nullable=True)
 
@@ -1275,9 +1316,9 @@ class Discovery(Base):
     __tablename__ = "discoveries"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    query = Column(Text, nullable=True)
-    query_type = Column(String(16), nullable=True)     # e.g. topic|domain
-    status = Column(String(32), nullable=True, index=True)
+    query = Column(Text, nullable=False)
+    query_type = Column(String(16), nullable=False)   # e.g. topic|domain
+    status = Column(String(32), nullable=False)
     created_at = Column(DateTime, default=_now_naive)
     updated_at = Column(DateTime, default=_now_naive)
 
@@ -1295,8 +1336,8 @@ class Candidate(Base):
     __tablename__ = "candidates"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    discovery_id = Column(Integer, ForeignKey("discoveries.id"), index=True)
-    url = Column(Text, nullable=True)
+    discovery_id = Column(Integer, ForeignKey("discoveries.id"), nullable=False)
+    url = Column(Text, nullable=False)
     title = Column(Text, nullable=True)
     description = Column(Text, nullable=True)
     estimated_data_type = Column(String(64), nullable=True)
@@ -1323,9 +1364,9 @@ class Analysis(Base):
     __tablename__ = "analyses"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    candidate_id = Column(Integer, ForeignKey("candidates.id"), index=True)
-    discovery_id = Column(Integer, ForeignKey("discoveries.id"), index=True)
-    page_url = Column(Text, nullable=True)
+    candidate_id = Column(Integer, ForeignKey("candidates.id"), nullable=False)
+    discovery_id = Column(Integer, ForeignKey("discoveries.id"), nullable=False)
+    page_url = Column(Text, nullable=False)
     page_title = Column(Text, nullable=True)
     dom_snapshot = Column(Text, nullable=True)
     api_endpoints = Column(Text, nullable=True)
@@ -1333,7 +1374,7 @@ class Analysis(Base):
     download_links = Column(Text, nullable=True)
     forms = Column(Text, nullable=True)
     raw_analysis = Column(Text, nullable=True)
-    status = Column(String(32), nullable=True, index=True)
+    status = Column(String(32), nullable=False)
     created_at = Column(DateTime, default=_now_naive)
 
     def toDict(self) -> dict:
@@ -1351,12 +1392,12 @@ class SourceManifest(Base):
     __tablename__ = "manifests"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    discovery_id = Column(Integer, ForeignKey("discoveries.id"), index=True)
-    analysis_id = Column(Integer, ForeignKey("analyses.id"), index=True)
-    manifest_yaml = Column(Text, nullable=True)
-    source_name = Column(String(128), nullable=True, index=True)
+    discovery_id = Column(Integer, ForeignKey("discoveries.id"), nullable=False)
+    analysis_id = Column(Integer, ForeignKey("analyses.id"), nullable=True)
+    manifest_yaml = Column(Text, nullable=False)
+    source_name = Column(String(128), nullable=True)
     model_used = Column(String(128), nullable=True)
-    status = Column(String(32), nullable=True, index=True)  # draft|approved|rejected
+    status = Column(String(32), nullable=False)  # draft|approved|rejected
     validation_error = Column(Text, nullable=True)
     created_at = Column(DateTime, default=_now_naive)
     updated_at = Column(DateTime, default=_now_naive)
@@ -1378,9 +1419,14 @@ class Scope(Base):
     ``{source_dbs: [], domains: [], semantic_codes: [], native_codes: []}`` —
     CRUD stays atomic and per-item statistics are not needed (design D3)."""
     __tablename__ = "scopes"
+    # Uniqueness rides the deployed UNIQUE CONSTRAINT (0004's inline UNIQUE),
+    # not a unique index — see reports/adoption-diff.md §3 (scopes 口径裁决).
+    __table_args__ = (
+        UniqueConstraint("name", name="scopes_name_key"),
+    )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
-    name = Column(String(128), nullable=False, unique=True, index=True)
+    name = Column(String(128), nullable=False)
     description = Column(Text, nullable=True)
     rules = Column(JSONB, nullable=False, default=dict)
     created_at = Column(DateTime, default=_now)

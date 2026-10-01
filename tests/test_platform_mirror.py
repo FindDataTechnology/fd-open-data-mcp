@@ -189,13 +189,15 @@ def test_crawl_run_rows_written_matches_prod_schema(session):
     col = {c["name"]: c for c in inspect(session.get_bind()).get_columns("crawl_runs")}["rows_written"]
     assert col["nullable"] is False
     assert col["default"] is not None  # DEFAULT 0 present in the DDL
-    # writers that never set the column land as 0, never NULL
-    session.add(CrawlRun(source="akshare", kind="concept", status="success"))
+    # writers that never set the column land as 0, never NULL (started_at is
+    # NOT NULL with no default, same as prod — the row must state it)
+    session.add(CrawlRun(source="akshare", kind="concept", status="success",
+                         started_at=NAIVE_NOW))
     session.commit()
     assert session.query(CrawlRun).one().rows_written == 0
     # an explicit None also lands as the default, never NULL
     session.add(CrawlRun(source="akshare", kind="concept", status="success",
-                         rows_written=None))
+                         started_at=NAIVE_NOW, rows_written=None))
     session.commit()
     assert [r.rows_written for r in session.query(CrawlRun).all()] == [0, 0]
 
