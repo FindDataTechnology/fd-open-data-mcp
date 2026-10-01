@@ -70,6 +70,40 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e .[dev]
 
+      # 0003's registry_indicator_embeddings DDL carries a hard FK to
+      # registry_entries, which the registry pipeline — not this chain —
+      # creates (its own comment: "deliberately not created here"). The
+      # authoritative database has it before migrations run; an empty CI
+      # database must mirror that precondition.
+      - name: Bootstrap registry-pipeline precondition
+        run: |
+          python - <<'EOF'
+          import os
+          import psycopg2
+          url = os.environ["FD_OPEN_DATA_MCP_DATABASE_URL"].replace("+psycopg2", "")
+          conn = psycopg2.connect(url)
+          conn.autocommit = True
+          cur = conn.cursor()
+          cur.execute("""
+              CREATE TABLE IF NOT EXISTS registry_entries (
+                id BIGSERIAL PRIMARY KEY,
+                source_db TEXT NOT NULL, source_table TEXT NOT NULL,
+                source_column TEXT NOT NULL DEFAULT '', native_code TEXT NOT NULL,
+                semantic_code TEXT, name_zh TEXT, name_en TEXT, unit TEXT,
+                frequency TEXT, domain TEXT, provenance JSONB,
+                verified BOOLEAN NOT NULL DEFAULT false, verified_by TEXT,
+                registered_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                updated_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+                CONSTRAINT uq_registry_anchor
+                  UNIQUE (source_db, source_table, source_column, native_code))
+          """)
+          cur.execute("""
+              CREATE UNIQUE INDEX IF NOT EXISTS uq_registry_semantic_code
+              ON registry_entries (semantic_code) WHERE semantic_code IS NOT NULL
+          """)
+          print("registry_entries precondition ready")
+          EOF
+
       - name: Migrate empty database to head
         run: alembic upgrade head
 
