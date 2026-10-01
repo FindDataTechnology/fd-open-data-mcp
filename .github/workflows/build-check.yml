@@ -39,7 +39,11 @@ jobs:
     runs-on: ubuntu-latest
     services:
       postgres:
-        image: postgres:14
+        # pgvector image: the vector migration (0004, semantic-search) runs
+        # CREATE EXTENSION vector — vanilla postgres:14 fails with "could not
+        # open extension control file vector.control" (6+ red runs through
+        # 2026-10-01).
+        image: pgvector/pgvector:pg14
         env:
           POSTGRES_USER: fdtest
           POSTGRES_DB: fd_schema_ci
