@@ -53,6 +53,88 @@ _OPEN = "running"  # policy_runs.status value for an open run
 CANCELLED = "cancelled"
 
 
+# ─── failure diagnosis (2026-10-05 incident) ─────────────────────────────────
+# A Job whose container crashes before the runner's first yield report (the
+# incident: a scrapy import-time failure ~18s after start, dead at
+# backoffLimit=2) closes "failed" with nothing on policy_runs.detail and — via
+# the crawl_runs mirror — an empty error_head; once the pod is
+# ttlSecondsAfterFinished-collected the evidence is gone. The probe that
+# closes such a run now synthesizes a summary from the pod's terminal state.
+LOG_TAIL_LINES = 30        # pod log tail grabbed during failure diagnosis
+FAILURE_DETAIL_MAX_CHARS = 2000
+
+
+def _cap_tail(text: str, limit: int) -> str:
+    """Keep the LAST ``limit`` chars — the freshest log lines hold the crash."""
+    if len(text) <= limit:
+        return text
+    return "…(truncated)\n" + text[-limit:]
+
+
+def _container_terminal_summary(pod: dict) -> str | None:
+    """exitCode/reason/message of the pod's first terminated container.
+
+    lastState.terminated wins over state.terminated: with
+    restartPolicy=OnFailure the crashing attempt survives a restart there, and
+    at backoffLimit death both hold the same crash."""
+    for cs in pod.get("status", {}).get("containerStatuses") or []:
+        term = ((cs.get("lastState") or {}).get("terminated")
+                or (cs.get("state") or {}).get("terminated"))
+        if term:
+            msg = (term.get("message") or "").strip()
+            out = (f"container={cs.get('name')} exitCode={term.get('exitCode')} "
+                   f"reason={term.get('reason')}")
+            if msg:
+                out += f' message="{msg[:500]}"'
+            return out
+    return None
+
+
+def _job_failure_summary(job_ref: str, namespace: str, pods: list[dict],
+                         log_tail_fn) -> str | None:
+    """Compose the synthesized failure summary; None when no pod survives.
+
+    ``log_tail_fn(pod_name) -> str`` is best-effort and may return '' (the pod
+    can vanish between the two API calls)."""
+    if not pods:
+        return None
+    pick = next((p for p in pods if _container_terminal_summary(p) is not None),
+                pods[0])
+    term = _container_terminal_summary(pick)
+    name = pick.get("metadata", {}).get("name", "?")
+    head = (f"pod {namespace}/{name} {term}" if term else
+            f"pod {namespace}/{name} has no terminated container state")
+    try:
+        logs = (log_tail_fn(name) or "").strip()
+    except Exception:  # noqa: BLE001 - log grab is optional evidence
+        logs = ""
+    out = f"job {job_ref} failed before the runner checked in; {head}"
+    if logs:
+        out += f"; log tail (last {LOG_TAIL_LINES} lines):\n{_cap_tail(logs, 1200)}"
+    if len(out) > FAILURE_DETAIL_MAX_CHARS:
+        out = out[:FAILURE_DETAIL_MAX_CHARS] + "…"
+    return out
+
+
+def _synthesize_failure_detail(launcher, job_ref: str) -> str:
+    """Non-empty error summary for a failed run, via the launcher's diagnose.
+
+    Launchers without diagnose (scrapyd — whose poll never reports 'failed')
+    and pods already reclaimed fall back to a terse but non-empty note."""
+    diagnose = getattr(launcher, "diagnose", None)
+    summary = ""
+    if callable(diagnose):
+        try:
+            summary = (diagnose(job_ref) or "").strip()
+        except Exception:  # noqa: BLE001 - diagnosis must never break the close
+            logger.warning("failure diagnosis errored for job %s",
+                           job_ref, exc_info=True)
+    if summary:
+        return summary
+    return (f"job {job_ref} failed before the runner checked in; "
+            "pod 已回收，无终态可抓 (pod reclaimed, no terminal state to grab)")
+
+
 # ─── launcher abstraction (D5) ───────────────────────────────────────────────
 class Launcher(Protocol):
     """Executor backend: launch a compiled plan, probe a launched job.
@@ -292,6 +374,52 @@ class K8sJobLauncher:
             return "running"
         return "unknown"
 
+    def _k8s_api_text(self, path: str) -> str:
+        """Raw-text variant of _k8s_api: the pod log endpoint returns
+        text/plain, not JSON."""
+        import ssl
+        with open(f"{self._SA_DIR}/token", encoding="utf-8") as fh:
+            token = fh.read().strip()
+        ctx = ssl.create_default_context(cafile=f"{self._SA_DIR}/ca.crt")
+        req = urllib.request.Request(
+            f"https://kubernetes.default.svc{path}",
+            headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+            return r.read().decode("utf-8", errors="replace")
+
+    def pods_for_job(self, job_ref: str) -> list[dict]:
+        """Pods of a Job (the Job controller labels them job-name=<name>)."""
+        sel = urllib.parse.quote(f"job-name={job_ref}")
+        if self._in_cluster():
+            return (self._k8s_api(
+                "GET", f"/api/v1/namespaces/{self.namespace}/pods?labelSelector={sel}"
+            ).get("items", []))
+        out = self._kubectl("get", "pods", "-n", self.namespace,
+                            "-l", f"job-name={job_ref}", "-o", "json")
+        return json.loads(out).get("items", [])
+
+    def pod_log_tail(self, pod: str, lines: int = LOG_TAIL_LINES) -> str:
+        if self._in_cluster():
+            return self._k8s_api_text(
+                f"/api/v1/namespaces/{self.namespace}/pods/{pod}"
+                f"/log?container=crawler&tailLines={lines}")
+        return self._kubectl("logs", pod, "-n", self.namespace,
+                             "-c", "crawler", f"--tail={lines}")
+
+    def diagnose(self, job_ref: str) -> str | None:
+        """Terminal-state evidence for a failed Job's pods; None = pods gone.
+
+        Best-effort by contract — an API failure reads as 'no evidence'; the
+        close path's fallback note still keeps the run's error non-empty."""
+        try:
+            pods = self.pods_for_job(job_ref)
+        except Exception:  # noqa: BLE001 - api unreachable / rbac denied
+            logger.warning("failure diagnosis failed for job %s",
+                           job_ref, exc_info=True)
+            return None
+        return _job_failure_summary(job_ref, self.namespace, pods,
+                                    self.pod_log_tail)
+
     def delete(self, job_ref: str) -> bool:
         if self._in_cluster():
             try:
@@ -367,6 +495,30 @@ class ClusterK8sClient:
         if st.get("active"):
             return "running"
         return "unknown"
+
+    def _api_text(self, method: str, path: str) -> str:
+        """Raw-text request for the pod log endpoint (returns text/plain)."""
+        import ssl
+        api_server, token, ca = self._load()
+        ctx = ssl.create_default_context(cafile=ca) if ca else ssl.create_default_context()
+        req = urllib.request.Request(
+            f"{api_server}{path}", method=method,
+            headers={"Authorization": f"Bearer {token}"})
+        with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+            return r.read().decode("utf-8", errors="replace")
+
+    def pods_for_job(self, name: str) -> list[dict]:
+        """Pods of a Job in this cluster (label job-name=<name>)."""
+        ns = self.cluster.namespace
+        sel = urllib.parse.quote(f"job-name={name}")
+        return self._api(
+            "GET", f"/api/v1/namespaces/{ns}/pods?labelSelector={sel}").get("items", [])
+
+    def pod_log_tail(self, pod: str, lines: int = LOG_TAIL_LINES) -> str:
+        ns = self.cluster.namespace
+        return self._api_text(
+            "GET", f"/api/v1/namespaces/{ns}/pods/{pod}"
+                   f"/log?container=crawler&tailLines={lines}")
 
     def delete_job(self, name: str) -> bool:
         """DELETE the Job; False when it is already gone (404)."""
@@ -681,6 +833,30 @@ class MultiClusterLauncher:
         except Exception:  # noqa: BLE001 - api unreachable / job gone
             return "unknown"
 
+    def diagnose(self, job_ref: str) -> str | None:
+        """Pod terminal-state evidence for a failed dispatched Job
+        ("{cluster}/{job}"); None = cluster unknown / pods gone (see
+        K8sJobLauncher.diagnose)."""
+        if "/" not in job_ref:
+            return None
+        cluster_name, job_name = job_ref.split("/", 1)
+        session = self._session()
+        try:
+            cluster = session.query(Cluster).filter_by(name=cluster_name).first()
+        finally:
+            session.close()
+        if cluster is None:
+            return None
+        client = ClusterK8sClient(cluster)
+        try:
+            pods = client.pods_for_job(job_name)
+        except Exception:  # noqa: BLE001 - api unreachable / rbac denied
+            logger.warning("failure diagnosis failed for job %s",
+                           job_ref, exc_info=True)
+            return None
+        return _job_failure_summary(job_ref, cluster.namespace, pods,
+                                    client.pod_log_tail)
+
     def delete(self, job_ref: str) -> bool:
         if "/" not in job_ref:
             return False  # legacy scrapyd ref: no cluster routing, nothing to delete here
@@ -987,6 +1163,15 @@ def reconcile_once(
         state = launcher.poll(run.job_ref)
         if state in ("success", "failed"):
             run.status = classify_yield(run) if state == "success" else "failed"
+            if (state == "failed" and not run.detail
+                    and run.rows_attempted is None and run.rows_new is None):
+                # 2026-10-05 incident: a container crash BEFORE the runner's
+                # first yield report closed the run with an empty error_head,
+                # and the pod's TTL collection destroyed the evidence. The
+                # rows_* counters are the runner's check-in, so a reported run
+                # is never re-synthesized or overwritten here. detail feeds
+                # policy_runs.detail AND the crawl_runs.error_head mirror.
+                run.detail = _synthesize_failure_detail(launcher, run.job_ref)
             run.finished_at = now
             summary["probed_closed"] += 1
             closed.append(run)

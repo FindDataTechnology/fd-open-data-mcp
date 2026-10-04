@@ -2,7 +2,8 @@
 
 Covers: due-policy selection (cron + timezone), per-policy single-flight,
 date-range builder (since_last/trailing/explicit), plan-size guardrail with
-force override, launcher abstraction, and the completion probe.
+force override, launcher abstraction, the completion probe, and the failed-
+close error diagnosis (2026-10-05 incident: empty error_head on early crash).
 """
 from __future__ import annotations
 
@@ -53,9 +54,11 @@ def _policy(session, cid, **over) -> CrawlPolicy:
 
 
 class _FakeLauncher:
-    def __init__(self, poll_state="unknown"):
+    def __init__(self, poll_state="unknown", diagnose_result=None):
         self.launched: list[tuple] = []
         self.poll_state = poll_state
+        self.diagnose_result = diagnose_result
+        self.diagnosed: list[str] = []
 
     def launch(self, plan, policy):
         self.launched.append((plan, policy))
@@ -65,6 +68,12 @@ class _FakeLauncher:
 
     def poll(self, job_ref):
         return self.poll_state
+
+    def diagnose(self, job_ref):
+        # K8s launchers expose pod terminal-state evidence on the failed close
+        # path (2026-10-05 incident); None = pod already reclaimed.
+        self.diagnosed.append(job_ref)
+        return self.diagnose_result
 
 
 # ─── due selection + single-flight (5.1) ─────────────────────────────────────
@@ -135,6 +144,74 @@ def test_completion_probe_closes_finished_runs(session):
     summary = reconcile_once(session, _FakeLauncher(poll_state="success"), now=NOW)
     assert summary["probed_closed"] == 1
     assert ok.status == "success"
+
+
+# ─── failed-close error diagnosis (2026-10-05 incident) ──────────────────────
+def test_failed_job_without_checkin_synthesizes_error_detail(session):
+    """Job failed + no runner yield report -> a non-empty summary carrying the
+    pod's exit code / log tail lands on policy_runs.detail AND, through the
+    close mirror, on crawl_runs.error_head (which was empty in the incident)."""
+    from fd_open_data_mcp.models import CrawlRun
+
+    cid = _register(session)
+    p = _policy(session, cid, cron_expr="0 0 1 1 *",  # yearly: probe only, no relaunch
+                source_filter=["test-src"])
+    run = PolicyRun(policy_id=p.id, status="running", job_ref="crawl-policy-1-x",
+                    started_at=NOW - timedelta(hours=3))
+    session.add(run)
+    session.commit()
+    diag = ("job crawl-policy-1-x failed before the runner checked in; "
+            "pod scraw/crawl-policy-1-x-abcde container=crawler exitCode=1 "
+            'reason=Error message="ModuleNotFoundError: No module named scrapy"')
+    launcher = _FakeLauncher(poll_state="failed", diagnose_result=diag)
+    summary = reconcile_once(session, launcher, now=NOW)
+    assert summary["probed_closed"] == 1
+    assert run.status == "failed"
+    assert launcher.diagnosed == ["crawl-policy-1-x"]
+    assert run.detail and "exitCode=1" in run.detail
+    assert "ModuleNotFoundError" in run.detail
+    row = session.query(CrawlRun).filter_by(source="test-src", kind="concept").one()
+    assert row.status == "failed"
+    assert row.error_head and "exitCode=1" in row.error_head
+
+
+def test_runner_reported_failed_run_not_overwritten(session):
+    """A runner that checked in (counters present) is never re-synthesized:
+    diagnose is not even attempted and a pre-existing detail stays untouched."""
+    from fd_open_data_mcp.models import CrawlRun
+
+    cid = _register(session)
+    p = _policy(session, cid, cron_expr="0 0 1 1 *", source_filter=["test-src"])
+    run = PolicyRun(policy_id=p.id, status="running", job_ref="crawl-policy-1-y",
+                    started_at=NOW - timedelta(hours=3),
+                    rows_attempted=42, rows_new=17)
+    session.add(run)
+    session.commit()
+    launcher = _FakeLauncher(poll_state="failed",
+                             diagnose_result="POD EVIDENCE MUST NOT APPEAR")
+    summary = reconcile_once(session, launcher, now=NOW)
+    assert summary["probed_closed"] == 1
+    assert run.status == "failed"
+    assert run.detail is None                    # nothing synthesized
+    assert launcher.diagnosed == []              # diagnosis not even attempted
+    row = session.query(CrawlRun).filter_by(source="test-src", kind="concept").one()
+    assert not row.error_head
+
+
+def test_reclaimed_pod_falls_back_to_nonempty_note(session):
+    """diagnose finds nothing (pod TTL-collected) -> a terse non-empty note
+    with the job name, so a failed close never carries an empty summary."""
+    cid = _register(session)
+    p = _policy(session, cid, cron_expr="0 0 1 1 *")
+    run = PolicyRun(policy_id=p.id, status="running", job_ref="crawl-policy-9-gone",
+                    started_at=NOW - timedelta(hours=3))
+    session.add(run)
+    session.commit()
+    reconcile_once(session, _FakeLauncher(poll_state="failed", diagnose_result=None),
+                   now=NOW)
+    assert run.status == "failed"
+    assert run.detail and "crawl-policy-9-gone" in run.detail
+    assert "pod 已回收" in run.detail
 
 
 def test_legacy_schedules_table_is_not_executed(session):
@@ -300,6 +377,87 @@ def test_k8s_launcher_poll_in_cluster(monkeypatch, status, expected):
     monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
                         lambda self, m, p, b=None: {"status": status})
     assert launcher.poll("crawl-policy-7-x") == expected
+
+
+def _crashed_pod(name="crawl-policy-7-x-abcde"):
+    """The incident's pod shape: restartPolicy=OnFailure restarted the dead
+    container, so the crash evidence lives in lastState.terminated."""
+    return {
+        "metadata": {"name": name},
+        "status": {"containerStatuses": [{
+            "name": "crawler",
+            "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+            "lastState": {"terminated": {
+                "exitCode": 1, "reason": "Error",
+                "message": "scrapy import failed"}},
+        }]},
+    }
+
+
+def test_k8s_launcher_diagnose_synthesizes_pod_evidence(monkeypatch):
+    """diagnose reads lastState.terminated + the pod log tail; the log endpoint
+    returns text/plain, so it goes through the raw-text API call."""
+    from fd_open_data_mcp.refresh.reconciler import K8sJobLauncher
+
+    launcher = K8sJobLauncher(namespace="scraw")
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    calls = []
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
+                        lambda self, m, p, b=None:
+                        calls.append((m, p)) or {"items": [_crashed_pod()]})
+    monkeypatch.setattr(
+        K8sJobLauncher, "_k8s_api_text",
+        lambda self, p: calls.append(("TEXT", p))
+        or "Traceback (most recent call last):\n"
+           "ModuleNotFoundError: No module named 'scrapy'")
+
+    out = launcher.diagnose("crawl-policy-7-x")
+    assert out and "exitCode=1" in out and "reason=Error" in out
+    assert "crawl-policy-7-x-abcde" in out
+    assert "ModuleNotFoundError" in out          # log tail included
+    text_path = next(p for m, p in calls if m == "TEXT")
+    assert "/pods/crawl-policy-7-x-abcde/log" in text_path
+    assert "tailLines=30" in text_path and "container=crawler" in text_path
+    get_path = next(p for m, p in calls if m == "GET")
+    # pods are found via the Job controller's automatic job-name label
+    assert get_path.startswith("/api/v1/namespaces/scraw/pods?labelSelector=")
+    assert "job-name%3Dcrawl-policy-7-x" in get_path
+
+
+def test_k8s_launcher_diagnose_returns_none_when_api_fails(monkeypatch):
+    from fd_open_data_mcp.refresh.reconciler import K8sJobLauncher
+
+    launcher = K8sJobLauncher(namespace="scraw")
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+
+    def boom(self, m, p, b=None):
+        raise RuntimeError("api unreachable")
+
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api", boom)
+    assert launcher.diagnose("crawl-policy-7-x") is None
+
+
+def test_multicluster_launcher_diagnose_routes_to_cluster(session, monkeypatch):
+    """The dispatch path ("{cluster}/{job}") resolves the cluster row and
+    diagnoses via that cluster's API client."""
+    from fd_open_data_mcp.models import Cluster
+    from fd_open_data_mcp.refresh.reconciler import ClusterK8sClient, MultiClusterLauncher
+
+    session.add(Cluster(name="tencent", api_server="https://tencent:6443",
+                        namespace="scraw", capacity=2))
+    session.commit()
+    monkeypatch.setattr(ClusterK8sClient, "pods_for_job",
+                        lambda self, name: [_crashed_pod("crawl-policy-5-x-z")])
+    monkeypatch.setattr(ClusterK8sClient, "pod_log_tail",
+                        lambda self, pod, lines=30: "scrapy: crash on import")
+
+    out = MultiClusterLauncher().diagnose("tencent/crawl-policy-5-x")
+    assert out and "exitCode=1" in out and "crawl-policy-5-x-z" in out
+    assert "scrapy: crash on import" in out
+    # unknown cluster / scrapyd-style refs degrade to "no evidence" (the close
+    # path then writes its non-empty fallback note)
+    assert MultiClusterLauncher().diagnose("ghost/crawl-policy-5-x") is None
+    assert MultiClusterLauncher().diagnose("no-cluster-prefix") is None
 
 
 # ── census auto-refresh hook (add-census-auto-refresh) ───────────────────────

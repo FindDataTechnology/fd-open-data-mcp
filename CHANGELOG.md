@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.36] - 2026-10-05
+
+### Added (scraw-runner-image-regression)
+
+- **Failure diagnosis for runs that die before checking in**: when a
+  crawl Job's container terminates before the runner reports (the
+  2026-10-01 w3lib-regression failure mode), the reconciler now
+  synthesizes a non-empty error summary from the pod's terminal state
+  (exit code, reason, last 30 log lines, capped at 2000 chars) into
+  `policy_runs.detail` / `crawl_runs.error_head`. Runner-reported runs
+  are never overwritten; reclaimed pods get a non-empty fallback note.
+- **scripts/ now ships in the sdist** (`recursive-include scripts *.py`):
+  the scraw fleet image extracts direct-script policy sources
+  (`bulk_ingest_*`) from the sdist to `/app/scripts` (see the scraw
+  Dockerfile), un-blocking direct policies 7/8 which have been failing
+  with "script not found" since 2026-09-29.
+
 ## [Unreleased]
 
 ### Changed (schema-drift-closure)
