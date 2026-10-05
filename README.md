@@ -121,7 +121,7 @@ fd-open-data-mcp serve          # FastMCP, stdio transport
 
 | Group | Tools |
 |-------|-------|
-| Catalog/bindings | `import_catalog`, `consume_concepts`, `propose_bindings`, `list_bindings`, `review_bindings`, `confirm_binding`, `update_binding`, `list_concepts`, `list_cnreport_rules`, `enumerate_wbgapi_indicators`, `register_datasource`, `register_discovered` |
+| Catalog/bindings | `import_catalog`, `consume_concepts`, `propose_bindings`, `list_bindings`, `review_bindings`, `confirm_binding`, `update_binding`, `list_concepts`, `list_registry_entries`, `list_cnreport_rules`, `enumerate_wbgapi_indicators`, `register_datasource`, `register_discovered` |
 | Entity identity | `seed_entity_identifiers`, `resolve_entity`, `add_entity`, `update_entity`, `get_entity`, `list_entities`, `add_entity_identifier`, `ingest_entities_from_dump` |
 | Ranking/read | `rank_sources`, `read`, `fetch` |
 | Refresh schedules | `generate_refresh_schedules`, `list_schedules`, `run_schedule`, `plan_crawl` |
@@ -148,6 +148,19 @@ entries stay unverified and out of the catalog.
   business-mcp is a later change; in this version `read`/`fetch` on registry
   indicators does not return external-source data. This expansion affects the
   indicator dictionary only, not any data-reading capability.
+
+### Full-registry enumeration (`list_registry_entries`, v0.5.38)
+
+The parallel **tiered-browsing channel** (ADR-0002): pages through ALL
+registered entries — verified and not — ordered by `(source_db, native_code)`,
+each row carrying the authoritative `verified` flag, with an optional
+`status` filter (`verified` | `registered`; default all). The catalog/search/
+read **verified gate is untouched**: `list_concepts`, `ai_search` and the read
+paths still exclude unverified entries. Consumers: the Wire public catalog
+mirror re-keyed its ids to `source_db:native_code` from this feed. An optional
+`scope` filters rows by the indicator-scope rules (source_db / domain /
+semantic_code dimensions); unscoped calls return a plain list (the Wire sync
+contract).
 
 ## Data sources
 
