@@ -224,7 +224,7 @@ def upsert(engine, rows: list[dict]) -> int:
     upd = ("value=EXCLUDED.value, unit=EXCLUDED.unit, "
            "source_used=EXCLUDED.source_used, fetched_at=EXCLUDED.fetched_at")
     sql = (f"INSERT INTO semantic_observations ({', '.join(cols)}) VALUES %s "
-           f"ON CONFLICT (concept_id, entity_type, entity_id, date, granularity) "
+           f"ON CONFLICT (concept_id, entity_type, entity_id, date, granularity, source_used) "
            f"DO UPDATE SET {upd}")
     vals = [tuple(r[c] for c in cols) for r in rows]
     last = None

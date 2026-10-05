@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.37] - 2026-10-05
+
+### Fixed (scraw-runner-image-regression follow-up)
+
+- **bulk_ingest scripts: upsert target aligned with the source-aware key**.
+  The three `bulk_ingest_*` scripts still used the pre-0002 five-column
+  `ON CONFLICT (concept_id, entity_type, entity_id, date, granularity)`
+  target, which no longer matches any unique index since the
+  source-aware key `uq_sem_obs (…, source_used)` — every upsert batch
+  failed with "no unique or exclusion constraint matching the ON CONFLICT
+  specification" (surfaced 2026-10-05 once the scripts could launch again;
+  policies 7/8 had been masked by the missing-script failure since
+  2026-09-29). `source_used` is now part of the conflict target; verified
+  against production (1816 fund-NAV observations upserted).
+
 ## [0.5.36] - 2026-10-05
 
 ### Added (scraw-runner-image-regression)
