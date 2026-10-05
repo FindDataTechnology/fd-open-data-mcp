@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.38] - 2026-10-06
+
+### Added (indicator-caliber-unification)
+
+- **`list_registry_entries` MCP tool: full-registry enumeration channel.** Pages
+  through ALL registered entries — verified and not — ordered by
+  (source_db, native_code), each row carrying the authoritative `verified`
+  flag, with an optional status filter. This is the tiered-browsing channel
+  (ADR-0002): the catalog/search/read verified gate (`list_concepts`,
+  `ai_search`, reads) is untouched and still excludes unverified entries.
+
 ## [0.5.37] - 2026-10-05
 
 ### Fixed (scraw-runner-image-regression follow-up)

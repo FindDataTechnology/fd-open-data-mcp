@@ -377,6 +377,73 @@ def list_concept_families(limit: int = 500, offset: int = 0) -> list[dict]:
 
 
 @mcp.tool
+def list_registry_entries(
+    status: str | None = None, limit: int = 500, offset: int = 0,
+    scope: str | None = None,
+) -> list[dict] | dict:
+    """Enumerate the WHOLE unified indicator registry — verified AND not.
+
+    The registration-surface enumeration channel (tiered browsing sync, e.g.
+    the public indicator catalog): every registered entry, each carrying its
+    authoritative ``verified`` flag (true = directly readable caliber,
+    false = registered/on-demand caliber). This is deliberately PARALLEL to
+    the catalog: ``list_concepts`` / ai_search / read keep their verified
+    gate untouched — unverified entries stay out of the catalog, search and
+    every read channel, and this tool does not change that.
+
+    Paginated like ``list_concepts``: rows ordered by (source_db, native_code),
+    ``limit`` clamped to 1..1000; page with increasing ``offset`` until a page
+    comes back shorter than ``limit`` — that enumerates the full registry
+    (57k+ entries at ~1000/page).
+
+    Args:
+        status: None = all entries (default); "verified" = only the verified
+            subset; "registered" = only the not-verified subset (never-yet-
+            reviewed rows count as registered). Any other value is an
+            explicit ``invalid_status`` error.
+        limit: page size, 1..1000 (default 500)
+        offset: rows to skip (default 0)
+        scope: optional named retrieval scope (see scope_list). This tool is
+            cross-source, so the scope's allow-lists filter the returned rows
+            (source_db above all — 「源即 scope」); the response then names the
+            scope that governed it, so a scope-emptied page is distinguishable
+            from true absence. An unknown scope is an explicit
+            ``unknown_scope`` error, never an empty result.
+    """
+    from fd_open_data_mcp.semantic.registry_catalog import list_registry_entries as _list
+
+    if status is not None and status not in ("verified", "registered"):
+        return {
+            "error": "invalid_status",
+            "detail": (
+                f"status must be omitted/None (all entries), 'verified' "
+                f"or 'registered'; got {status!r}"
+            ),
+        }
+
+    resolved, error = _resolve_scope_for_search(scope)
+    if error is not None:
+        return error
+
+    s = _session()
+    try:
+        rows = _list(s, status=status, limit=limit, offset=offset)
+    finally:
+        s.close()
+
+    if resolved is None:
+        return rows
+    # Scoped cross-source enumeration (indicator-scope D4): the scope's
+    # allow-lists filter the page's rows — every dimension applies, registry
+    # rows carry source_db / native_code / semantic_code / domain. The
+    # payload names the scope so scoped emptiness is explainable, and the
+    # per-(scope, day) hit counters see the call.
+    return _finish_scoped_search(
+        resolved, {"entries": rows, "count": len(rows)}, result_key="entries",
+    )
+
+
+@mcp.tool
 def record_concept_mapping(
     concept_id: int,
     vocabulary: str,

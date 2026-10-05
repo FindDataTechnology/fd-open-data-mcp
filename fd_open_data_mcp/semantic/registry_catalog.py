@@ -67,3 +67,79 @@ def read_verified_entries(session: Session) -> list[dict[str, Any]]:
         )
         return []
     return [dict(row) for row in rows]
+
+
+# ─── Full-registry enumeration (indicator-caliber-unification D2) ────────────
+
+#: Status filters for :func:`list_registry_entries`. Per the ADR-0002 caliber
+#: vocabulary every row is "registered" and ``verified`` marks the narrower
+#: verified subset — so ``status="registered"`` selects the NOT-verified
+#: entries. Both predicates are NULL-safe: a row never yet reviewed
+#: (``verified IS NULL``) is registered, never verified.
+_STATUS_PREDICATES = {
+    "verified": "verified IS TRUE",
+    "registered": "verified IS NOT TRUE",
+}
+
+_LIST_COLUMNS = (
+    "source_db, native_code, semantic_code, name_zh, name_en, "
+    "unit, frequency, domain, verified"
+)
+
+
+def list_registry_entries(
+    session: Session, status: str | None = None,
+    limit: int = 500, offset: int = 0,
+) -> list[dict[str, Any]]:
+    """Page through the WHOLE registry — verified and not — as plain dicts.
+
+    The parallel enumeration channel behind the tiered-browsing decision
+    (ADR-0002): unlike :func:`read_verified_entries` — the catalog/search/
+    read verified gate, which this function does NOT touch — it serves every
+    registered entry and carries the authoritative ``verified`` flag on each
+    row (always a real bool, never a driver int).
+
+    Paging: rows are ordered by ``(source_db, native_code)``;
+    ``limit`` clamps to [1, 1000] and ``offset`` floors at 0 (the
+    ``list_concepts`` convention). The function slices ONE page — callers
+    enumerate the full registry by advancing offset until a page comes back
+    shorter than ``limit``.
+
+    Args:
+        status: ``None`` = all entries; ``"verified"`` = only verified;
+            ``"registered"`` = only not-verified (NULL-safe — never-reviewed
+            rows are registered). Anything else raises ``ValueError``.
+
+    Fail-soft, same contract as :func:`read_verified_entries`: a missing
+    table (or a missing-table error racing the existence check) yields
+    ``[]`` plus a single log line — never an exception.
+    """
+    from fd_open_data_mcp.semantic.concepts import _clamp_limit
+
+    if status is not None and status not in _STATUS_PREDICATES:
+        raise ValueError(
+            f"invalid status {status!r}: use None (all entries), "
+            "'verified' or 'registered'"
+        )
+    limit = _clamp_limit(limit)
+    offset = max(0, int(offset))
+    where = f"WHERE {_STATUS_PREDICATES[status]}" if status else ""
+    sql = text(
+        f"SELECT {_LIST_COLUMNS} FROM {REGISTRY_TABLE} {where} "
+        "ORDER BY source_db, native_code LIMIT :limit OFFSET :offset"
+    )
+    try:
+        if not registry_table_exists(session):
+            logger.info(
+                "unified registry table %r not present; enumeration "
+                "returns no entries", REGISTRY_TABLE,
+            )
+            return []
+        rows = session.execute(sql, {"limit": limit, "offset": offset}).mappings().all()
+    except (OperationalError, ProgrammingError) as exc:
+        logger.info(
+            "unified registry %r unreadable (%s); enumeration returns no "
+            "entries", REGISTRY_TABLE, exc,
+        )
+        return []
+    return [{**dict(row), "verified": bool(row["verified"])} for row in rows]
