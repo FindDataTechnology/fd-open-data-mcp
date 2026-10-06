@@ -52,21 +52,33 @@ class ConceptDeprecated(Exception):
 def find_canonical_replacement(session: Session, concept: Concept):
     """Find the non-deprecated canonical concept for a deprecated one (by name_zh).
 
-    Prefers a non-``symbol`` entity_type so a deprecated ``PRICE_CLOSE`` (symbol)
-    resolves to ``price.close`` (stock) rather than another symbol-typed twin.
+    SAME entity_type wins: a deprecated ``price.open`` (stock) must not be
+    aliased to a crypto/index twin that merely shares the Chinese name. The
+    symbol -> entity-typed migration keeps its fallback (a ``symbol``-typed
+    deprecated concept may resolve to its non-symbol name-mate). Cross-domain
+    suggestions (stock -> crypto) are never returned.
     """
     if not concept.name_zh:
         return None
-    return (
+    candidates = (
         session.query(Concept)
         .filter(
             Concept.name_zh == concept.name_zh,
             Concept.deprecated.is_(False),
             Concept.id != concept.id,
         )
-        .order_by(Concept.entity_type == "symbol")  # non-symbol first
-        .first()
+        .all()
     )
+    if not candidates:
+        return None
+    same_type = [c for c in candidates if c.entity_type == concept.entity_type]
+    if same_type:
+        return same_type[0]
+    if concept.entity_type == "symbol":
+        non_symbol = [c for c in candidates if c.entity_type != "symbol"]
+        if non_symbol:
+            return non_symbol[0]
+    return None
 
 
 def check_applicability(session: Session, concept_id: int, entity_type: str) -> Concept:
