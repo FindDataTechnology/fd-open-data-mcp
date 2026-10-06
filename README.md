@@ -117,16 +117,22 @@ fd-open-data-mcp read --concept-id 234 --entity-type stock --entity-id 1 --date 
 fd-open-data-mcp serve          # FastMCP, stdio transport
 ```
 
-**36 tools**, registered across five files:
+**71 tools**, registered across six files (49 `@mcp.tool` in `server.py` + 22 from the five `register_*` modules; count verified 2026-10-06 against the live instance's `tools/list` = 71):
 
 | Group | Tools |
 |-------|-------|
-| Catalog/bindings | `import_catalog`, `consume_concepts`, `propose_bindings`, `list_bindings`, `review_bindings`, `confirm_binding`, `update_binding`, `list_concepts`, `list_registry_entries`, `list_cnreport_rules`, `enumerate_wbgapi_indicators`, `register_datasource`, `register_discovered` |
-| Entity identity | `seed_entity_identifiers`, `resolve_entity`, `add_entity`, `update_entity`, `get_entity`, `list_entities`, `add_entity_identifier`, `ingest_entities_from_dump` |
-| Ranking/read | `rank_sources`, `read`, `fetch` |
-| Refresh schedules | `generate_refresh_schedules`, `list_schedules`, `run_schedule`, `plan_crawl` |
-| Entity graph | `add_relationship`, `list_relationships`, `get_entity`, `graph_search` |
-| Vector/semantic search | `semantic_search`, `semantic_search_entities`, `semantic_search_unified`, `ai_search`, `re_embed_concept`, `update_concept` |
+| Catalog/bindings (`server.py`) | `import_catalog`, `register_datasource`, `update_entity`, `update_concept`, `update_binding`, `consume_concepts`, `propose_bindings`, `list_concepts`, `list_concept_families`, `list_registry_entries`, `record_concept_mapping`, `list_concept_mappings`, `import_crosswalks`, `list_bindings`, `review_bindings`, `confirm_binding` |
+| Entity identity (`server.py`) | `seed_entity_identifiers`, `resolve_entity`, `add_entity_identifier`, `list_entities`, `get_entity`, `add_entity` |
+| Entity graph (`server.py`) | `list_relationships`, `add_relationship`, `graph_search` |
+| Vector/semantic search (`server.py`) | `semantic_search`, `semantic_search_entities`, `semantic_search_unified`, `re_embed_concept`, `ai_search` |
+| Ranking/read (`server.py`) | `rank_sources`, `read`, `read_series`, `fetch` |
+| Search scopes (`server.py`) | `scope_create`, `scope_list`, `scope_update`, `scope_delete`, `scope_bind_caller`, `scope_unbind_caller`, `scope_list_bindings`, `scope_stats` |
+| Refresh schedules/indexes (`server.py`) | `plan_crawl`, `generate_refresh_schedules`, `list_schedules`, `run_schedule`, `list_cnreport_rules`, `enumerate_wbgapi_indicators`, `register_discovered` |
+| Crawl policy control plane (`policy_tools.py`) | `policy_create`, `policy_list`, `policy_get`, `policy_update`, `policy_enable`, `policy_disable`, `policy_delete`, `policy_trigger_now`, `policy_runs`, `policy_estimate`, `data_stats` |
+| Crawl platform control (`platform_tools.py`) | `platform_sources`, `platform_runs`, `platform_trigger`, `platform_cancel_run`, `platform_cancel_pending` |
+| Crawl visibility (`visibility_tools.py`) | `crawl_status` |
+| Coverage gaps (`coverage_tools.py`) | `coverage_report` |
+| Authenticated-crawling identity pool (`auth_tools.py`) | `auth_status`, `auth_events`, `auth_request_login`, `auth_launch_login` |
 
 ## Catalog expansion and the read boundary
 

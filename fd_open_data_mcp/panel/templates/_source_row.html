@@ -1,5 +1,7 @@
   <tr>
     <td><a href="/panel/sources/{{ s.source }}">{{ s.source }}</a>
+      {% if s.kind == 'federated' %}<span class="badge running" title="联邦成员 federated member — runner 声明触发 triggers by runner declaration">联邦 fed</span>{% endif %}
+      {% if s.frozen_reason %}<span class="badge refused" title="冻结 frozen: {{ s.frozen_reason }}">❄ 冻结 frozen</span>{% endif %}
       {% if s.stalled %}<span class="warn-text" title="已点亮但超过 7 天无运行记录 lit but no run in >7 days">⚠ 停滞 stalled</span>{% endif %}</td>
     <td class="muted">{{ s.site or '—' }}</td>
     <td>{% if s.schedule %}<code>{{ s.schedule }}</code>{% else %}<span class="muted">未点亮 not lit</span>{% endif %}</td>

@@ -586,7 +586,8 @@ def platform_sources(session: Session, site: str | None = None,
                      now: dt.datetime | None = None) -> list[dict]:
     """Every ``crawl_sources`` row joined with its latest ``crawl_runs`` fact.
 
-    Per source: site, schedule (None = 未点亮 not lit), enabled, last run
+    Per source: site, schedule (None = 未点亮 not lit), enabled, kind
+    ('platform' | 'federated') with frozen_reason, last run
     (status/time/rows_written/id), the count of ACTIVE pending_runs (pending |
     claimed), and a ``stalled`` hint — True only for sources that are expected
     to run (enabled AND schedule lit) whose last run is absent or older than
@@ -638,6 +639,8 @@ def platform_sources(session: Session, site: str | None = None,
             "schedule": src.schedule, "enabled": src.enabled,
             "last_commit": src.last_commit,
             "updated_at": _iso(src.updated_at),
+            "kind": src.kind, "frozen_reason": src.frozen_reason,
+            "runner_image": src.runner_image,
             "last_run_id": rid,
             "last_run_status": rstatus,
             "last_run_at": _iso(rstart),

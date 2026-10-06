@@ -14,10 +14,10 @@ policy runs above; the Trigger column links to the source detail.</p>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('ID') }}{{ th('源', 'Source') }}{{ th('状态', 'Status') }}{{ th('开始', 'Started') }}{{ th('结束', 'Finished') }}{{ th('产出行', 'Rows') }}{{ th('触发行', 'Trigger') }}{{ th('错误', 'Error') }}</tr>
+  <tr>{{ th('ID') }}{{ th('源', 'Source') }}{{ th('状态', 'Status') }}{{ th('开始', 'Started') }}{{ th('结束', 'Finished') }}{{ th('产出行', 'Rows') }}{{ th('质量', 'Quality') }}{{ th('触发行', 'Trigger') }}{{ th('错误', 'Error') }}</tr>
   </thead>
   {% for r in platform_runs %}{% include "_platform_run_row.html" %}{% else %}
-  <tr><td colspan="8" class="muted">暂无平台运行 No platform runs.</td></tr>
+  <tr><td colspan="9" class="muted">暂无平台运行 No platform runs.</td></tr>
   {% endfor %}
 </table>
 </div>

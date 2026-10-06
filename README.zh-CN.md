@@ -111,24 +111,34 @@ fd-open-data-mcp read --concept-id 234 --entity-type stock --entity-id 1 --date 
 fd-open-data-mcp serve          # FastMCP，stdio 传输
 ```
 
-**36 个工具**，跨五个文件注册：
+**71 个工具**，跨六个文件注册（`server.py` 49 个 `@mcp.tool` + 五个 `register_*` 模块 22 个；2026-10-06 与线上实例 `tools/list` = 71 复核一致）：
 
 | 分组 | 工具 |
 |------|------|
-| 目录/绑定 | `import_catalog`、`consume_concepts`、`propose_bindings`、
-`list_bindings`、`review_bindings`、`confirm_binding`、`update_binding`、
-`list_concepts`、`list_cnreport_rules`、`enumerate_wbgapi_indicators`、
-`register_datasource`、`register_discovered` |
-| 实体身份 | `seed_entity_identifiers`、`resolve_entity`、`add_entity`、
-`update_entity`、`get_entity`、`list_entities`、`add_entity_identifier`、
-`ingest_entities_from_dump` |
-| 排序/读取 | `rank_sources`、`read`、`fetch` |
-| 刷新计划 | `generate_refresh_schedules`、`list_schedules`、`run_schedule`、
-`plan_crawl` |
-| 实体图 | `add_relationship`、`list_relationships`、`get_entity`、
-`graph_search` |
-| 向量/语义搜索 | `semantic_search`、`semantic_search_entities`、
-`semantic_search_unified`、`ai_search`、`re_embed_concept`、`update_concept` |
+| 目录/绑定（`server.py`） | `import_catalog`、`register_datasource`、`update_entity`、`update_concept`、
+`update_binding`、`consume_concepts`、`propose_bindings`、`list_concepts`、
+`list_concept_families`、`list_registry_entries`、`record_concept_mapping`、
+`list_concept_mappings`、`import_crosswalks`、`list_bindings`、`review_bindings`、
+`confirm_binding` |
+| 实体身份（`server.py`） | `seed_entity_identifiers`、`resolve_entity`、`add_entity_identifier`、
+`list_entities`、`get_entity`、`add_entity` |
+| 实体图（`server.py`） | `list_relationships`、`add_relationship`、`graph_search` |
+| 向量/语义搜索（`server.py`） | `semantic_search`、`semantic_search_entities`、
+`semantic_search_unified`、`re_embed_concept`、`ai_search` |
+| 排序/读取（`server.py`） | `rank_sources`、`read`、`read_series`、`fetch` |
+| 检索范围（`server.py`） | `scope_create`、`scope_list`、`scope_update`、`scope_delete`、
+`scope_bind_caller`、`scope_unbind_caller`、`scope_list_bindings`、`scope_stats` |
+| 刷新计划/索引（`server.py`） | `plan_crawl`、`generate_refresh_schedules`、`list_schedules`、
+`run_schedule`、`list_cnreport_rules`、`enumerate_wbgapi_indicators`、`register_discovered` |
+| 爬取策略控制面（`policy_tools.py`） | `policy_create`、`policy_list`、`policy_get`、
+`policy_update`、`policy_enable`、`policy_disable`、`policy_delete`、
+`policy_trigger_now`、`policy_runs`、`policy_estimate`、`data_stats` |
+| 爬取平台控制（`platform_tools.py`） | `platform_sources`、`platform_runs`、`platform_trigger`、
+`platform_cancel_run`、`platform_cancel_pending` |
+| 爬取可见性（`visibility_tools.py`） | `crawl_status` |
+| 覆盖缺口（`coverage_tools.py`） | `coverage_report` |
+| 认证爬取身份池（`auth_tools.py`） | `auth_status`、`auth_events`、`auth_request_login`、
+`auth_launch_login` |
 
 ## 指标目录扩容与读取边界
 

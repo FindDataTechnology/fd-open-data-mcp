@@ -12,6 +12,9 @@ Guardrails shared with the panel (spec: MCP 触发等价于 Console 触发):
 
 - unregistered sources are refused (crawl_sources is the registry),
 - disabled sources are refused,
+- federated members (kind='federated') trigger by declaration: frozen rows
+  and rows without a complete runner declaration are refused; platform rows
+  without a manifest mirror are refused (EXIT_SOURCE_MISSING guardrail),
 - single-flight: a source with an open ``crawl_runs`` row is refused,
 - cancel of a run only SETS ``cancel_requested`` on a still-running row (CAS);
   terminal rows return an explanation instead of an error,
@@ -49,8 +52,9 @@ def trigger_platform_run(
     Returns one of:
       {"status": "triggered", "pending_id", "source", "site"}
       {"status": "not_found", "reason"} — source not registered in crawl_sources
-      {"status": "refused", "reason"} — disabled source, or an open run exists
-          (single-flight guardrail)
+      {"status": "refused", "reason"} — disabled source, a frozen federated
+          member, a federated member without a runner declaration, a platform
+          source with no manifest mirror, or an open run exists (single-flight)
       {"status": "error", "reason"} — the insert itself was rejected (e.g. the
           source's site is not registered in crawl_sites); friendly text, the
           caller never sees a raw IntegrityError
@@ -61,7 +65,8 @@ def trigger_platform_run(
         return {
             "status": "not_found",
             "reason": (f"source '{source}' is not registered in crawl_sources "
-                       f"(the dispatcher mirrors spiders/*/manifest.yaml); "
+                       f"(the registry holds manifest-mirrored platform "
+                       f"sources and seeded federated members); "
                        f"trigger refused"),
         }
     if not src.enabled:
@@ -70,17 +75,37 @@ def trigger_platform_run(
             "reason": f"source '{source}' is disabled in crawl_sources; "
                       f"enable it before triggering",
         }
-    if src.last_commit is None:
-        # Federated members (concept line, law line, …) have no spiders/<src>/
-        # in the content repo; the dispatcher's runner_cli would exit
-        # EXIT_SOURCE_MISSING and record a bogus failed run. Their scheduling
-        # lives in their own line — refuse here with a pointer instead.
+    if src.kind == "federated":
+        # legal-line-federation: federated members trigger BY DECLARATION.
+        # The dispatcher executes the registered runner image/command
+        # verbatim, so a complete declaration is the release condition —
+        # the content-repo manifest check below does not apply to them.
+        if src.frozen_reason:
+            return {
+                "status": "refused",
+                "reason": (f"source '{source}' is frozen: "
+                           f"{src.frozen_reason}; clear frozen_reason in "
+                           f"crawl_sources before triggering"),
+            }
+        if not src.runner_declared:
+            return {
+                "status": "refused",
+                "reason": (f"source '{source}' is a federated member without "
+                           f"a complete runner declaration (runner_image/"
+                           f"runner_command NULL) — the site dispatcher has "
+                           f"nothing to execute; fix the registration first"),
+            }
+    elif src.last_commit is None:
+        # Platform-kind rows are dispatcher-mirrored from spiders/*/manifest.yaml;
+        # no mirror = the dispatcher's runner_cli would exit EXIT_SOURCE_MISSING
+        # and record a bogus failed run. Refuse with a pointer instead.
         return {
             "status": "refused",
-            "reason": (f"source '{source}' is a federated member without a "
-                       f"content-repo manifest; the platform dispatcher cannot "
-                       f"run it — trigger it from its own line's entry "
-                       f"(e.g. the concept line's policy trigger)"),
+            "reason": (f"source '{source}' has no content-repo manifest "
+                       f"mirrored (last_commit NULL) — the platform "
+                       f"dispatcher cannot run it; register it as a federated "
+                       f"member (kind='federated' + runner declaration) if it "
+                       f"executes outside the platform dispatcher"),
         }
     open_run = (
         session.query(CrawlRun.id)

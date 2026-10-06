@@ -985,8 +985,12 @@ class CrawlSite(Base):
 
 class CrawlSource(Base):
     """One spider of the platform, mirrored from the content repo's
-    spiders/*/manifest.yaml by the dispatcher. ``schedule`` NULL means the
-    source is registered but not lit up (未点亮) — no automatic runs."""
+    spiders/*/manifest.yaml by the dispatcher (``kind``='platform'), or a
+    federated member registered by seed (``kind``='federated': the law line's
+    CronJobs — scheduling stays in its own chart, the control plane only
+    reads the runner declaration and queues pending_runs). ``schedule`` NULL
+    means the source is registered but not lit up (未点亮) — no automatic
+    runs; federated members are always platform-unlit by definition."""
     __tablename__ = "crawl_sources"
 
     source = Column(Text, primary_key=True)
@@ -999,14 +1003,35 @@ class CrawlSource(Base):
     # session-pool: the source's login profile (spiders/<source>/login.py
     # declares it); NULL = anonymous crawl, no identity pool consulted.
     auth_profile = Column(Text, nullable=True)
+    # legal-line-federation: execution-body registration. 'platform' rows are
+    # dispatcher-mirrored manifest sources; 'federated' rows carry a runner
+    # declaration (image + command + timeout) the dispatcher executes verbatim
+    # when a pending_runs row is claimed. frozen_reason set = 注册冻结: the
+    # trigger refuses with the reason (a retired member stays visible).
+    kind = Column(Text, nullable=False, default="platform",
+                  server_default="platform")          # 'platform' | 'federated'
+    runner_image = Column(Text, nullable=True)        # full image ref incl. tag
+    runner_command = Column(JSONB, nullable=True)     # argv list, e.g. ["node","bin/x.mjs"]
+    timeout_seconds = Column(Integer, nullable=True)  # declared job deadline
+    frozen_reason = Column(Text, nullable=True)       # set = frozen (不可触发)
     updated_at = Column(DateTime(timezone=True), nullable=False,
                         default=_now, server_default=func.now())
+
+    @property
+    def runner_declared(self) -> bool:
+        """A complete runner declaration (both image and argv) is present —
+        the minimum for the dispatcher to execute a federated row."""
+        return bool(self.runner_image and self.runner_command)
 
     def toDict(self) -> dict:
         return {
             "source": self.source, "site": self.site, "schedule": self.schedule,
             "enabled": self.enabled, "last_commit": self.last_commit,
             "auth_profile": self.auth_profile,
+            "kind": self.kind, "runner_image": self.runner_image,
+            "runner_command": self.runner_command,
+            "timeout_seconds": self.timeout_seconds,
+            "frozen_reason": self.frozen_reason,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
 
@@ -1036,6 +1061,10 @@ class CrawlRun(Base):
     # run was injected with (NULL = anonymous run). Alias, not FK — the pool
     # table is keyed (source, account_alias) and rows outlive runs.
     identity_alias = Column(Text, nullable=True)
+    # legal-line-federation (telemetry contract): quality metrics the runner
+    # self-reports at close (loader: effective_body_ratio / coverage_count).
+    # NULL = not reported (mirror-only rows, legacy runners).
+    metrics = Column(JSONB, nullable=True)
     created_at = Column(DateTime(timezone=True), nullable=False,
                         default=_now, server_default=func.now())
 
@@ -1059,6 +1088,7 @@ class CrawlRun(Base):
                                  if self.cancel_requested else None),
             "pending_run_id": self.pending_run_id,
             "identity_alias": self.identity_alias,
+            "metrics": self.metrics,
         }
 
 

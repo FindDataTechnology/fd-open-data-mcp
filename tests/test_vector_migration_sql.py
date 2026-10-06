@@ -63,12 +63,15 @@ def mig():
 # ---------------------------------------------------------------------------
 
 def test_revision_is_new_head_of_shipped_chain():
-    """The shipped head is 0006 (control-plane adoption); each revision
-    keeps its own down_revision wiring (their contract tests live above)."""
+    """The shipped head is 0007 (legal-line federation registration); each
+    revision keeps its own down_revision wiring (their contract tests live
+    above)."""
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0006_control_plane_adoption"
-    rev = script.get_revision("0006_control_plane_adoption")
-    assert rev.down_revision == "0005_concept_coverage"
+    assert script.get_current_head() == "0007_legal_federation"
+    rev = script.get_revision("0007_legal_federation")
+    assert rev.down_revision == "0006_control_plane_adoption"
+    rev6 = script.get_revision("0006_control_plane_adoption")
+    assert rev6.down_revision == "0005_concept_coverage"
     rev5 = script.get_revision("0005_concept_coverage")
     assert rev5.down_revision == "0004_scope_tables"
     rev4 = script.get_revision("0004_scope_tables")
@@ -79,6 +82,7 @@ def test_chain_is_linear_head_to_baseline():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0007_legal_federation",
         "0006_control_plane_adoption",
         "0005_concept_coverage",
         "0004_scope_tables",
@@ -375,6 +379,6 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0006_control_plane_adoption"
+    assert version == "0007_legal_federation"
     # Guarded no-op: only the alembic ledger exists; no app tables were built.
     assert tables == {"alembic_version"}
