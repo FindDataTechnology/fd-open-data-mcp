@@ -2,20 +2,23 @@ r"""Legal-line federation tests (change legal-line-federation, tasks 1.1/1.3/1.4
 
 Four layers, pinned the same ways as the 0006 contract tests:
 
-- Migration contract (0007_legal_federation): sqlite executes nothing (dialect
-  guard); against a recording fake-PG bind the revision emits only guarded
-  statements (ADD COLUMN IF NOT EXISTS / ON CONFLICT) and re-emits the exact
-  same list on a second run — the idempotent-upsert seed by construction.
+- Migration contract (0007 + 0008): sqlite executes nothing (dialect guard);
+  against a recording fake-PG bind the revisions emit only guarded/idempotent
+  statements (ADD COLUMN IF NOT EXISTS / ON CONFLICT / same-value UPDATE) and
+  re-emit the exact same list on a second run. 0008 backfills
+  runner_env_from FROM 0007's SEED_SOURCES — one registration data home.
 - Seed pinning: the 8 law-line members, their runner declarations read from
   helm-law-scraw values.yaml (all on the ccr wave image — flk diverges from
   the chart's Harbor ref on purpose since dispatcher Jobs carry no
   imagePullSecrets; rmfyalk takes the auth-broker image with
-  --account-id/--auth-broker; wenshu frozen with no declaration), and the
-  upsert never touches dispatcher-owned fields.
+  --account-id/--auth-broker; wenshu frozen with no declaration), the
+  envFrom secret lists (drill 4.2: a Job without the RustFS credentials
+  secret crashes), and the upsert never touches dispatcher-owned fields.
 - PostgreSQL functional (local scratch server, skipped when unreachable):
-  'alembic upgrade head' builds the chain including 0007; re-executing the
-  revision's statements is a verified no-op that leaves the 8 rows, their
-  values, and a dispatcher-owned field (schedule) untouched.
+  'alembic upgrade head' builds the chain including 0007+0008; re-executing
+  the revisions' statements is a verified no-op that leaves the 8 rows,
+  their values, a dispatcher-owned field (schedule) and the env backfill
+  untouched.
 - Application layer on the sqlite fixture: the model columns round-trip, the
   shared trigger op releases declared federated members (queue site =
   registered site) while refusing frozen / declaration-less / unregistered /
@@ -46,13 +49,15 @@ from fd_open_data_mcp.panel.app import app
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 ALEMBIC_DIR = PROJECT_ROOT / "alembic"
 REVISION_PATH = ALEMBIC_DIR / "versions" / "0007_legal_federation.py"
+REVISION_0008_PATH = ALEMBIC_DIR / "versions" / "0008_federation_runner_env.py"
 
-SITE = "xinru-master"
+SITE = "xinru-server1"
 FROZEN = "月度语料包路线（夜跑永久停）"
+CRED = "flk-law-crawl-credentials"
 
 
-def _load_revision():
-    spec = importlib.util.spec_from_file_location("mig_0007", REVISION_PATH)
+def _load_revision(path=REVISION_PATH, name="mig_0007"):
+    spec = importlib.util.spec_from_file_location(name, path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -63,15 +68,24 @@ def mig():
     return _load_revision()
 
 
+@pytest.fixture(scope="module")
+def mig8():
+    return _load_revision(REVISION_0008_PATH, "mig_0008")
+
+
 # ---------------------------------------------------------------------------
 # Chain wiring
 # ---------------------------------------------------------------------------
 
-def test_revision_wiring():
+def test_revision_wiring(mig, mig8):
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0007_legal_federation"
+    assert script.get_current_head() == "0008_federation_runner_env"
+    assert script.get_revision("0008_federation_runner_env").down_revision == (
+        "0007_legal_federation")
     assert script.get_revision("0007_legal_federation").down_revision == (
         "0006_control_plane_adoption")
+    # 0008 derives its backfill from the registration constant — one data home
+    assert mig8._SEED == mig.SEED_SOURCES
 
 
 # ---------------------------------------------------------------------------
@@ -173,7 +187,7 @@ def test_upgrade_is_idempotent_by_construction(mig):
     assert first == second
 
 
-def test_seed_upserts_all_eight_members_on_xinru_master(mig):
+def test_seed_upserts_all_eight_members_on_xinru_server1(mig):
     bind = _run_on_fake_pg(mig)
     site_stmts = [s for s in bind.statements if s.startswith("INSERT INTO crawl_sites")]
     assert len(site_stmts) == 1 and f"'{SITE}'" in site_stmts[0] \
@@ -181,19 +195,21 @@ def test_seed_upserts_all_eight_members_on_xinru_master(mig):
     inserts = [s for s in bind.statements if s.startswith("INSERT INTO crawl_sources")]
     assert len(inserts) == len(mig.SEED_SOURCES) == 8
     for s in inserts:
-        assert "'xinru-master'" in s and "'federated'" in s
+        assert f"'{SITE}'" in s and "'federated'" in s
         assert "ON CONFLICT (source) DO UPDATE" in s
     names = {s.split("VALUES ('", 1)[1].split("'", 1)[0] for s in inserts}
     assert names == {r["source"] for r in mig.SEED_SOURCES}
     # the UPDATE set is federation-owned fields ONLY — dispatcher-owned fields
-    # (schedule / last_commit / auth_profile / enabled) are never clobbered
+    # (schedule / last_commit / auth_profile / enabled) are never clobbered,
+    # and runner_env_from belongs to 0008 (the column does not exist yet here)
     joined = "\n".join(inserts)
     for owned in ("schedule", "last_commit", "auth_profile", "enabled",
-                  "updated_at"):
+                  "updated_at", "runner_env_from"):
         for s in inserts:
             set_clause = s.split("DO UPDATE SET ", 1)[1]
             assert not set_clause.startswith(owned) and \
                 f", {owned} " not in set_clause, (owned, s)
+    assert "runner_env_from" not in joined
 
 
 def test_downgrade_drops_exactly_the_six_columns(mig):
@@ -239,18 +255,23 @@ def test_seed_rows_match_the_chart_truth(mig):
     assert rows["flk-law-crawl"] == {
         "source": "flk-law-crawl", "runner_image": IMG_FDK,
         "runner_command": ["node", "bin/flk-crawl.mjs"],
-        "timeout_seconds": 14400, "frozen_reason": None}
+        "timeout_seconds": 14400, "frozen_reason": None,
+        "runner_env_from": [CRED]}
     # guide-cases: chart-external object, same wave image
     assert rows["guide-cases-crawl"]["runner_image"] == IMG_FDK
     assert rows["guide-cases-crawl"]["runner_command"] == \
         ["node", "bin/guide-cases-crawl.mjs"]
     assert rows["guide-cases-crawl"]["timeout_seconds"] == 14400
-    # rmfyalk: auth-broker image, account identity + broker endpoint in argv
+    # rmfyalk: auth-broker image, account identity + broker endpoint in argv,
+    # and the auth-broker token/jar + identity proxy secrets on top of RustFS
     assert rows["rmfyalk-case-crawl"]["runner_image"] == IMG_BROKER
     assert rows["rmfyalk-case-crawl"]["runner_command"] == [
         "node", "bin/rmfyalk-crawl.mjs", "--account-id", "acct001",
         "--auth-broker", "http://legal-auth-broker.scraw", "--rate-ms", "1100"]
     assert rows["rmfyalk-case-crawl"]["timeout_seconds"] == 21600
+    assert rows["rmfyalk-case-crawl"]["runner_env_from"] == [
+        "flk-law-crawl-credentials", "legal-auth-broker",
+        "legal-identity-rmfyalk-acct001"]
     # the three charted wave-1 crawlers + ccdi: wave image, --rate-ms argv
     for name, timeout in (("mfa-treaty-crawl", 28800),
                           ("gov-rules-crawl", 14400),
@@ -261,10 +282,77 @@ def test_seed_rows_match_the_chart_truth(mig):
         assert r["timeout_seconds"] == timeout, name
         assert r["runner_command"][0:2] == ["node", f"bin/{name}.mjs"], name
     # wenshu: frozen, no runner declaration — permanently un-triggersable
+    # (the credentials secret is still registered for a future unfreeze)
     assert rows["wenshu-crawl"]["frozen_reason"] == FROZEN
     assert rows["wenshu-crawl"]["runner_image"] is None
     assert rows["wenshu-crawl"]["runner_command"] is None
     assert rows["wenshu-crawl"]["timeout_seconds"] is None
+    assert rows["wenshu-crawl"]["runner_env_from"] == [CRED]
+    # drill 4.2: EVERY member carries at least the RustFS credentials secret
+    for name, r in rows.items():
+        assert CRED in r["runner_env_from"], name
+
+
+# ---------------------------------------------------------------------------
+# 0008_federation_runner_env: column + envFrom backfill contract
+# ---------------------------------------------------------------------------
+
+def test_0008_upgrade_and_downgrade_are_noop_on_sqlite(mig8, monkeypatch):
+    engine, conn, executed = _sqlite_ops(monkeypatch, mig8)
+    try:
+        mig8.upgrade()
+        mig8.downgrade()
+        assert executed == [], "must not touch a non-postgresql database"
+    finally:
+        conn.close()
+        engine.dispose()
+
+
+def test_0008_guard_returns_before_any_sql(mig8):
+    broken = types.SimpleNamespace(
+        dialect=types.SimpleNamespace(name="mysql"),
+        exec_driver_sql=lambda *_: pytest.fail("guard must return before any SQL"),
+    )
+    original = mig8.op
+    mig8.op = types.SimpleNamespace(get_bind=lambda: broken)
+    try:
+        mig8.upgrade()
+        mig8.downgrade()
+    finally:
+        mig8.op = original
+
+
+def test_0008_adds_column_and_backfills_exactly_the_eight_rows(mig8, mig):
+    bind = _run_on_fake_pg(mig8)
+    alters = [s for s in bind.statements if s.startswith("ALTER TABLE")]
+    assert alters == ["ALTER TABLE crawl_sources "
+                      "ADD COLUMN IF NOT EXISTS runner_env_from JSONB"]
+    updates = [s for s in bind.statements if s.startswith("UPDATE crawl_sources")]
+    assert len(updates) == len(mig.SEED_SOURCES) == 8
+    for s in updates:
+        # scoped to federated rows: a same-named platform row is never touched
+        assert "WHERE source = " in s and "AND kind = 'federated'" in s
+    by_source = {s.split("WHERE source = '", 1)[1].split("'", 1)[0]: s
+                 for s in updates}
+    # rmfyalk: credentials + auth-broker token/jar + identity proxy
+    assert "flk-law-crawl-credentials" in by_source["rmfyalk-case-crawl"]
+    assert "legal-auth-broker" in by_source["rmfyalk-case-crawl"]
+    assert "legal-identity-rmfyalk-acct001" in by_source["rmfyalk-case-crawl"]
+    # every other member: the RustFS credentials secret only
+    for name in ("flk-law-crawl", "gov-rules-crawl", "wenshu-crawl"):
+        assert f'["{CRED}"]' in by_source[name], name
+
+
+def test_0008_replay_is_idempotent_by_construction(mig8):
+    first = _run_on_fake_pg(mig8).statements
+    second = _run_on_fake_pg(mig8).statements
+    assert first == second
+
+
+def test_0008_downgrade_drops_only_the_column(mig8):
+    bind = _run_on_fake_pg(mig8, fn="downgrade")
+    assert bind.statements == [
+        "ALTER TABLE crawl_sources DROP COLUMN IF EXISTS runner_env_from"]
 
 
 # ---------------------------------------------------------------------------
@@ -337,12 +425,19 @@ class TestMigrationOnPostgreSQL:
                     "SELECT count(*) FROM crawl_sites WHERE id = :s"),
                     {"s": SITE}).scalar() == 1
                 row = conn.execute(text(
-                    "SELECT runner_image, runner_command, timeout_seconds "
+                    "SELECT runner_image, runner_command, timeout_seconds, "
+                    "runner_env_from "
                     "FROM crawl_sources WHERE source = 'rmfyalk-case-crawl'"
                 )).one()
                 assert row[0] == IMG_BROKER
                 assert list(row[1]) == mig.SEED_SOURCES[2]["runner_command"]
                 assert row[2] == 21600
+                assert list(row[3]) == mig.SEED_SOURCES[2]["runner_env_from"]
+                env = dict(conn.execute(text(
+                    "SELECT source, runner_env_from FROM crawl_sources "
+                    "WHERE kind = 'federated'")).all())
+                assert env["gov-rules-crawl"] == [CRED]
+                assert env["wenshu-crawl"] == [CRED]
                 frozen = conn.execute(text(
                     "SELECT frozen_reason, runner_image FROM crawl_sources "
                     "WHERE source = 'wenshu-crawl'")).one()
@@ -351,7 +446,7 @@ class TestMigrationOnPostgreSQL:
             engine.dispose()
 
     def test_seed_replay_is_idempotent_and_never_clobbers_sync_fields(
-            self, pg_database_url, mig):
+            self, pg_database_url, mig, mig8):
         _alembic_upgrade_head(pg_database_url)
         engine = create_engine(pg_database_url)
         try:
@@ -361,22 +456,35 @@ class TestMigrationOnPostgreSQL:
                     "UPDATE crawl_sources SET schedule = '23 4 * * *', "
                     "last_commit = 'feedc0d', enabled = false "
                     "WHERE source = 'gov-rules-crawl'"))
-            # replay the revision's statements verbatim (guarded + upsert)
+            # replay both revisions' statements verbatim (guarded + upsert +
+            # same-value UPDATE): 0007 first — its upsert must NOT clobber the
+            # env backfill that 0008 owns — then 0008's re-assert
             with engine.begin() as conn:
                 for statement in (*mig._DDL, mig._SEED_SITE_SQL,
                                   *(mig._upsert_sql(r) for r in mig.SEED_SOURCES)):
+                    conn.exec_driver_sql(statement)
+            with engine.connect() as conn:
+                env = conn.execute(text(
+                    "SELECT runner_env_from FROM crawl_sources "
+                    "WHERE source = 'rmfyalk-case-crawl'")).scalar()
+                assert list(env) == mig.SEED_SOURCES[2]["runner_env_from"]
+            with engine.begin() as conn:
+                for statement in (*mig8._DDL,
+                                  *(mig8._update_sql(r) for r in mig8._SEED)):
                     conn.exec_driver_sql(statement)
             with engine.connect() as conn:
                 assert conn.execute(text(
                     "SELECT count(*) FROM crawl_sources "
                     "WHERE kind = 'federated'")).scalar() == 8
                 row = conn.execute(text(
-                    "SELECT schedule, last_commit, enabled, timeout_seconds "
+                    "SELECT schedule, last_commit, enabled, timeout_seconds, "
+                    "runner_env_from "
                     "FROM crawl_sources WHERE source = 'gov-rules-crawl'"
                 )).one()
                 # sync fields survived the replay; declaration re-asserted
                 assert row[0] == "23 4 * * *" and row[1] == "feedc0d"
                 assert row[2] is False and row[3] == 14400
+                assert list(row[4]) == [CRED]
         finally:
             engine.dispose()
 
@@ -403,7 +511,7 @@ _UNSET = object()  # distinguishes "not given" from an explicit None
 
 def _seed_source(name, *, kind="federated", site=SITE, enabled=True,
                  runner_image="img:1", runner_command=_UNSET, timeout=60,
-                 frozen_reason=None, last_commit=None):
+                 frozen_reason=None, last_commit=None, runner_env_from=None):
     from fd_open_data_mcp.db import get_database
     from fd_open_data_mcp.models import CrawlSource
     _seed_site(site)
@@ -417,7 +525,7 @@ def _seed_source(name, *, kind="federated", site=SITE, enabled=True,
                 runner_image=runner_image,
                 runner_command=runner_command,
                 timeout_seconds=timeout, frozen_reason=frozen_reason,
-                last_commit=last_commit))
+                runner_env_from=runner_env_from, last_commit=last_commit))
             s.commit()
     finally:
         s.close()
@@ -432,7 +540,7 @@ def test_federation_columns_round_trip(session):
     from fd_open_data_mcp.models import CrawlRun, CrawlSource
 
     _seed_source("rt-crawl", runner_command=["node", "bin/rt.mjs", "--rate-ms", "9"],
-                 frozen_reason=None)
+                 frozen_reason=None, runner_env_from=[CRED])
     s = get_database().get_session()
     try:
         src = s.get(CrawlSource, "rt-crawl")
@@ -440,6 +548,7 @@ def test_federation_columns_round_trip(session):
         assert src.runner_command == ["node", "bin/rt.mjs", "--rate-ms", "9"]
         assert src.timeout_seconds == 60 and src.frozen_reason is None
         assert src.runner_declared is True
+        assert src.runner_env_from == [CRED]
         run = CrawlRun(source="rt-crawl", status="success", started_at=NOW,
                        rows_written=5,
                        metrics={"effective_body_ratio": 0.87,
@@ -452,6 +561,7 @@ def test_federation_columns_round_trip(session):
         assert run.toDict()["metrics"] == run.metrics
         d = src.toDict()
         assert d["kind"] == "federated" and d["timeout_seconds"] == 60
+        assert d["runner_env_from"] == [CRED]
     finally:
         s.close()
     # platform default + partial declaration

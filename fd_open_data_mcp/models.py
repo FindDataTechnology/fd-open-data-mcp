@@ -1013,6 +1013,10 @@ class CrawlSource(Base):
     runner_image = Column(Text, nullable=True)        # full image ref incl. tag
     runner_command = Column(JSONB, nullable=True)     # argv list, e.g. ["node","bin/x.mjs"]
     timeout_seconds = Column(Integer, nullable=True)  # declared job deadline
+    # legal-line-federation (0008): Secret names the dispatcher envFrom's into
+    # this source's Job — mechanical injection (RustFS credentials etc.), not
+    # source business logic. NULL = nothing injected.
+    runner_env_from = Column(JSONB, nullable=True)
     frozen_reason = Column(Text, nullable=True)       # set = frozen (不可触发)
     updated_at = Column(DateTime(timezone=True), nullable=False,
                         default=_now, server_default=func.now())
@@ -1031,6 +1035,7 @@ class CrawlSource(Base):
             "kind": self.kind, "runner_image": self.runner_image,
             "runner_command": self.runner_command,
             "timeout_seconds": self.timeout_seconds,
+            "runner_env_from": self.runner_env_from,
             "frozen_reason": self.frozen_reason,
             "updated_at": self.updated_at.isoformat() if self.updated_at else None,
         }
