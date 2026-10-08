@@ -7,10 +7,10 @@
   {#- apply the stored theme before first paint (design D2); no-JS clients
       fall back to prefers-color-scheme tokens in app.css -#}
   <script>(function(){try{var t=localStorage.getItem("panel-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}})();</script>
-  <link rel="stylesheet" href="/panel/static/app.css">
+  <link rel="stylesheet" href="/panel/static/app.css?v={{ css_v }}">
   <link rel="icon" href="data:,">
   <script src="/panel/static/htmx.min.js" defer></script>
-  <script src="/panel/static/app.js" defer></script>
+  <script src="/panel/static/app.js?v={{ css_v }}" defer></script>
 </head>
 <body>
   <a class="skip-link" href="#main">跳到内容 Skip to content</a>

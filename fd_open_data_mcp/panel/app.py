@@ -37,6 +37,14 @@ from fd_open_data_mcp.visibility import snapshot as _snapshot
 
 HERE = Path(__file__).parent
 templates = Jinja2Templates(directory=str(HERE / "templates"))
+# Cache-busting fingerprint for static assets: static files ship no
+# cache-control header, so browsers heuristic-cache app.css across deploys and
+# new UI ships broken (seen 2026-10-08: station modal CSS missing → tiny
+# frame). Content hash changes on every deploy → URL changes → cache busts.
+import hashlib  # noqa: E402
+
+_css_bytes = (HERE / "static" / "app.css").read_bytes()
+templates.env.globals["css_v"] = hashlib.md5(_css_bytes).hexdigest()[:10]
 logger = logging.getLogger(__name__)
 
 FREQUENCIES = ["daily", "weekly", "monthly", "quarterly", "yearly"]

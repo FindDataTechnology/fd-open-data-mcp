@@ -404,7 +404,7 @@ button.link:active, .chip:active, a.btn:active, button.btn:active,
   color: var(--text, inherit);
   border: 1px solid var(--border);
   border-radius: var(--radius);
-  width: min(980px, 96vw);
+  width: min(1100px, 97vw);
   max-height: 94vh;
   overflow: auto;
   padding: 16px 18px;
@@ -422,7 +422,7 @@ button.link:active, .chip:active, a.btn:active, button.btn:active,
 }
 .station-steps li { margin: 2px 0; }
 .station-modal iframe {
-  width: 100%; height: min(62vh, 640px);
+  width: 100%; height: min(66vh, 720px);
   border: 1px solid var(--border); border-radius: var(--radius);
   background: #111; display: block;
 }
