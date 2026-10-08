@@ -267,6 +267,54 @@ def test_station_view_shows_failure_reason_and_relaunch(session):
     assert 'name="account_alias" value="acc-f"' in r.text
 
 
+# ── observation modal (2026-10-08 refactor) ─────────────────────────────────
+def test_station_view_modal_headlines_site_and_account(session):
+    """The modal must say WHICH site and WHICH account: a bare frame read as
+    an opaque window and the operator had no idea what they were logging."""
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="waiting_operator",
+                   deadline=LIVE_DEADLINE)
+    r = client.get(f"/panel/auth/station/{sid}/view")
+    assert r.status_code == 200
+    # display name comes from the mapping, not the raw source code
+    assert "人民法院案例库" in r.text
+    assert "https://rmfyalk.court.gov.cn" in r.text
+    # the account is a first-class headline element
+    assert "<strong>acct001</strong>" in r.text
+    # dialog semantics: backdrop + close button
+    assert "station-backdrop" in r.text and "关闭" in r.text
+
+
+def test_station_view_readiness_probe_uses_novnc_marker(session):
+    """The boot probe must look for noVNC's real DOM marker: the previous
+    size>200 probe matched the friendly 502 page and stopped retrying, so
+    operators stared at '暂不可达' forever."""
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    iid = _ident("rmfyalk", "acc-m", "login_required")
+    sid = _station(iid, "rmfyalk", "acc-m", status="waiting_operator",
+                   deadline=LIVE_DEADLINE)
+    r = client.get(f"/panel/auth/station/{sid}/view")
+    assert "noVNC_screen" in r.text or "noVNC_container" in r.text
+    assert "innerHTML.length > 200" not in r.text
+
+
+def test_station_status_poll_endpoint(session):
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    iid = _ident("rmfyalk", "acc-p", "login_required")
+    sid = _station(iid, "rmfyalk", "acc-p", status="waiting_operator",
+                   deadline=LIVE_DEADLINE)
+    r = client.get(f"/panel/auth/station/{sid}/status")
+    assert r.status_code == 200
+    payload = r.json()
+    assert payload["id"] == sid and payload["status"] == "waiting_operator"
+    assert payload["live"] is True
+    assert payload["source_label"] == "人民法院案例库"
+    assert payload["account_alias"] == "acc-p"
+    # unknown station -> 404 (the poller just keeps its previous state)
+    assert client.get("/panel/auth/station/999999/status").status_code == 404
+
+
 def test_reclaim_route_tears_station_down(session, monkeypatch):
     _source("rmfyalk")
     station_ops.ensure_identity_with_egress(session, "rmfyalk", "acc-rc",
@@ -348,6 +396,7 @@ def test_vnc_reverse_proxy_forwards_path_and_query(session, monkeypatch,
 
 def test_vnc_reverse_proxy_unreachable_is_friendly_502(session, monkeypatch):
     monkeypatch.setattr(appmod, "_station_upstream", lambda sid: "127.0.0.1:1")
+    monkeypatch.setattr(appmod, "STATION_PROXY_ATTEMPTS", 1)   # no boot wait
     r = client.get("/panel/auth/station/1/vnc/vnc.html")
     assert r.status_code == 502          # friendly page, not a 500
     assert "登录站暂不可达" in r.text and "unreachable" in r.text

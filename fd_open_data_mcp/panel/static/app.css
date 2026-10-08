@@ -387,3 +387,42 @@ button.link:active, .chip:active, a.btn:active, button.btn:active,
 @media (prefers-reduced-motion: reduce) {
   .toast { animation: none; }
 }
+
+/* ── login-station observation modal (2026-10-08 refactor) ─────────────────
+   Centered dialog over a dark backdrop: headlines WHICH site/account the
+   operator is logging into (a bare embedded frame read as an opaque window),
+   with the iframe as the body and a status strip that flips to success or
+   failure via the status poll. */
+.station-backdrop {
+  position: fixed; inset: 0; z-index: 90;
+  background: rgba(10, 12, 16, .55);
+  display: flex; align-items: center; justify-content: center;
+  padding: 16px;
+}
+.station-modal {
+  background: var(--bg, #fff);
+  color: var(--text, inherit);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  width: min(980px, 96vw);
+  max-height: 94vh;
+  overflow: auto;
+  padding: 16px 18px;
+  box-shadow: 0 16px 48px rgba(0, 0, 0, .4);
+}
+.station-head {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 12px; margin-bottom: 4px;
+}
+.station-head h3 { margin: 0 0 2px; font-size: 1.15rem; }
+.station-sub { margin: 0; font-size: .95em; }
+.station-steps {
+  margin: 8px 0 12px; padding-left: 20px;
+  color: var(--muted, #666); font-size: .92em;
+}
+.station-steps li { margin: 2px 0; }
+.station-modal iframe {
+  width: 100%; height: min(62vh, 640px);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  background: #111; display: block;
+}

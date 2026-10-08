@@ -140,6 +140,20 @@ def mask_proxy_url(url: str | None) -> str:
     return re.sub(r"//[^@/]+@", "//••••@", url)
 
 
+# Operator-facing display names for login sources: the observation modal
+# headlines WHICH site the operator is logging into (a bare "rmfyalk / acct001"
+# row read as an opaque code name). Unknown sources fall back to the raw name.
+STATION_SOURCE_LABELS: dict[str, tuple[str, str]] = {
+    "rmfyalk": ("人民法院案例库", "https://rmfyalk.court.gov.cn"),
+}
+
+
+def source_label(source: str) -> tuple[str, str]:
+    """``(display_name, site_url)`` for a login source; unknown sources
+    degrade to ``(source, "")``."""
+    return STATION_SOURCE_LABELS.get(source, (source, ""))
+
+
 def selectable_egresses(session: Session) -> list[dict]:
     """The egress choices an operator may pick for a login: every healthy
     pooled proxy (not retired, not direct, has a port), id-ascending.
@@ -619,15 +633,30 @@ def station_status(
     _apply_timeouts(session, now)
     rows = (session.query(CrawlLoginStation)
             .order_by(CrawlLoginStation.id.desc()).limit(limit).all())
-    return [{
-        "id": st.id, "identity_id": st.identity_id, "source": st.source,
-        "account_alias": st.account_alias, "status": st.status,
-        "proxy_url_masked": mask_proxy_url(st.proxy_url),
-        "note": st.note, "created_at": _iso(st.created_at),
-        "deadline_at": _iso(st.deadline_at), "finished_at": _iso(st.finished_at),
-        "live": st.status in STATION_OPEN,
-        "error": station_error(st),
-    } for st in rows]
+    out = []
+    for st in rows:
+        label, url = source_label(st.source)
+        out.append({
+            "id": st.id, "identity_id": st.identity_id, "source": st.source,
+            "source_label": label, "source_url": url,
+            "account_alias": st.account_alias, "status": st.status,
+            "proxy_url_masked": mask_proxy_url(st.proxy_url),
+            "note": st.note, "created_at": _iso(st.created_at),
+            "deadline_at": _iso(st.deadline_at), "finished_at": _iso(st.finished_at),
+            "live": st.status in STATION_OPEN,
+            "error": station_error(st),
+        })
+    return out
+
+
+def station_brief(session: Session, station_id: int,
+                  now: dt.datetime | None = None) -> dict | None:
+    """One station's polling payload (modal status refresh): identity context,
+    display label and live/error state — None for unknown stations."""
+    for st in station_status(session, now=now):
+        if st["id"] == station_id:
+            return st
+    return None
 
 
 def station_error(st) -> str | None:

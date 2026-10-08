@@ -1,58 +1,151 @@
-{#- Embedded login-station observation view (login-station-console 3.3):
-    the iframe points at the panel reverse proxy (panel-gated), noVNC connects
-    back through the relayed websockify path. While the station boots the
-    noVNC page 502s, so the frame re-requests itself instead of leaving the
-    operator to refresh a blank box; a station that already ended renders its
-    failure reason and a relaunch instead of an iframe that can never work. -#}
-<div class="card">
-  <h3>观察窗 <span class="en">Observation view</span> <span class="badge running">#{{ st.id }} {{ st.status }}</span></h3>
-  <p class="muted">{{ st.source }} / {{ st.account_alias }} — 在下方画面中完成登录（滑块 / 验证码）；完成后身份即转活跃，可关闭本页面。
-  Complete the login (slider / captcha) inside the frame below; the identity turns active when done and this view can be closed.</p>
-  {% if st.live %}
-  <iframe src="{{ vnc_url }}" title="login station {{ st.id }} observation view"
-          style="width:100%;height:520px;border:1px solid var(--border);border-radius:var(--radius);background:#111;"
-          data-booting="1"></iframe>
-  <p class="muted">拉起中：画面约需数十秒出现，会自动重试，无需手动刷新。
-  Booting: the frame fills in within tens of seconds and retries itself — no manual refresh needed.</p>
-  {% else %}
-  <p class="warn-text">该站已结束（{{ st.status }}）—— 观察通道已关闭。This station has finished ({{ st.status }}); the observation channel is closed.</p>
-  {% if st.error %}<p class="warn-text wrap">失败原因 failure reason: {{ st.error }}</p>{% endif %}
-  <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
-    <input type="hidden" name="source" value="{{ st.source }}">
-    <input type="hidden" name="account_alias" value="{{ st.account_alias }}">
-    {% if egresses %}
-    <select name="egress_ref" aria-label="出口 egress" title="重新拉起时使用的出口 egress for the relaunch">
-      <option value="">出口：沿用当前 egress: keep current</option>
-      {% for e in egresses %}
-      <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
-      {% endfor %}
-    </select>
+{#- Login-station observation MODAL (login-station-console 3.3, 2026-10-08
+    refactor). Previously this was a bare embedded frame at the top of the
+    page: the operator couldn't tell WHICH site/account they were logging
+    into, and a boot-window 502 page (>200 chars) fooled the auto-retry into
+    stopping, leaving a permanent "暂不可达". Now:
+      · a centered dialog that headlines the site display name + account;
+      · the readiness probe looks for noVNC's real DOM marker (not size);
+      · a 5s status poll flips the dialog to success/failed automatically.
+    The iframe points at the panel reverse proxy (panel-gated); noVNC connects
+    back through the relayed websockify path. -#}
+<div class="station-backdrop" id="station-modal-root">
+  <div class="station-modal">
+    <div class="station-head">
+      <div class="station-head-main">
+        <h3>登录 · {{ st.source_label }}</h3>
+        <p class="station-sub">
+          账号 <strong>{{ st.account_alias }}</strong>
+          {% if st.source_url %}· <a href="{{ st.source_url }}" target="_blank" rel="noopener">{{ st.source_url }}</a>{% endif %}
+          · 站 #{{ st.id }}
+          <span class="badge running" id="station-status-badge">{{ st.status }}</span>
+        </p>
+      </div>
+      <button type="button" class="link" onclick="this.closest('.station-backdrop').remove()">关闭 ×</button>
+    </div>
+
+    <ol class="station-steps">
+      <li>在下方画面中输入该站的账号密码（如遇滑块 / 验证码请一并完成）。</li>
+      <li>登录成功后本窗口自动提示并关闭，无需手动刷新。</li>
+    </ol>
+
+    <div id="station-modal-body">
+    {% if st.live %}
+      <iframe id="station-frame" src="{{ vnc_url }}" title="login station {{ st.id }} observation view"
+              data-booting="1"></iframe>
+      <p class="muted" id="station-hint">拉起中：站桌面约需 20-40 秒出现，会自动重试，无需手动刷新。
+      Booting: the desktop appears within ~40s and retries itself.</p>
+    {% else %}
+      <p class="warn-text">该站已结束（{{ st.status }}）—— 观察通道已关闭。This station has finished ({{ st.status }}); the observation channel is closed.</p>
+      {% if st.error %}<p class="warn-text wrap">失败原因 failure reason: {{ st.error }}</p>{% endif %}
+      <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
+        <input type="hidden" name="source" value="{{ st.source }}">
+        <input type="hidden" name="account_alias" value="{{ st.account_alias }}">
+        {% if egresses %}
+        <select name="egress_ref" aria-label="出口 egress" title="重新拉起时使用的出口 egress for the relaunch">
+          <option value="">出口：沿用当前 egress: keep current</option>
+          {% for e in egresses %}
+          <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
+          {% endfor %}
+        </select>
+        {% endif %}
+        <button type="submit">重新拉起登录站 relaunch</button>
+      </form>
     {% endif %}
-    <button type="submit">重新拉起登录站 relaunch</button>
-  </form>
-  {% endif %}
+    </div>
+  </div>
 </div>
 <script>
-// The station takes tens of seconds to serve noVNC; until it does the proxy
-// returns a short 502 body. Re-request the frame until a real page lands.
 (function () {
-  var box = document.currentScript.closest('.card');
-  var frame = box && box.querySelector('iframe[data-booting]');
-  if (!frame) return;
+  var root = document.getElementById('station-modal-root');
+  if (!root) return;
+  var frame = document.getElementById('station-frame');
+  var sid = {{ st.id }};
   var tries = 0;
+
+  // Click on the dark backdrop (not the dialog) closes it
+  root.addEventListener('click', function (ev) {
+    if (ev.target === root) root.remove();
+  });
+
+  if (!frame) return;
+
+  // Boot readiness: only noVNC's real DOM marker counts. The previous probe
+  // (body length > 200) matched the friendly 502 page too, so the retry gave
+  // up on the first error page and the operator stared at it forever.
   var timer = setInterval(function () {
     tries += 1;
-    if (frame.dataset.ready === '1' || tries > 40) { clearInterval(timer); return; }
-    frame.src = frame.src.split('#')[0] + '#' + tries;
-  }, 3000);
-  frame.addEventListener('load', function () {
+    if (!document.getElementById('station-frame')) { clearInterval(timer); return; }
+    if (tries > 60) { clearInterval(timer); return; }
+    var ready = false;
     try {
       var doc = frame.contentDocument;
-      if (doc && doc.body && doc.body.innerHTML.length > 200) {
-        frame.dataset.ready = '1';
-        clearInterval(timer);
+      ready = !!(doc && (doc.getElementById('noVNC_screen')
+                         || doc.getElementById('noVNC_container')));
+    } catch (e) { ready = false; }
+    if (!ready) {
+      frame.src = frame.src.split('#')[0] + '#' + tries;  // re-request until booted
+    } else {
+      clearInterval(timer);
+      var hint = document.getElementById('station-hint');
+      if (hint) hint.textContent = '画面已就绪：请在上方完成登录。Ready — complete the login above.';
+    }
+  }, 3000);
+
+  // Status poll: launching/waiting_operator → keep waiting; completed →
+  // celebrate + auto-close; failed/timeout → show reason + relaunch.
+  var poll = setInterval(function () {
+    if (!document.getElementById('station-modal-root')) { clearInterval(poll); return; }
+    fetch('/panel/auth/station/' + sid + '/status').then(function (r) {
+      if (!r.ok) throw 0;
+      return r.json();
+    }).then(function (st) {
+      var badge = document.getElementById('station-status-badge');
+      if (badge && st.status) badge.textContent = st.status;
+      if (st.status === 'completed') {
+        clearInterval(poll); clearInterval(timer);
+        var body = document.getElementById('station-modal-body');
+        if (body) body.innerHTML =
+          '<p class="badge success">✔ 登录成功 login captured</p>' +
+          '<p class="muted">身份 ' + st.source_label + ' / ' + st.account_alias +
+          ' 已激活，站点即将自动关闭。Identity active — closing shortly.</p>';
+        if (window.htmx) htmx.trigger('body', 'auth-refresh');
+        setTimeout(function () {
+          var m = document.getElementById('station-modal-root');
+          if (m) m.remove();
+        }, 5000);
+      } else if (st.status === 'failed' || st.status === 'timeout' || st.status === 'reclaimed') {
+        clearInterval(poll); clearInterval(timer);
+        var body2 = document.getElementById('station-modal-body');
+        if (body2) {
+          body2.textContent = '';
+          var p1 = document.createElement('p');
+          p1.className = 'warn-text';
+          p1.textContent = '登录站结束（' + st.status + '）';
+          body2.appendChild(p1);
+          if (st.error) {
+            var p2 = document.createElement('p');
+            p2.className = 'warn-text wrap';
+            p2.textContent = '失败原因: ' + st.error;   // textContent: never innerHTML
+            body2.appendChild(p2);
+          }
+          var f = document.createElement('form');
+          f.className = 'inline-form';
+          f.setAttribute('hx-post', '/panel/auth/station/launch');
+          f.setAttribute('hx-target', '#station-view');
+          f.setAttribute('hx-swap', 'innerHTML');
+          var h1 = document.createElement('input');
+          h1.type = 'hidden'; h1.name = 'source'; h1.value = st.source;
+          var h2 = document.createElement('input');
+          h2.type = 'hidden'; h2.name = 'account_alias'; h2.value = st.account_alias;
+          var b = document.createElement('button');
+          b.type = 'submit'; b.textContent = '重新拉起 relaunch';
+          f.appendChild(h1); f.appendChild(h2); f.appendChild(b);
+          body2.appendChild(f);
+          if (window.htmx) htmx.process(f);
+        }
+        if (window.htmx) htmx.trigger('body', 'auth-refresh');
       }
-    } catch (e) { clearInterval(timer); }
-  });
+    }).catch(function () {});
+  }, 5000);
 })();
 </script>

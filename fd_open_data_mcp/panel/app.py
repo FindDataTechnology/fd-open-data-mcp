@@ -192,6 +192,13 @@ def _station_client():
     return station_ops.get_station_client()
 
 
+# vnc proxy boot-window retries: a fresh station's Service exists ~20-40s
+# before Xvfb/websockify answer; the proxy waits it out server-side (tests
+# shrink these to stay fast).
+STATION_PROXY_ATTEMPTS = 6
+STATION_PROXY_RETRY_WAIT = 3.0
+
+
 def _station_upstream(station_id: int) -> str | None:
     """``host:port`` of a live station's noVNC endpoint, or None when the
     station is unknown / not in flight / its Service is not resolvable.
@@ -1343,6 +1350,21 @@ def create_app() -> FastAPI:
             {"st": st, "vnc_url": station_ops.station_vnc_path(station_id),
              "egresses": egresses})
 
+    @app.get("/panel/auth/station/{station_id}/status")
+    def station_status_poll(station_id: int):
+        """JSON status for the observation modal's poller: the operator sees
+        等待登录 → 已完成/失败 without reloading the frame."""
+        s = _session()
+        try:
+            st = station_ops.station_brief(s, station_id)
+        finally:
+            s.close()
+        if st is None:
+            raise HTTPException(404, "station not found")
+        return {k: st[k] for k in ("id", "source", "source_label",
+                                   "source_url", "account_alias", "status",
+                                   "live", "error")}
+
     @app.post("/panel/auth/station/{station_id}/reclaim")
     def station_reclaim(station_id: int, request: Request):
         """Operator reclaim: tear the station's Job+Service down and close the
@@ -1378,7 +1400,14 @@ def create_app() -> FastAPI:
     async def station_vnc_proxy(station_id: int, path: str, request: Request):
         """Reverse proxy to the station's noVNC static page (and any asset
         under it) — the only HTTP path to a station's web UI. Panel-gated
-        above; stations are never exposed directly."""
+        above; stations are never exposed directly.
+
+        The station takes tens of seconds to boot (image pull + code checkout
+        + Xvfb/websockify), during which its Service exists but refuses
+        connections. Retry briefly server-side before rendering the friendly
+        502, so the first iframe load usually lands on the real page (the
+        client-side retry stays as backstop)."""
+        import asyncio
         import httpx
 
         upstream = _station_upstream(station_id)
@@ -1388,6 +1417,7 @@ def create_app() -> FastAPI:
         url = f"http://{upstream}/{path}"
         if request.url.query:
             url += f"?{request.url.query}"
+        up = None
         try:
             # trust_env=False: the station Service is cluster-internal — an
             # ambient HTTP(S)_PROXY (dev box / egress-restricted pod) must
@@ -1395,9 +1425,20 @@ def create_app() -> FastAPI:
             async with httpx.AsyncClient(
                     timeout=httpx.Timeout(10.0, read=60.0),
                     trust_env=False) as hc:
-                up = await hc.get(
-                    url,
-                    headers={"accept": request.headers.get("accept", "*/*")})
+                for attempt in range(STATION_PROXY_ATTEMPTS):
+                    try:
+                        up = await hc.get(
+                            url,
+                            headers={"accept":
+                                     request.headers.get("accept", "*/*")})
+                        break
+                    except httpx.HTTPError as e:
+                        if attempt == STATION_PROXY_ATTEMPTS - 1:
+                            raise
+                        logger.info("station %s boot wait (%d/%d): %s",
+                                    station_id, attempt + 1,
+                                    STATION_PROXY_ATTEMPTS, type(e).__name__)
+                        await asyncio.sleep(STATION_PROXY_RETRY_WAIT)
         except httpx.HTTPError as e:  # noqa: BLE001 - friendly, never a 500
             logger.warning("station %s http proxy failed: %s", station_id, e)
             return HTMLResponse(_station_unreachable(station_id, e),
