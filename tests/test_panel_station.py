@@ -31,6 +31,11 @@ from test_station_ops import (  # shared doubles + seed helpers (same dir)
 
 client = TestClient(app)
 
+# A deadline the timeout backstop will honour as live: station_status compares
+# against the real clock, so the frozen NOW fixture (2026-09-26) reads as long
+# overdue and every "live" fixture silently becomes a timeout row.
+LIVE_DEADLINE = dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=25)
+
 
 def _db():
     return get_database().get_session()
@@ -143,7 +148,7 @@ def test_partial_shows_station_board_and_login_button(session):
     iid = _ident("rmfyalk", "acc-a", "login_required")
     _ident("rmfyalk", "acc-b", "active")
     _station(iid, "rmfyalk", "acc-a", status="waiting_operator",
-             deadline=NOW + dt.timedelta(minutes=25),
+             deadline=LIVE_DEADLINE,
              proxy_url="http://user:pass@1.2.3.4:8080")
 
     r = client.get("/panel/partials/auth")
@@ -172,15 +177,41 @@ def test_partial_shows_station_board_and_login_button(session):
 def test_station_view_route_embeds_live_station_only(session):
     iid = _ident("rmfyalk", "acc-v")
     sid = _station(iid, "rmfyalk", "acc-v", status="waiting_operator",
-                   deadline=NOW + dt.timedelta(minutes=25))
+                   deadline=LIVE_DEADLINE)
     r = client.get(f"/panel/auth/station/{sid}/view")
     assert r.status_code == 200
     assert f"/panel/auth/station/{sid}/vnc/vnc.html" in r.text
 
+    # a completed station renders as a closed view (no iframe that could ever
+    # connect), not a dead 404 — the operator needs the state, not an error
     done = _station(iid, "rmfyalk", "acc-v", status="completed")
     r2 = client.get(f"/panel/auth/station/{done}/view")
-    assert r2.status_code == 404
-    assert "不可用" in r2.text or "unavailable" in r2.text
+    assert r2.status_code == 200
+    assert "vnc.html" not in r2.text
+    # ...and an unknown station is still a friendly 404
+    r3 = client.get("/panel/auth/station/999999/view")
+    assert r3.status_code == 404
+    assert "不可用" in r3.text or "unavailable" in r3.text
+
+
+def test_station_view_shows_failure_reason_and_relaunch(session):
+    """A failed station must tell the operator why and offer a retry: the
+    reason lived only in the row's note, so 'failed' was a dead end."""
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    iid = _ident("rmfyalk", "acc-f", "login_required")
+    sid = _station(iid, "rmfyalk", "acc-f", status="failed",
+                   note=("Error: Page.goto: net::ERR_INVALID_AUTH_CREDENTIALS "
+                         "at https://account.court.gov.cn/oauth/authorize\n"
+                         "Call log:\n  - navigating to …"))
+    r = client.get(f"/panel/auth/station/{sid}/view")
+    assert r.status_code == 200
+    assert "ERR_INVALID_AUTH_CREDENTIALS" in r.text
+    # playwright's call log is noise, never rendered
+    assert "navigating to" not in r.text
+    assert "重新拉起登录站 relaunch" in r.text
+    # the relaunch reuses the identity's source/alias
+    assert 'name="source" value="rmfyalk"' in r.text
+    assert 'name="account_alias" value="acc-f"' in r.text
 
 
 def test_reclaim_route_tears_station_down(session, monkeypatch):
@@ -204,8 +235,21 @@ def test_reclaim_route_tears_station_down(session, monkeypatch):
         assert s.get(CrawlLoginStation, sid).status == "reclaimed"
     finally:
         s.close()
-    # the swapped row no longer offers a reclaim on a terminal station
-    assert "hx-post" not in r.text
+    # a terminal row offers no reclaim, but does offer a one-click relaunch
+    assert "/reclaim" not in r.text
+    assert "重新拉起 relaunch" in r.text
+
+
+def test_proxy_credentials_never_render_in_failure_reason(session):
+    """The failure reason is escape-hatched from the row note — a note that
+    quotes the proxy URL must not leak its credentials into the panel."""
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    iid = _ident("rmfyalk", "acc-leak", "login_required")
+    sid = _station(iid, "rmfyalk", "acc-leak", status="failed",
+                   note="Error: proxy http://fdproxy:Sup3rSecret@1.2.3.4:3128 "
+                        "refused")
+    r = client.get(f"/panel/auth/station/{sid}/view")
+    assert "Sup3rSecret" not in r.text
 
 
 # ── HTTP reverse proxy ──────────────────────────────────────────────────────

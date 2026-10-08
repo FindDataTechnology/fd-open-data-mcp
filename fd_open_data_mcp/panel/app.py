@@ -14,6 +14,7 @@ import logging
 import os
 import urllib.request
 from contextlib import asynccontextmanager
+from html import escape
 from pathlib import Path
 
 from fastapi import FastAPI, Form, HTTPException, Request, Response, WebSocket
@@ -215,12 +216,42 @@ def _station_upstream(station_id: int) -> str | None:
 
 
 def _station_unavailable(station_id: int) -> str:
-    """Friendly (non-500) page for a station the proxy cannot serve."""
+    """Friendly (non-500) page for a station the proxy cannot serve.
+
+    States the row's own failure reason and offers a one-click relaunch: a
+    bare 'the channel is closed' left operators on a dead station with no
+    next step while the real error sat unread in the row's note."""
+    try:
+        s = _session()
+        try:
+            st = s.get(CrawlLoginStation, station_id)
+            reason = station_ops.station_error(st) if st is not None else None
+            source = st.source if st is not None else None
+            alias = st.account_alias if st is not None else None
+        finally:
+            s.close()
+    except Exception:  # noqa: BLE001 - a hint must never 500 the page
+        reason, source, alias = None, None, None
     return (
         "<h1>登录站不可用 login station unavailable</h1>"
-        f'<p>站 #{station_id} 不存在、已完成或已回收，观察通道已关闭。'
-        f"Station #{station_id} does not exist, already finished or was "
-        f"reclaimed; the observation channel is closed.</p>")
+        f'<p>站 #{station_id} 已结束或已回收，观察通道已关闭。'
+        f"Station #{station_id} has finished or was reclaimed; the "
+        f"observation channel is closed.</p>"
+        + (f"<p class='warn-text'>失败原因 failure reason: "
+           f"{escape(reason[:300])}</p>" if reason else "")
+        + _relaunch_form(source, alias))
+
+
+def _relaunch_form(source: str | None, alias: str | None) -> str:
+    """One-click relaunch: reuse the identity's own source/alias, so a failed
+    station never has to be re-registered by hand."""
+    if not source or not alias:
+        return ""
+    return (f'<form class="inline-form" method="post" '
+            f'action="/panel/auth/station/launch">'
+            f'<input type="hidden" name="source" value="{escape(source)}">'
+            f'<input type="hidden" name="account_alias" value="{escape(alias)}">'
+            f'<button type="submit">重新拉起登录站 relaunch</button></form>')
 
 
 def _station_unreachable(station_id: int, err: Exception) -> str:
@@ -228,9 +259,9 @@ def _station_unreachable(station_id: int, err: Exception) -> str:
     answer (typically still booting)."""
     return (
         "<h1>登录站暂不可达 login station unreachable</h1>"
-        f'<p>站 #{station_id} 可能仍在拉起（约需数十秒），请稍后刷新重试；'
-        f"持续失败时请回收后重新拉起。Station #{station_id} is probably still "
-        f"booting — retry shortly; if it keeps failing, reclaim and relaunch."
+        f'<p>站 #{station_id} 仍在拉起（约需数十秒），画面会自动出现；'
+        f"若持续失败请在下方重新拉起。Station #{station_id} is still booting "
+        f"— the frame fills in shortly; relaunch below if it keeps failing."
         f"</p><p class='muted'>{type(err).__name__}</p>")
 
 
@@ -1282,15 +1313,19 @@ def create_app() -> FastAPI:
 
     @app.get("/panel/auth/station/{station_id}/view", response_class=HTMLResponse)
     def station_view(request: Request, station_id: int):
-        """The observation-view fragment for a live station (htmx target of
-        the board's 观察窗 button)."""
+        """The observation-view fragment for a station (htmx target of the
+        board's 观察窗 button).
+
+        A station that already ended still renders here — with its failure
+        reason and a relaunch button. Returning a bare 404 for it meant the
+        operator saw 'unavailable' with no cause and no next step."""
         s = _session()
         try:
             stations = station_ops.station_status(s)
             st = next((x for x in stations if x["id"] == station_id), None)
         finally:
             s.close()
-        if st is None or not st["live"]:
+        if st is None:
             return HTMLResponse(_station_unavailable(station_id),
                                 status_code=404)
         return templates.TemplateResponse(

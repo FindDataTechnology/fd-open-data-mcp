@@ -549,7 +549,38 @@ def station_status(
         "note": st.note, "created_at": _iso(st.created_at),
         "deadline_at": _iso(st.deadline_at), "finished_at": _iso(st.finished_at),
         "live": st.status in STATION_OPEN,
+        "error": station_error(st),
     } for st in rows]
+
+
+def station_error(st) -> str | None:
+    """The operator-facing reason a station ended badly (None when it did not).
+
+    Station failures were invisible on the board: the runtime writes the
+    traceback into ``note`` while the panel showed only a badge, so an
+    operator saw 'failed' with no idea whether to retry or fix something.
+    The first meaningful line of the terminal note is the fix-worthy signal —
+    Playwright's 'Call log:' block below it is noise for this purpose.
+
+    Credentials are scrubbed before the line is ever displayed: a Playwright
+    error quotes the proxy URL it dialled, user:pass@host and all.
+    """
+    if st.status not in ("failed", "timeout"):
+        return None
+    lines = [ln.strip() for ln in (st.note or "").splitlines() if ln.strip()]
+    for ln in lines:
+        if ln.startswith("Call log:"):
+            break
+        if ln.startswith(("Error:", "TimeoutError", "RuntimeError",
+                          "Playwright", "Exception", "Traceback")):
+            return mask_proxy_url_in_text(ln)
+    return mask_proxy_url_in_text(lines[0]) if lines else None
+
+
+def mask_proxy_url_in_text(text: str) -> str:
+    """Strip ``user:pass@`` from any URL embedded in free text (a panel body
+    must never carry egress credentials, even quoted inside an error)."""
+    return re.sub(r"(https?://)[^@/\s]+@", r"\1••••@", text)
 
 
 def active_stations_summary(session: Session,

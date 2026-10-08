@@ -1,11 +1,50 @@
 {#- Embedded login-station observation view (login-station-console 3.3):
     the iframe points at the panel reverse proxy (panel-gated), noVNC connects
-    back through the relayed websockify path. -#}
+    back through the relayed websockify path. While the station boots the
+    noVNC page 502s, so the frame re-requests itself instead of leaving the
+    operator to refresh a blank box; a station that already ended renders its
+    failure reason and a relaunch instead of an iframe that can never work. -#}
 <div class="card">
   <h3>观察窗 <span class="en">Observation view</span> <span class="badge running">#{{ st.id }} {{ st.status }}</span></h3>
-  <p class="muted">{{ st.source }} / {{ st.account_alias }} — 在下方画面中完成登录（滑块 / 验证码），完成后站自动回收、身份转入活跃。
-  Complete the login (slider / captcha) inside the frame below; the station reclaims itself when done and the identity turns active.</p>
+  <p class="muted">{{ st.source }} / {{ st.account_alias }} — 在下方画面中完成登录（滑块 / 验证码）；完成后身份即转活跃，可关闭本页面。
+  Complete the login (slider / captcha) inside the frame below; the identity turns active when done and this view can be closed.</p>
+  {% if st.live %}
   <iframe src="{{ vnc_url }}" title="login station {{ st.id }} observation view"
-          style="width:100%;height:520px;border:1px solid var(--border);border-radius:var(--radius);background:#111;"></iframe>
-  <p class="muted">站仍在拉起时画面可能空白数十秒 — the frame may stay blank for tens of seconds while the station boots.</p>
+          style="width:100%;height:520px;border:1px solid var(--border);border-radius:var(--radius);background:#111;"
+          data-booting="1"></iframe>
+  <p class="muted">拉起中：画面约需数十秒出现，会自动重试，无需手动刷新。
+  Booting: the frame fills in within tens of seconds and retries itself — no manual refresh needed.</p>
+  {% else %}
+  <p class="warn-text">该站已结束（{{ st.status }}）—— 观察通道已关闭。This station has finished ({{ st.status }}); the observation channel is closed.</p>
+  {% if st.error %}<p class="warn-text wrap">失败原因 failure reason: {{ st.error }}</p>{% endif %}
+  <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
+    <input type="hidden" name="source" value="{{ st.source }}">
+    <input type="hidden" name="account_alias" value="{{ st.account_alias }}">
+    <button type="submit">重新拉起登录站 relaunch</button>
+  </form>
+  {% endif %}
 </div>
+<script>
+// The station takes tens of seconds to serve noVNC; until it does the proxy
+// returns a short 502 body. Re-request the frame until a real page lands.
+(function () {
+  var box = document.currentScript.closest('.card');
+  var frame = box && box.querySelector('iframe[data-booting]');
+  if (!frame) return;
+  var tries = 0;
+  var timer = setInterval(function () {
+    tries += 1;
+    if (frame.dataset.ready === '1' || tries > 40) { clearInterval(timer); return; }
+    frame.src = frame.src.split('#')[0] + '#' + tries;
+  }, 3000);
+  frame.addEventListener('load', function () {
+    try {
+      var doc = frame.contentDocument;
+      if (doc && doc.body && doc.body.innerHTML.length > 200) {
+        frame.dataset.ready = '1';
+        clearInterval(timer);
+      }
+    } catch (e) { clearInterval(timer); }
+  });
+})();
+</script>

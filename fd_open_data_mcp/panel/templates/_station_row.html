@@ -6,7 +6,8 @@
     <td><a href="/panel/sources/{{ t.source | urlencode }}">{{ t.source }}</a> / {{ t.account_alias }}</td>
     <td><span class="badge {{ badge }}">{{ t.status }}</span></td>
     <td class="muted">{{ t.proxy_url_masked }}</td>
-    <td class="muted">{{ t.deadline_at or '—' }}</td>
+    <td class="muted">{{ t.deadline_at or '—' }}
+        {% if t.error %}<br><span class="warn-text wrap">{{ t.error }}</span>{% endif %}</td>
     <td>
       {% if t.live %}
       <button type="button" class="link"
@@ -24,6 +25,15 @@
         </span>
       </span>
       <noscript><form class="inline-form" method="post" action="/panel/auth/station/{{ t.id }}/reclaim"><button class="link" type="submit">回收 reclaim</button></form></noscript>
-      {% else %}<span class="muted">—</span>{% endif %}
+      {% else %}
+      {#- A dead station's only useful action is to try again with the same
+          identity: no re-registration, no hunting for the source name.
+          Previously this cell was a bare —, which read as "nothing to do". -#}
+      <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
+        <input type="hidden" name="source" value="{{ t.source }}">
+        <input type="hidden" name="account_alias" value="{{ t.account_alias }}">
+        <button class="link" type="submit">重新拉起 relaunch</button>
+      </form>
+      {% endif %}
     </td>
   </tr>
