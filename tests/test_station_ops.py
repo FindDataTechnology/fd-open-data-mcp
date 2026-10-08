@@ -206,6 +206,73 @@ def test_allocation_prefers_least_referenced(session):
     assert out["egress_ref"] == f"proxy:{p2}"
 
 
+# ── operator-chosen egress (the "I can't pick my proxy" defect) ──────────────
+def test_selectable_egresses_lists_healthy_only_with_masked_urls(session):
+    _proxy(scheme="direct", ip="direct", port=None)               # not an egress
+    _proxy(ip="10.9.9.9", retired_at=NOW)                         # retired
+    p_ok = _proxy(ip="10.0.0.5", port=3128, auth="u:pw", label="gost-xinru")
+    out = station_ops.selectable_egresses(session)
+    assert [e["egress_ref"] for e in out] == [f"proxy:{p_ok}"]
+    assert out[0]["label"] == "gost-xinru"
+    assert "u:pw" not in out[0]["url_masked"]      # credentials never surface
+    assert "••••" in out[0]["url_masked"]
+
+
+def test_explicit_egress_ref_overrides_allocation(session):
+    p1 = _proxy(ip="10.0.0.1")
+    p2 = _proxy(ip="10.0.0.2", label="gost-cheap")
+    out = station_ops.ensure_identity_with_egress(
+        session, "rmfyalk", "acc-a", now=NOW, egress_ref=f"proxy:{p2}")
+    assert out["status"] == "queued"
+    assert out["egress_ref"] == f"proxy:{p2}"          # the CHOSEN one, not p1
+    assert out["proxy_url"] == "http://u:p@10.0.0.2:8080"
+    # the manual pick is evented distinctly from the auto-assign
+    assert any("manually set" in d for d in _events(out["identity_id"]))
+    # ...and a re-ensure without the choice keeps the manual binding
+    again = station_ops.ensure_identity_with_egress(
+        session, "rmfyalk", "acc-a", now=NOW)
+    assert again["egress_ref"] == f"proxy:{p2}"
+
+
+def test_explicit_egress_ref_replaces_existing_binding(session):
+    p1 = _proxy(ip="10.0.0.1")
+    p2 = _proxy(ip="10.0.0.2")
+    iid = _ident("rmfyalk", "acc-a", "login_required", egress_ref=f"proxy:{p1}")
+    out = station_ops.ensure_identity_with_egress(
+        session, "rmfyalk", "acc-a", now=NOW, egress_ref=f"proxy:{p2}")
+    assert out["egress_ref"] == f"proxy:{p2}"
+    s = get_database().get_session()
+    try:
+        assert s.get(CrawlIdentity, iid).egress_ref == f"proxy:{p2}"
+    finally:
+        s.close()
+
+
+def test_explicit_egress_ref_rejections(session):
+    p = _proxy(ip="10.0.0.1")
+    _ident("rmfyalk", "holder", "active", egress_ref=f"proxy:{p}")
+    pd = _proxy(scheme="direct", ip="direct", port=None)
+    pr = _proxy(ip="10.9.9.9", retired_at=NOW)
+
+    # taken by a sibling account of the same source -> conflict, nothing written
+    out = station_ops.ensure_identity_with_egress(
+        session, "rmfyalk", "acc-b", now=NOW, egress_ref=f"proxy:{p}")
+    assert out["status"] == "conflict" and "holder" in out["reason"]
+    # unknown, malformed, retired, direct -> invalid
+    for ref in ("proxy:999999", "nonsense", f"proxy:{pr}", f"proxy:{pd}"):
+        out = station_ops.ensure_identity_with_egress(
+            session, "rmfyalk", "acc-b", now=NOW, egress_ref=ref)
+        assert out["status"] == "invalid", ref
+    # in every rejection case the identity still exists unbound
+    s = get_database().get_session()
+    try:
+        row = (s.query(CrawlIdentity)
+               .filter_by(source="rmfyalk", account_alias="acc-b").first())
+        assert row is not None and row.egress_ref is None
+    finally:
+        s.close()
+
+
 # ── proxy_url_for_ref ────────────────────────────────────────────────────────
 def test_proxy_url_for_ref_resolution(session):
     p = _proxy(ip="10.1.1.1", port=3128, auth="user:pw")

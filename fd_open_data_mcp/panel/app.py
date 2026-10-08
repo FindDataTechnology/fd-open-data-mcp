@@ -1194,6 +1194,7 @@ def create_app() -> FastAPI:
                 profiles = dict(
                     s.query(CrawlSource.source, CrawlSource.auth_profile).all())
                 stations = station_ops.station_status(s, limit=10)
+                egresses = station_ops.selectable_egresses(s)
                 station_sources = [
                     {"source": r.source, "auth_profile": r.auth_profile}
                     for r in (s.query(CrawlSource)
@@ -1213,6 +1214,7 @@ def create_app() -> FastAPI:
                 request, "partial_auth.html",
                 {"groups": groups, "queue": queue, "events": events,
                  "stations": stations, "station_sources": station_sources,
+                 "egresses": egresses,
                  "summary": {
                      "total": len(pool),
                      "active": sum(1 for r in pool if r["status"] == "active"),
@@ -1233,6 +1235,7 @@ def create_app() -> FastAPI:
         form = await request.form()
         source = (form.get("source") or "").strip()
         alias = (form.get("account_alias") or "").strip()
+        egress_ref = (form.get("egress_ref") or "").strip() or None
         hx = request.headers.get("hx-request") == "true"
         if not source or not alias:
             if hx:
@@ -1243,7 +1246,8 @@ def create_app() -> FastAPI:
         s = _session()
         try:
             ensured = station_ops.ensure_identity_with_egress(
-                s, source, alias, requested_by="panel")
+                s, source, alias, requested_by="panel",
+                egress_ref=egress_ref)
             if ensured.get("status") != "queued":
                 msg = f"{source}/{alias} 未登记 not registered: {ensured.get('reason')}"
                 if hx:
@@ -1259,13 +1263,15 @@ def create_app() -> FastAPI:
                 raise HTTPException(502, out.get("reason", "launch failed"))
             stations = station_ops.station_status(s)
             st = next(x for x in stations if x["id"] == out["station_id"])
+            egresses = station_ops.selectable_egresses(s)
         finally:
             s.close()
         if not hx:
             return RedirectResponse("/panel/auth", status_code=303)
         resp = templates.TemplateResponse(
             request, "_station_view.html",
-            {"st": st, "vnc_url": station_ops.station_vnc_path(out["station_id"])})
+            {"st": st, "vnc_url": station_ops.station_vnc_path(out["station_id"]),
+             "egresses": egresses})
         resp.headers["HX-Trigger"] = json.dumps({
             "toast": {"message": (f"登录站已拉起 station #{out['station_id']} "
                                   f"launched — 请在观察窗内完成登录 complete "
@@ -1277,10 +1283,12 @@ def create_app() -> FastAPI:
     @app.post("/panel/auth/identities")
     async def auth_identity_create(request: Request):
         """多账号登记 (spec: Console 登录操作面): register an identity and
-        auto-assign its egress; the fragment shows the assigned binding."""
+        auto-assign its egress (or honour an explicit choice); the fragment
+        shows the assigned binding."""
         form = await request.form()
         source = (form.get("source") or "").strip()
         alias = (form.get("account_alias") or "").strip()
+        egress_ref = (form.get("egress_ref") or "").strip() or None
         hx = request.headers.get("hx-request") == "true"
         if not source or not alias:
             if hx:
@@ -1290,7 +1298,8 @@ def create_app() -> FastAPI:
         s = _session()
         try:
             out = station_ops.ensure_identity_with_egress(
-                s, source, alias, requested_by="panel")
+                s, source, alias, requested_by="panel",
+                egress_ref=egress_ref)
         finally:
             s.close()
         if out.get("status") != "queued":
@@ -1323,6 +1332,7 @@ def create_app() -> FastAPI:
         try:
             stations = station_ops.station_status(s)
             st = next((x for x in stations if x["id"] == station_id), None)
+            egresses = station_ops.selectable_egresses(s)
         finally:
             s.close()
         if st is None:
@@ -1330,7 +1340,8 @@ def create_app() -> FastAPI:
                                 status_code=404)
         return templates.TemplateResponse(
             request, "_station_view.html",
-            {"st": st, "vnc_url": station_ops.station_vnc_path(station_id)})
+            {"st": st, "vnc_url": station_ops.station_vnc_path(station_id),
+             "egresses": egresses})
 
     @app.post("/panel/auth/station/{station_id}/reclaim")
     def station_reclaim(station_id: int, request: Request):
@@ -1349,6 +1360,7 @@ def create_app() -> FastAPI:
                 raise HTTPException(404, f"station {station_id} not found")
             stations = station_ops.station_status(s)
             st = next((x for x in stations if x["id"] == station_id), None)
+            egresses = station_ops.selectable_egresses(s)
         finally:
             s.close()
         if not hx:
@@ -1358,7 +1370,7 @@ def create_app() -> FastAPI:
                f"登录站 station #{station_id} 已结束 already "
                f"{out.get('current_status')}；集群对象已清理 objects cleaned")
         row = (templates.TemplateResponse(request, "_station_row.html",
-                                          {"t": st})
+                                          {"t": st, "egresses": egresses})
                if st is not None else HTMLResponse(""))
         return _toast(row, msg)
 

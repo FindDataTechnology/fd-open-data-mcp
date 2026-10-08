@@ -140,6 +140,70 @@ def mask_proxy_url(url: str | None) -> str:
     return re.sub(r"//[^@/]+@", "//••••@", url)
 
 
+def selectable_egresses(session: Session) -> list[dict]:
+    """The egress choices an operator may pick for a login: every healthy
+    pooled proxy (not retired, not direct, has a port), id-ascending.
+
+    The auto-assignment policy ranks least-referenced first; this list is the
+    manual override surface for it (operators know e.g. which egress the
+    source's risk controls tolerate). ``url_masked`` never carries
+    credentials."""
+    rows = (session.query(Proxy)
+            .filter(Proxy.retired_at.is_(None),
+                    Proxy.status != "retired",
+                    Proxy.ip != "direct",
+                    Proxy.port.isnot(None))
+            .order_by(Proxy.id).all())
+    return [{"egress_ref": f"proxy:{p.id}",
+             "label": p.label or f"{p.ip}:{p.port}",
+             "provider": p.provider,
+             "url_masked": mask_proxy_url(proxy_url_for_ref(
+                 session, f"proxy:{p.id}"))}
+            for p in rows]
+
+
+def bind_egress_ref(session: Session, ident: CrawlIdentity, egress_ref: str,
+                    now: dt.datetime, requested_by: str = "panel") -> dict:
+    """Operator-chosen egress: bind ``ident`` to exactly this proxy, replacing
+    any current binding. Unknown/retired/direct refs are refused (the caller
+    surfaces the reason; nothing is written).
+
+    Uniqueness follows the same rule the allocator enforces — one egress per
+    account within a source — so a manual pick cannot silently collide with a
+    sibling account: if another identity of the same source already holds the
+    ref, the change is refused and reported."""
+    if not (egress_ref or "").startswith("proxy:"):
+        return {"status": "invalid", "reason": f"bad egress ref '{egress_ref}'"}
+    try:
+        pid = int(egress_ref.split(":", 1)[1])
+    except ValueError:
+        return {"status": "invalid", "reason": f"bad egress ref '{egress_ref}'"}
+    p = session.get(Proxy, pid)
+    if p is None or p.retired_at is not None or p.status == "retired":
+        return {"status": "invalid",
+                "reason": f"egress {egress_ref} unknown or retired"}
+    if p.ip == "direct" or p.port is None:
+        return {"status": "invalid",
+                "reason": f"egress {egress_ref} is not a usable proxy"}
+    conflict = (session.query(CrawlIdentity)
+                .filter(CrawlIdentity.source == ident.source,
+                        CrawlIdentity.egress_ref == egress_ref,
+                        CrawlIdentity.id != ident.id).first())
+    if conflict is not None:
+        return {"status": "conflict",
+                "reason": (f"egress {egress_ref} already bound to "
+                           f"{ident.source}/{conflict.account_alias}")}
+    ident.egress_ref = egress_ref
+    session.add(CrawlIdentityEvent(
+        identity_id=ident.id, kind="note",
+        detail=(f"egress manually set to {egress_ref} by {requested_by} "
+                f"({p.label or p.ip}:{p.port})"),
+        created_at=now))
+    session.commit()
+    return {"status": "bound", "egress_ref": egress_ref,
+            "proxy_url": proxy_url_for_ref(session, egress_ref)}
+
+
 def _allocate_egress(session: Session, ident: CrawlIdentity,
                      now: dt.datetime) -> str | None:
     """Bind the identity to a proxy — the assign_egress policy of
@@ -195,6 +259,7 @@ def ensure_identity_with_egress(
     automation: str = "assisted",
     requested_by: str = "panel",
     now: dt.datetime | None = None,
+    egress_ref: str | None = None,
 ) -> dict:
     """Register/reset an identity to ``login_required`` and make sure it has
     an egress binding — the one write every identity-creation entrance funnels
@@ -203,7 +268,12 @@ def ensure_identity_with_egress(
     Composition: auth_tools.request_identity_login does the row write (reset
     semantics + audit event); the egress step mirrors assign_egress
     (idempotent: an already-bound identity keeps its proxy). Returns the
-    request_identity_login dict plus ``egress_ref`` / ``proxy_url``."""
+    request_identity_login dict plus ``egress_ref`` / ``proxy_url``.
+
+    ``egress_ref`` is the operator's explicit choice (``proxy:<id>``): it
+    replaces any current binding and is validated by ``bind_egress_ref``
+    (unknown/retired/cross-account-conflicting refs are refused and reported
+    in ``status``) — the manual override for the auto-assignment policy."""
     from fd_open_data_mcp.auth_tools import request_identity_login  # lazy: auth_tools imports this module
 
     now = _as_aware(now) or _utcnow()
@@ -214,6 +284,13 @@ def ensure_identity_with_egress(
         return {**out, "egress_ref": None, "proxy_url": None}
     ident = session.get(CrawlIdentity, out["identity_id"])
     assert ident is not None  # request_identity_login just committed it
+    if egress_ref:
+        chosen = bind_egress_ref(session, ident, egress_ref, now,
+                                 requested_by=requested_by)
+        if chosen["status"] != "bound":
+            return {**out, **chosen}
+        return {**out, "egress_ref": chosen["egress_ref"],
+                "proxy_url": chosen["proxy_url"]}
     if (ident.egress_ref or "").startswith("proxy:"):
         # idempotent: keep the existing binding (its assignment is already on
         # the audit trail)

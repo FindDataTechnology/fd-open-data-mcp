@@ -28,10 +28,20 @@
       {% else %}
       {#- A dead station's only useful action is to try again with the same
           identity: no re-registration, no hunting for the source name.
-          Previously this cell was a bare —, which read as "nothing to do". -#}
+          Previously this cell was a bare —, which read as "nothing to do".
+          The egress picker lets the operator move the login to another exit
+          instead of being stuck with the auto-assigned one. -#}
       <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
         <input type="hidden" name="source" value="{{ t.source }}">
         <input type="hidden" name="account_alias" value="{{ t.account_alias }}">
+        {% if egresses %}
+        <select name="egress_ref" aria-label="出口 egress" title="重新拉起时使用的出口 egress for the relaunch">
+          <option value="">出口：沿用当前 egress: keep current</option>
+          {% for e in egresses %}
+          <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
+          {% endfor %}
+        </select>
+        {% endif %}
         <button class="link" type="submit">重新拉起 relaunch</button>
       </form>
       {% endif %}

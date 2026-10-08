@@ -122,15 +122,22 @@ def launch_login_station(
     automation: str = "assisted",
     requested_by: str = "mcp",
     client=None,
+    egress_ref: str | None = None,
 ) -> dict:
     """Shared launch write (login-station-console 3.4): ensure the identity
     (login_required + egress) then create the station. Returns the
     create_station dict (status launched / failed / not_found) with the
     identity fields merged in; ``vnc_url`` is RELATIVE — the observation
-    channel is behind the panel gate, so no credential is ever embedded."""
+    channel is behind the panel gate, so no credential is ever embedded.
+
+    ``egress_ref`` pins the login (and by identity binding, the later crawl)
+    to an operator-chosen proxy ``proxy:<id>``; omitted, the allocator picks
+    one as before. A refused choice (unknown/retired/already another account's)
+    surfaces as ``status=invalid|conflict`` with the reason — no station is
+    launched."""
     ensured = station_ops.ensure_identity_with_egress(
         session, source, account_alias, automation=automation,
-        requested_by=requested_by)
+        requested_by=requested_by, egress_ref=egress_ref)
     if ensured.get("status") != "queued":
         return ensured
     out = station_ops.create_station(session, source, account_alias,
@@ -218,27 +225,33 @@ def register_auth_tools(mcp: FastMCP) -> None:
 
     @mcp.tool
     def auth_launch_login(source: str, account_alias: str,
-                          automation: str = "assisted") -> dict:
+                          automation: str = "assisted",
+                          egress_ref: str | None = None) -> dict:
         """Launch a login station for an identity (login-station-console).
 
-        Registers/resets the identity as login_required with an auto-assigned
-        egress proxy, then launches the station (a headful-browser Job + the
-        panel-gated noVNC observation channel). The login itself happens
-        inside the station: the operator completes slider/captcha in the
-        panel's embedded view at ``vnc_url`` (RELATIVE — open it through the
-        panel with your own credential; no token is embedded and the station
-        is reachable only through the panel). Station status then advances
+        Registers/resets the identity as login_required with an egress proxy
+        (auto-assigned, or the operator's explicit ``proxy:<id>``), then
+        launches the station (a headful-browser Job + the panel-gated noVNC
+        observation channel). The login itself happens inside the station: the
+        operator completes slider/captcha in the panel's embedded view at
+        ``vnc_url`` (RELATIVE — open it through the panel with your own
+        credential; no token is embedded and the station is reachable only
+        through the panel). Station status then advances
         launching -> waiting_operator -> completed; see ``auth_status``.
 
         Args:
             source: the source the identity belongs to.
             account_alias: the account alias in that source's pool.
             automation: login unit's declared level (default "assisted").
+            egress_ref: optional explicit egress ``proxy:<id>`` (login + crawl
+                both go through it; unknown/retired/other-account refs are
+                refused with status invalid/conflict and no station launches).
         """
         s = _session()
         try:
             return launch_login_station(s, source, account_alias,
                                         automation=automation,
-                                        requested_by="mcp")
+                                        requested_by="mcp",
+                                        egress_ref=egress_ref)
         finally:
             s.close()

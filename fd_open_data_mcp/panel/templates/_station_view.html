@@ -20,6 +20,14 @@
   <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
     <input type="hidden" name="source" value="{{ st.source }}">
     <input type="hidden" name="account_alias" value="{{ st.account_alias }}">
+    {% if egresses %}
+    <select name="egress_ref" aria-label="出口 egress" title="重新拉起时使用的出口 egress for the relaunch">
+      <option value="">出口：沿用当前 egress: keep current</option>
+      {% for e in egresses %}
+      <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
+      {% endfor %}
+    </select>
+    {% endif %}
     <button type="submit">重新拉起登录站 relaunch</button>
   </form>
   {% endif %}

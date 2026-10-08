@@ -118,6 +118,59 @@ def test_station_launch_route_missing_fields(session):
     assert r.status_code == 400
 
 
+# ── operator-chosen egress (the "I can't pick my proxy" defect) ──────────────
+def test_launch_route_honours_explicit_egress(session, monkeypatch):
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    p_auto = _proxy(ip="10.0.0.1")
+    p_pick = _proxy(ip="10.0.0.2", label="gost-cheap")
+    fake = FakeStationClient()
+    monkeypatch.setattr(appmod, "_station_client", lambda: fake)
+
+    r = client.post("/panel/auth/station/launch",
+                    data={"source": "rmfyalk", "account_alias": "acc-a",
+                          "egress_ref": f"proxy:{p_pick}"},
+                    headers={"hx-request": "true"})
+
+    assert r.status_code == 200
+    s = _db()
+    try:
+        ident = s.query(CrawlIdentity).filter_by(
+            source="rmfyalk", account_alias="acc-a").one()
+        assert ident.egress_ref == f"proxy:{p_pick}"   # the picked one
+        st = s.get(CrawlLoginStation, 1)
+        assert f"10.0.0.2:8080" in (st.proxy_url or "")
+    finally:
+        s.close()
+
+
+def test_launch_route_rejects_bad_egress_with_reason(session, monkeypatch):
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    fake = FakeStationClient()
+    monkeypatch.setattr(appmod, "_station_client", lambda: fake)
+
+    r = client.post("/panel/auth/station/launch",
+                    data={"source": "rmfyalk", "account_alias": "acc-a",
+                          "egress_ref": "proxy:424242"},
+                    headers={"hx-request": "true"})
+
+    assert r.status_code == 200          # a toast, not a 500
+    assert "unknown or retired" in r.headers.get("hx-trigger", "")
+    assert fake.created == []            # nothing was launched
+
+
+def test_partial_renders_egress_picker(session):
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    pid = _proxy(ip="10.0.0.3", auth="u:sekret", label="gost-xinru3")
+    iid = _ident("rmfyalk", "acc-a", "login_required")
+    r = client.get("/panel/partials/auth")
+    assert r.status_code == 200
+    # picker exists with an auto default + the masked choice
+    assert 'name="egress_ref"' in r.text
+    assert "egress: auto" in r.text or "egress: keep current" in r.text
+    assert "gost-xinru3" in r.text and f"proxy:{pid}" in r.text
+    assert "u:sekret" not in r.text      # credentials never render
+
+
 # ── new-account form ────────────────────────────────────────────────────────
 def test_new_account_form_registers_identity_with_egress(session):
     _source("rmfyalk", auth_profile="rmfyalk-login")
