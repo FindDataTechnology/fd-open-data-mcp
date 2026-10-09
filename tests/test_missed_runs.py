@@ -103,4 +103,4 @@ def test_partial_renders_flags_and_degrades(session):
     assert "nightly" in r.text and "never launched" in r.text
     # home page polls the missed partial
     home = _client().get("/panel")
-    assert "/panel/partials/missed" in home.text and "Missed runs" in home.text
+    assert "/panel/partials/missed" in home.text and "错过的运行" in home.text

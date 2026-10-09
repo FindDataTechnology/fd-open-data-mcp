@@ -1,37 +1,37 @@
 {% extends "base.html" %}
 {% from "_macros.html" import th, svg_heatmap, legend_freshness %}
-{% block title %}数据覆盖 Data coverage · 爬虫控制台{% endblock %}
+{% block title %}{{ t('数据覆盖 Data coverage · 爬虫控制台') }}{% endblock %}
 {% block content %}
-<h2>数据覆盖 <span class="en">Data coverage</span></h2>
-<p class="muted">{{ n_concepts }} 个概念有观测 concepts with observations · {{ total_rows }} local rows 本地行 ·
-   {% if coverage_live %}覆盖为实时 live coverage{% else %}覆盖采样于 coverage sampled {{ coverage_age_hours }}h 前{% if coverage_stale %} <span class="badge refused">陈旧 stale</span>{% endif %}{% endif %} ·
-   {% if census %}{{ "{:,}".format(census_total) }} across all stores 全部存储合计{% else %}census 尚未采样 not yet sampled{% endif %}</p>
+<h2>{{ t('数据覆盖') }}</h2>
+<p class="muted">{{ n_concepts }} {{ t('个概念有观测 concepts with observations') }} · {{ total_rows }} {{ t('local rows 本地行') }} ·
+   {% if coverage_live %}{{ t('覆盖为实时 live coverage') }}{% else %}{{ t('覆盖采样于 coverage sampled') }} {{ coverage_age_hours }}h {{ t('前') }}{% if coverage_stale %} <span class="badge refused">{{ t('陈旧 stale') }}</span>{% endif %}{% endif %} ·
+   {% if census %}{{ "{:,}".format(census_total) }} {{ t('across all stores 全部存储合计') }}{% else %}{{ t('census 尚未采样 not yet sampled') }}{% endif %}</p>
 
 <form class="inline-form" method="post" action="/panel/data/coverage/refresh">
-  <button class="btn" type="submit">刷新覆盖 Refresh coverage</button>
+  <button class="btn" type="submit">{{ t('刷新覆盖 Refresh coverage') }}</button>
 </form>
 
 {% if census %}
-<h3>存储 <span class="en">Stores</span> <span class="muted">（最新普查 latest census）</span></h3>
+<h3>{{ t('存储') }} <span class="muted">{{ t('（最新普查 latest census）') }}</span></h3>
 <form class="inline-form" method="post" action="/panel/data/census/refresh">
-  <button class="btn" type="submit">刷新普查 Refresh census</button>
+  <button class="btn" type="submit">{{ t('刷新普查 Refresh census') }}</button>
 </form>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('存储', 'Store') }}{{ th('类型', 'Kind') }}{{ th('行数', 'Rows') }}{{ th('大小', 'Size') }}{{ th('分块', 'Chunks') }}{{ th('数据截至', 'Data through') }}{{ th('采样于', 'Sampled') }}</tr>
+  <tr>{{ th(t('存储')) }}{{ th(t('类型')) }}{{ th(t('行数')) }}{{ th(t('大小')) }}{{ th(t('分块')) }}{{ th(t('数据截至')) }}{{ th(t('采样于')) }}</tr>
   </thead>
   {% for c in census %}
   <tr>
     <td>{{ c.store }}</td>
     <td class="muted">{{ c.kind }}</td>
-    <td>{% if c.error %}<span class="badge failed" title="{{ c.error }}">错误 error</span>
+    <td>{% if c.error %}<span class="badge failed" title="{{ c.error }}">{{ t('错误 error') }}</span>
         {% elif c.approx_rows is none %}—
         {% else %}{% if not c.exact %}≈{% endif %}{{ "{:,}".format(c.approx_rows) }}{% endif %}</td>
     <td class="muted">{% if c.total_size_bytes %}{{ (c.total_size_bytes / 1073741824) | round(1) }} GB{% else %}—{% endif %}</td>
     <td class="muted">{{ c.chunks or '—' }}</td>
     <td>{{ c.time_range_end or '—' }}</td>
-    <td class="muted">{% if c.stale %}<span class="badge refused">陈旧 stale</span> {% endif %}{{ c.age_hours if c.age_hours is not none else '—' }}h 前 ago</td>
+    <td class="muted">{% if c.stale %}<span class="badge refused">{{ t('陈旧 stale') }}</span> {% endif %}{{ c.age_hours if c.age_hours is not none else '—' }}h {{ t('前 ago') }}</td>
   </tr>
   {% endfor %}
 </table>
@@ -40,26 +40,26 @@
 
 {% block coverage_heatmap %}
 <section class="card">
-  <h3>概念新鲜度 <span class="en">Concept freshness</span></h3>
-  {{ svg_heatmap(heat, link_prefix='/panel/data?freshness=', active_key=freshness, label='概念新鲜度分布 concept freshness by bucket') }}
+  <h3>{{ t('概念新鲜度') }}</h3>
+  {{ svg_heatmap(heat, link_prefix='/panel/data?freshness=', active_key=freshness, label=t('概念新鲜度分布 concept freshness by bucket')) }}
   {{ legend_freshness() }}
-  {% if freshness %}<a class="btn" href="/panel/data">清除新鲜度筛选 Clear freshness</a>{% endif %}
+  {% if freshness %}<a class="btn" href="/panel/data">{{ t('清除新鲜度筛选 Clear freshness') }}</a>{% endif %}
 </section>
 {% endblock %}
 
 <form method="get" action="/panel/data">
   <div class="pill-row">
-    <input type="number" name="concept_id" placeholder="概念 id concept id" aria-label="概念 id concept id" value="{{ concept_id or '' }}" class="filter-w">
-    <input type="text" name="entity_type" placeholder="实体类型 entity type (stock/fund/country…)" aria-label="实体类型 entity type" value="{{ entity_type or '' }}" class="filter-w">
-    <button class="btn" type="submit">筛选 Filter</button>
-    <a class="btn" href="/panel/data">清除 Clear</a>
+    <input type="number" name="concept_id" placeholder="{{ t('概念 id concept id') }}" aria-label="{{ t('概念 id concept id') }}" value="{{ concept_id or '' }}" class="filter-w">
+    <input type="text" name="entity_type" placeholder="{{ t('实体类型 entity type (stock/fund/country…)') }}" aria-label="{{ t('实体类型 entity type') }}" value="{{ entity_type or '' }}" class="filter-w">
+    <button class="btn" type="submit">{{ t('筛选 Filter') }}</button>
+    <a class="btn" href="/panel/data">{{ t('清除 Clear') }}</a>
   </div>
 </form>
 
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('概念', 'Concept') }}{{ th('分类', 'Category') }}{{ th('行数', 'Rows') }}{{ th('最新日期', 'Latest date') }}{{ th('数据源', 'Sources') }}{{ th('上次抓取', 'Last fetch') }}</tr>
+  <tr>{{ th(t('概念')) }}{{ th(t('分类')) }}{{ th(t('行数')) }}{{ th(t('最新日期')) }}{{ th(t('数据源')) }}{{ th(t('上次抓取')) }}</tr>
   </thead>
   {% for c in coverage %}
   <tr>
@@ -71,7 +71,7 @@
     <td class="muted">{{ c.last_fetch or '—' }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="6" class="muted">没有匹配的观测 No observations match.</td></tr>
+  <tr><td colspan="6" class="muted">{{ t('没有匹配的观测 No observations match.') }}</td></tr>
   {% endfor %}
 </table>
 </div>

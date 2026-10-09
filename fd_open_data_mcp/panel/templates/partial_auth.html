@@ -10,145 +10,186 @@
                      'auth_failed': 'failed', 'suspect_yield': 'zero_yield',
                      'banned': 'failed', 'note': 'no_op'} %}
 
+{#- The standing banner rides as an OUT-OF-BAND update of the page slot
+    #auth-alert (spec 警告不重复堆叠): htmx pulls this top-level element out
+    of the swap and refreshes the page-level banner in place, so the warning
+    is never re-rendered inline among the cards below. Rendered unconditionally
+    so a resolved alert clears the slot on the next poll. -#}
+<div id="auth-alert" hx-swap-oob="true">
 {% include "_auth_alert.html" %}
-
-<p>
-  <span class="badge">身份 identities {{ summary.total }}</span>
-  <span class="badge success">活跃 active {{ summary.active }}</span>
-  <span class="badge refused">需登录 login_required {{ summary.login_required }}</span>
-  <span class="badge running">租借中 leased {{ summary.leased }}</span>
-</p>
-
-<h3>新建账号 <span class="en">New account</span></h3>
-<p class="muted">选源 + 起别名即登记身份；出口可留自动分配，或自选一个固定出口（该账号的登录与后续爬取都走它）。
-Pick a source + an alias to register an identity; leave the egress on auto, or pin one explicitly (the account logs in and crawls through it).</p>
-<form class="inline-form" hx-post="/panel/auth/identities" hx-target="#identity-created" hx-swap="innerHTML">
-  <select name="source" required aria-label="数据源 source">
-    {% for src in station_sources %}
-    {#- identities ARE keyed by auth_profile (the login unit), not the crawl
-        source name: registering under 'rmfyalk-case-crawl' created a row the
-        dispatcher could never lease (it looks up auth_profile='rmfyalk').
-        Post the profile; show the crawl source as context only. -#}
-    <option value="{{ src.auth_profile }}">{{ src.auth_profile }}{% if src.source != src.auth_profile %}（{{ src.source }}）{% endif %}</option>
-    {% else %}
-    <option value="">— 无认证源 no auth_profile sources —</option>
-    {% endfor %}
-  </select>
-  <input name="account_alias" placeholder="账号别名 account alias" aria-label="账号别名 account alias" required>
-  <select name="egress_ref" aria-label="出口 egress">
-    <option value="">自动分配出口 egress: auto</option>
-    {% for e in egresses %}
-    <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
-    {% endfor %}
-  </select>
-  <button type="submit">登记 register</button>
-</form>
-<div id="identity-created"></div>
-
-<h3>需登录队列 <span class="en">Login-required queue</span></h3>
-<p class="muted">失败次数多者先处理，从未登录过的（新登记）排最前。
-Most failures first; never-logged-in registrations at the head.</p>
-<div class="table-wrap">
-<table>
-  <thead>
-  <tr>{{ th('源', 'Source') }}{{ th('账号', 'Account') }}{{ th('自动化', 'Automation') }}{{ th('最近登录', 'Last login') }}{{ th('失败次数', 'Failures') }}</tr>
-  </thead>
-  {% for i in queue %}
-  <tr>
-    <td><a href="/panel/sources/{{ i.source | urlencode }}">{{ i.source }}</a></td>
-    <td>{{ i.account_alias }}</td>
-    <td class="muted">{{ i.automation }}</td>
-    <td class="muted">{{ i.last_login_at or '从未登录 never logged in' }}</td>
-    <td>{{ i.failure_count }}</td>
-  </tr>
-  {% else %}
-  <tr><td colspan="5" class="muted">队列为空，没有需要登录的身份 Empty queue — no identities need a login.</td></tr>
-  {% endfor %}
-</table>
 </div>
 
-<h3>身份矩阵 <span class="en">Identity matrix</span></h3>
-<p class="muted">按源分组：账号 / 五态状态 / 自动化程度 / 最近登录 / 最近成功 / 连续零产出 / 租借。
-Grouped by source: account, five-state status, automation, last login/success, zero-run streak, lease.</p>
-<div class="table-wrap">
-<table>
-  <thead>
-  <tr>{{ th('账号', 'Account') }}{{ th('状态', 'Status') }}{{ th('自动化', 'Automation') }}{{ th('最近登录', 'Last login') }}{{ th('最近成功', 'Last success') }}{{ th('连续零产出', 'Zero-run streak') }}{{ th('租借', 'Lease') }}</tr>
-  </thead>
-  {% for g in groups %}
-  <tr>
-    <td colspan="7">
-      <strong>{{ g.source }}</strong>
-      {% if g.auth_profile %}<span class="badge running">认证源 authenticated</span>{% endif %}
-      <span class="muted">{{ g.identities | length }} 身份 identities</span>
-    </td>
-  </tr>
-  {% for i in g.identities %}
-  <tr>
-    <td>{{ i.account_alias }}</td>
-    <td><span class="badge {{ status_badge.get(i.status, 'no_op') }}">{{ i.status }}</span>
-        {% if i.status == 'login_required' %}
-        <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
+<p>
+  <span class="badge">{{ t('身份') }} {{ summary.total }}</span>
+  <span class="badge success">{{ t('活跃') }} {{ summary.active }}</span>
+  <span class="badge refused">{{ t('需登录') }} {{ summary.login_required }}</span>
+  <span class="badge running">{{ t('租借中') }} {{ summary.leased }}</span>
+</p>
+
+{#- 任务分区 (spec: 需登录队列与新建账号表单分属独立分区/卡片): one task
+    per card. The queue comes FIRST — the page banner's 「点下方『登录』」
+    points at it, so the actionable rows (now carrying their own visible
+    拉起登录站 buttons, spec 队列行内登录入口可见) sit directly under the
+    warning instead of under the occasional-use registration form. -#}
+<section class="card auth-card" data-auth-section="login-queue">
+  <h3>{{ t('需登录队列') }}</h3>
+  <ul class="auth-brief">
+    <li>{{ t('失败次数多者先处理，从未登录过的（新登记）排最前。') }}</li>
+    <li>{{ t('每行可直接拉起登录站，行内按钮即对该身份发起登录任务。') }}</li>
+  </ul>
+  <table>
+    <thead>
+    <tr>{{ th(t('源')) }}{{ th(t('账号')) }}{{ th(t('自动化')) }}{{ th(t('最近登录')) }}{{ th(t('失败次数')) }}{{ th(t('操作')) }}</tr>
+    </thead>
+    {% for i in queue %}
+    <tr>
+      <td><a href="/panel/sources/{{ i.source | urlencode }}">{{ i.source }}</a></td>
+      <td>{{ i.account_alias }}</td>
+      <td class="muted">{{ i.automation }}</td>
+      <td class="muted">{{ i.last_login_at or t('从未登录') }}</td>
+      <td>{{ i.failure_count }}</td>
+      <td>
+        {#- fields aligned with POST /panel/auth/station/launch:
+            source / account_alias / optional egress_ref -#}
+        <form class="inline-form station-launch" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
           <input type="hidden" name="source" value="{{ i.source }}">
           <input type="hidden" name="account_alias" value="{{ i.account_alias }}">
-          <select name="egress_ref" aria-label="出口 egress" title="登录与爬取的出口 egress for login + crawl">
-            <option value="">出口：沿用当前 egress: keep current ({{ i.egress_ref or '未绑定 unbound' }})</option>
+          {% if egresses %}
+          <select name="egress_ref" aria-label="{{ t('出口') }}" title="{{ t('登录与爬取的出口') }}">
+            <option value="">{{ t('出口：沿用当前') }} ({{ i.egress_ref or t('未绑定') }})</option>
             {% for e in egresses %}
             <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
             {% endfor %}
           </select>
-          <button class="link" type="submit">登录 login</button>
+          {% endif %}
+          <button class="btn btn-primary" type="submit">{{ t('拉起登录站') }}</button>
         </form>
-        {% endif %}</td>
-    <td class="muted">{{ i.automation }}</td>
-    <td class="muted">{{ i.last_login_at or '—' }}</td>
-    <td class="muted">{{ i.last_success_at or '—' }}</td>
-    <td>{% if i.consecutive_zero_runs %}<span class="warn-text">{{ i.consecutive_zero_runs }}</span>{% else %}<span class="muted">0</span>{% endif %}</td>
-    <td>{% if i.leased %}<span class="badge running">租借中 leased</span> <span class="muted">{{ i.lease_owner }}</span>
-        {% elif i.lease_expired %}<span class="badge refused">租约过期 lease expired</span>
-        {% else %}<span class="muted">—</span>{% endif %}</td>
-  </tr>
-  {% endfor %}
-  {% else %}
-  <tr><td colspan="7" class="muted">尚无身份 No identities registered yet.</td></tr>
-  {% endfor %}
-</table>
-</div>
+      </td>
+    </tr>
+    {% else %}
+    <tr><td colspan="6" class="muted">{{ t('队列为空，没有需要登录的身份') }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
 
-<h3>事件流 <span class="en">Event stream</span> <span class="muted">最近 20 条 latest 20</span></h3>
-<p class="muted">login / probe / small_batch / lease / 失效与封禁留痕，可按身份回放。
-The auditable login/probe/lease trail, replayable per identity.</p>
-<div class="table-wrap">
-<table>
-  <thead>
-  <tr>{{ th('时间', 'Time') }}{{ th('类型', 'Kind') }}{{ th('身份', 'Identity') }}{{ th('详情', 'Detail') }}{{ th('租借令牌', 'Lease token') }}</tr>
-  </thead>
-  {% for ev in events %}
-  <tr>
-    <td class="muted">{{ ev.created_at or '—' }}</td>
-    <td><span class="badge {{ kind_badge.get(ev.kind, 'no_op') }}">{{ ev.kind }}</span></td>
-    <td><a href="/panel/sources/{{ ev.source | urlencode }}">{{ ev.source }}</a> / {{ ev.account_alias }}</td>
-    <td class="muted wrap">{{ ev.detail or '—' }}</td>
-    <td class="muted">{{ (ev.lease_token or '')[:8] or '—' }}</td>
-  </tr>
-  {% else %}
-  <tr><td colspan="5" class="muted">尚无事件 No identity events yet.</td></tr>
-  {% endfor %}
-</table>
-</div>
+<section class="card auth-card" data-auth-section="new-account">
+  <h3>{{ t('新建账号') }}</h3>
+  <ul class="auth-brief">
+    <li>{{ t('选源 + 起别名即登记身份，登记后进入上方队列等待登录。') }}</li>
+    <li>{{ t('出口可留自动分配，或自选一个固定出口（该账号的登录与后续爬取都走它）。') }}</li>
+  </ul>
+  <form class="inline-form" hx-post="/panel/auth/identities" hx-target="#identity-created" hx-swap="innerHTML">
+    <select name="source" required aria-label="{{ t('数据源') }}">
+      {% for src in station_sources %}
+      {#- identities ARE keyed by auth_profile (the login unit), not the crawl
+          source name: registering under 'rmfyalk-case-crawl' created a row the
+          dispatcher could never lease (it looks up auth_profile='rmfyalk').
+          Post the profile; show the crawl source as context only. -#}
+      <option value="{{ src.auth_profile }}">{{ src.auth_profile }}{% if src.source != src.auth_profile %}（{{ src.source }}）{% endif %}</option>
+      {% else %}
+      <option value="">— {{ t('无认证源') }} —</option>
+      {% endfor %}
+    </select>
+    <input name="account_alias" placeholder="{{ t('账号别名') }}" aria-label="{{ t('账号别名') }}" required>
+    <select name="egress_ref" aria-label="{{ t('出口') }}">
+      <option value="">{{ t('自动分配出口') }}</option>
+      {% for e in egresses %}
+      <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
+      {% endfor %}
+    </select>
+    <button type="submit">{{ t('登记') }}</button>
+  </form>
+  <div id="identity-created"></div>
+</section>
 
-<h3>登录站 <span class="en">Login stations</span></h3>
-<p class="muted">进行中/最近的登录站：状态（拉起中 / 等待操作 / 完成 / 失败 / 超时 / 回收）、期限与观察窗入口；超期未完成的站会被标记超时并可回收。
-Live and recent login stations: status, deadline and the observation-view entry; an overdue station is marked timeout and can be reclaimed.</p>
-<div class="table-wrap">
-<table>
-  <thead>
-  <tr>{{ th('站', 'Station') }}{{ th('身份', 'Identity') }}{{ th('状态', 'Status') }}{{ th('出口', 'Egress') }}{{ th('期限', 'Deadline') }}{{ th('操作', 'Actions') }}</tr>
-  </thead>
-  {% for t in stations %}
-  {% include "_station_row.html" %}
-  {% else %}
-  <tr><td colspan="6" class="muted">暂无登录站 No login stations yet.</td></tr>
-  {% endfor %}
-</table>
-</div>
+<section class="card auth-card" data-auth-section="identity-matrix">
+  <h3>{{ t('身份矩阵') }}</h3>
+  <ul class="auth-brief">
+    <li>{{ t('按源分组：账号 / 五态状态 / 自动化程度 / 最近登录 / 最近成功 / 连续零产出 / 租借。') }}</li>
+    <li>{{ t('login_required 行内可直接拉起登录站（可换出口）。') }}</li>
+  </ul>
+  <table>
+    <thead>
+    <tr>{{ th(t('账号')) }}{{ th(t('状态')) }}{{ th(t('自动化')) }}{{ th(t('最近登录')) }}{{ th(t('最近成功')) }}{{ th(t('连续零产出')) }}{{ th(t('租借')) }}</tr>
+    </thead>
+    {% for g in groups %}
+    <tr>
+      <td colspan="7">
+        <strong>{{ g.source }}</strong>
+        {% if g.auth_profile %}<span class="badge running">{{ t('认证源') }}</span>{% endif %}
+        <span class="muted">{{ g.identities | length }} {{ t('身份') }}</span>
+      </td>
+    </tr>
+    {% for i in g.identities %}
+    <tr>
+      <td>{{ i.account_alias }}</td>
+      <td><span class="badge {{ status_badge.get(i.status, 'no_op') }}">{{ i.status }}</span>
+          {% if i.status == 'login_required' %}
+          <form class="inline-form station-launch" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
+            <input type="hidden" name="source" value="{{ i.source }}">
+            <input type="hidden" name="account_alias" value="{{ i.account_alias }}">
+            <select name="egress_ref" aria-label="{{ t('出口') }}" title="{{ t('登录与爬取的出口') }}">
+              <option value="">{{ t('出口：沿用当前') }} ({{ i.egress_ref or t('未绑定') }})</option>
+              {% for e in egresses %}
+              <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
+              {% endfor %}
+            </select>
+            <button class="link" type="submit">{{ t('登录') }}</button>
+          </form>
+          {% endif %}</td>
+      <td class="muted">{{ i.automation }}</td>
+      <td class="muted">{{ i.last_login_at or '—' }}</td>
+      <td class="muted">{{ i.last_success_at or '—' }}</td>
+      <td>{% if i.consecutive_zero_runs %}<span class="warn-text">{{ i.consecutive_zero_runs }}</span>{% else %}<span class="muted">0</span>{% endif %}</td>
+      <td>{% if i.leased %}<span class="badge running">{{ t('租借中') }}</span> <span class="muted">{{ i.lease_owner }}</span>
+          {% elif i.lease_expired %}<span class="badge refused">{{ t('租约过期') }}</span>
+          {% else %}<span class="muted">—</span>{% endif %}</td>
+    </tr>
+    {% endfor %}
+    {% else %}
+    <tr><td colspan="7" class="muted">{{ t('尚无身份') }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+
+<section class="card auth-card" data-auth-section="event-stream">
+  <h3>{{ t('事件流') }} <span class="muted">{{ t('最近 20 条') }}</span></h3>
+  <ul class="auth-brief">
+    <li>{{ t('login / probe / small_batch / lease / 失效与封禁留痕。') }}</li>
+    <li>{{ t('可按身份回放。') }}</li>
+  </ul>
+  <table>
+    <thead>
+    <tr>{{ th(t('时间')) }}{{ th(t('类型')) }}{{ th(t('身份')) }}{{ th(t('详情')) }}{{ th(t('租借令牌')) }}</tr>
+    </thead>
+    {% for ev in events %}
+    <tr>
+      <td class="muted">{{ ev.created_at or '—' }}</td>
+      <td><span class="badge {{ kind_badge.get(ev.kind, 'no_op') }}">{{ ev.kind }}</span></td>
+      <td><a href="/panel/sources/{{ ev.source | urlencode }}">{{ ev.source }}</a> / {{ ev.account_alias }}</td>
+      <td class="muted wrap">{{ ev.detail or '—' }}</td>
+      <td class="muted">{{ (ev.lease_token or '')[:8] or '—' }}</td>
+    </tr>
+    {% else %}
+    <tr><td colspan="5" class="muted">{{ t('尚无事件') }}</td></tr>
+    {% endfor %}
+  </table>
+</section>
+
+<section class="card auth-card" data-auth-section="login-stations">
+  <h3>{{ t('登录站') }}</h3>
+  <ul class="auth-brief">
+    <li>{{ t('进行中/最近的登录站：状态、期限与观察窗入口。') }}</li>
+    <li>{{ t('超期未完成的站会被标记超时并可回收；已结束的站可一键重新拉起。') }}</li>
+  </ul>
+  <table>
+    <thead>
+    <tr>{{ th(t('站')) }}{{ th(t('身份')) }}{{ th(t('状态')) }}{{ th(t('出口')) }}{{ th(t('期限')) }}{{ th(t('操作')) }}</tr>
+    </thead>
+    {% for stn in stations %}
+    {% include "_station_row.html" %}
+    {% else %}
+    <tr><td colspan="6" class="muted">{{ t('暂无登录站') }}</td></tr>
+    {% endfor %}
+  </table>
+</section>

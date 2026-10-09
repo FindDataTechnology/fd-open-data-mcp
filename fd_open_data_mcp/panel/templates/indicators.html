@@ -1,12 +1,9 @@
 {% extends "base.html" %}
-{% block title %}指标观察台 Indicators · 爬虫控制台{% endblock %}
+{% block title %}{{ t('指标观察台') }} · {{ t('爬虫控制台') }}{% endblock %}
 {% block content %}
-<h2>指标 <span class="en">Indicators — observatory</span></h2>
-<p class="muted">统一指标注册目录与概念层关系的观察面：登记、族谱、跨源绑定、词表映射、覆盖率。
-Observability surface over the unified indicator registry and the concept
-layer — registrations, families, cross-source bindings, vocabulary mappings,
-coverage. 与 MCP 工具同库同表读取（观测面，非分叉）。Reads the same tables the
-MCP tools serve.</p>
+<h2>{{ t('指标') }}</h2>
+<p class="muted">{{ t('统一指标注册目录与概念层关系的观察面：登记、族谱、跨源绑定、词表映射、覆盖率。') }}
+{{ t('与 MCP 工具同库同表读取（观测面，非分叉）。') }}</p>
 {% include "_indicator_tabs.html" %}
 <div id="indicator-results">
   {% include "partial_indicator_results.html" %}

@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{% block title %}{{ t('权限不足') }}{% endblock %}
+{% block content %}
+<section class="card">
+  <h2>{{ t('无权访问') }}</h2>
+  <p>
+    {{ t('无权访问说明前') }}{% if to %}<code>{{ to }}</code>{% else %}{{ t('该页面') }}{% endif %}{{ t('无权访问说明后') }}。
+  </p>
+  <p class="muted">{{ t('无权访问提示') }}</p>
+  <a class="btn" href="/panel">{{ t('返回总览') }}</a>
+</section>
+{% endblock %}

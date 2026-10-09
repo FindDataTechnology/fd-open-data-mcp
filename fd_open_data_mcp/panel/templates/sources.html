@@ -1,9 +1,9 @@
 {% extends "base.html" %}
-{% block title %}平台源 Platform sources · 爬虫控制台{% endblock %}
+{% block title %}{{ t('平台源 Platform sources · 爬虫控制台') }}{% endblock %}
 {% block content %}
-<h2>平台源 <span class="en">Platform sources</span></h2>
-<p class="muted">清单来自内容仓 manifest 与联邦成员登记（crawl_sources，dispatcher 每 5 分钟镜像）。
-Inventory mirrored from content-repo manifests + federation members. schedule 为空 = 未点亮 not lit.</p>
+<h2>{{ t('平台源') }}</h2>
+<p class="muted">{{ t('清单来自内容仓 manifest 与联邦成员登记（crawl_sources，dispatcher 每 5 分钟镜像）。Inventory mirrored from content-repo manifests + federation members.') }}
+{{ t('schedule 为空 = 未点亮 not lit.') }}</p>
 <div id="sources-results">
   {% include "partial_sources_results.html" %}
 </div>

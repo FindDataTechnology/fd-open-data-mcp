@@ -63,10 +63,12 @@ def mig():
 # ---------------------------------------------------------------------------
 
 def test_revision_is_new_head_of_shipped_chain():
-    """The shipped head is 0009 (per-source schedule timezone); each revision
+    """The shipped head is 0010 (panel action audit); each revision
     keeps its own down_revision wiring (their contract tests live above)."""
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0009_source_schedule_tz"
+    assert script.get_current_head() == "0010_panel_action_audit"
+    rev10 = script.get_revision("0010_panel_action_audit")
+    assert rev10.down_revision == "0009_source_schedule_tz"
     rev9 = script.get_revision("0009_source_schedule_tz")
     assert rev9.down_revision == "0008_federation_runner_env"
     rev = script.get_revision("0008_federation_runner_env")
@@ -85,6 +87,7 @@ def test_chain_is_linear_head_to_baseline():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0010_panel_action_audit",
         "0009_source_schedule_tz",
         "0008_federation_runner_env",
         "0007_legal_federation",
@@ -384,6 +387,8 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0009_source_schedule_tz"
-    # Guarded no-op: only the alembic ledger exists; no app tables were built.
-    assert tables == {"alembic_version"}
+    assert version == "0010_panel_action_audit"
+    # 0001-0009 stay PG-guarded no-ops on sqlite; 0010 is portable DDL
+    # (design D3: the audit table must exist on sqlite test databases) and
+    # is the one app table the chain builds there.
+    assert tables == {"alembic_version", "panel_action_audit"}

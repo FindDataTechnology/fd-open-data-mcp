@@ -12,6 +12,7 @@ import datetime as dt
 import json
 import logging
 import os
+import urllib.parse
 import urllib.request
 from contextlib import asynccontextmanager
 from html import escape
@@ -30,13 +31,44 @@ from fd_open_data_mcp.models import (
     CrawlSite, CrawlSource, FetchLog, PendingRun, PolicyRun, Proxy,
     SourceProxyHealth, SourceRateLimit,
 )
+from fd_open_data_mcp.panel.auth import (
+    PERM_ADMIN, PERM_OPERATE, PERM_VIEW, permission_level,
+)
 from fd_open_data_mcp.platform_tools import (
     cancel_pending_run, cancel_platform_run, trigger_platform_run,
 )
 from fd_open_data_mcp.visibility import snapshot as _snapshot
 
 HERE = Path(__file__).parent
-templates = Jinja2Templates(directory=str(HERE / "templates"))
+
+
+class _PanelTemplates(Jinja2Templates):
+    """TemplateResponse that seeds every render with the request's permission
+    level and resolved locale (with its bound helpers) so templates gate
+    visibility and language in exactly one place (design D2/D4 — context
+    injection, not twin templates). Renders without a gate-decorated request
+    (no auth configured) default to the top tier and the default locale."""
+
+    def TemplateResponse(self, request, name, context=None, **kwargs):
+        from fd_open_data_mcp.panel import i18n
+        context = dict(context or {})
+        context.setdefault(
+            "perm", getattr(request.state, "panel_perm", PERM_ADMIN))
+        locale = getattr(request.state, "panel_locale", i18n.DEFAULT_LANG)
+        context.setdefault("locale", locale)
+        context.setdefault("t", lambda s: i18n.translate(s, locale))
+        context.setdefault("fmt_ts",
+                           lambda v: i18n.fmt_ts(v, locale))
+        context.setdefault("fmt_int",
+                           lambda n: i18n.fmt_int(n, locale))
+        context.setdefault("fmt_cron",
+                           lambda e: _fmt_cron(e, locale))
+        context.setdefault("lang_toggle_url",
+                           f"/panel/lang?to={'zh' if locale == 'en' else 'en'}")
+        return super().TemplateResponse(request, name, context, **kwargs)
+
+
+templates = _PanelTemplates(directory=str(HERE / "templates"))
 # Cache-busting fingerprint for static assets: static files ship no
 # cache-control header, so browsers heuristic-cache app.css across deploys and
 # new UI ships broken (seen 2026-10-08: station modal CSS missing → tiny
@@ -71,6 +103,136 @@ _TEMPLATE_CRON = {
     "daily": "0 6 * * *", "weekly": "0 6 * * 1", "monthly": "0 6 1 * *",
     "quarterly": "0 6 1 1,4,7,10 *", "yearly": "0 6 1 1 *",
 }
+
+# ── RBAC route table (panel-rbac-i18n-refresh design D1 / ADR-0002) ──────────
+_PUBLIC_PATHS = ("/panel/auth/login", "/panel/auth/callback",
+                 "/panel/auth/logout", "/panel/auth/whoami", "/panel/lang")
+
+
+def _required_perm(method: str, path: str) -> int | None:
+    """Minimum permission level for a concrete request; None = public.
+
+    Single source of truth for route RBAC. The coverage test walks app.routes
+    through this function so a new unmapped route fails CI instead of
+    silently defaulting. Unmapped /panel paths deny at admin (closed default).
+    """
+    if not path.startswith("/panel"):
+        return None  # "/" index redirect + non-panel mounts
+    if path in _PUBLIC_PATHS or path.startswith("/panel/static"):
+        return None
+    # admin — proxy ops, login-station console (incl. VNC relay targets),
+    # cluster capacity writes
+    if (path == "/panel/proxy" or path.startswith("/panel/proxy/")
+            or path == "/panel/partials/proxy"):
+        return PERM_ADMIN
+    if path == "/panel/auth" or path.startswith("/panel/auth/") \
+            or path == "/panel/partials/auth":
+        # everything under /panel/auth beyond the public OIDC quartet above
+        return PERM_ADMIN
+    if path.startswith("/panel/clusters/") and path.endswith("/capacity"):
+        return PERM_ADMIN
+    # operate — crawl actions and management writes
+    if (path.startswith("/panel/policies") or path == "/panel/estimate"
+            or path == "/panel/crawl/adhoc"):
+        return PERM_OPERATE
+    if path.startswith("/panel/sources"):
+        return PERM_OPERATE
+    if path.startswith("/panel/indicators/scopes"):
+        return PERM_OPERATE
+    if path == "/panel/runs" and method == "GET":
+        return PERM_VIEW  # runs list; detail pages/cancels below are operate
+    if path.startswith("/panel/runs") or path.startswith("/panel/pending"):
+        return PERM_OPERATE
+    if path == "/panel/partials/fleet":
+        return PERM_OPERATE  # cluster topology (spec: viewer home omits fleet)
+    if path.startswith("/panel/data/") and method == "POST":
+        return PERM_OPERATE  # coverage/census refreshes
+    # view — read-only data surfaces
+    if path in ("/panel", "/panel/data", "/panel/funnel", "/panel/denied"):
+        return PERM_VIEW
+    if path.startswith("/panel/partials/"):
+        return PERM_VIEW  # running/recent/next/missed/platform/funnel polls
+    if path.startswith("/panel/indicators"):
+        return PERM_VIEW  # observatory read views
+    return PERM_ADMIN  # closed default — extend the table, not this line
+
+
+def _fmt_cron(expr: str | None, locale: str) -> str | None:
+    """Cron → human-readable frequency + projected next fire (task 5.1);
+    falls back to the raw expression when the shape is unrecognized."""
+    from fd_open_data_mcp.panel import i18n
+    if not expr:
+        return None
+    human = i18n.cron_humanize(expr, locale)
+    nf = i18n.next_fire(expr)
+    head = human or expr
+    if nf is None:
+        return head
+    label = "下次" if locale == "zh" else "next"
+    return f"{head} · {label} {nf.strftime('%m-%d %H:%M')}"
+
+
+def _t(request: Request, s: str) -> str:
+    """Translate a static UI string with the request's locale (py-side twin
+    of the template ``t()`` — design D4)."""
+    from fd_open_data_mcp.panel import i18n
+    return i18n.translate(s, getattr(request.state, "panel_locale",
+                                     i18n.DEFAULT_LANG))
+
+
+def _msg(request: Request, zh: str, en: str, *args) -> str:
+    """Locale-aware dynamic message (toasts carry ids/names, so the plain
+    dict cannot key them): zh template or en template, ``str.format`` args."""
+    from fd_open_data_mcp.panel import i18n
+    locale = getattr(request.state, "panel_locale", i18n.DEFAULT_LANG)
+    tpl = en if locale == "en" else zh
+    return tpl.format(*args) if args else tpl
+
+
+def _audit(request: Request, action: str, target: str | None = None,
+           outcome: str = "success", reason: str | None = None) -> None:
+    """Persist one panel action-audit row; never blocks the audited action
+    (spec: audit failure must not break the operation)."""
+    try:
+        from fd_open_data_mcp.models import PanelActionAudit
+        session = getattr(request.state, "panel_user", None) or {}
+        sub = session.get("sub")
+        name = session.get("name")
+        if sub is None and name is None:
+            # token-authenticated calls carry no OIDC session (ADR-0003)
+            name = "token" if getattr(request.state, "panel_token", False) else None
+        row = PanelActionAudit(
+            actor_sub=sub, actor_name=name, route=request.url.path,
+            action=action, target=target, outcome=outcome, reason=reason)
+        s = _session()
+        try:
+            s.add(row)
+            s.commit()
+        finally:
+            s.close()
+    except Exception:  # noqa: BLE001 - audit is best-effort by contract
+        logger.warning("audit write failed for %s %s", action,
+                       request.url.path, exc_info=True)
+
+
+def _audit_login(claims: dict, action: str, reason: str | None = None) -> None:
+    """Audit a login outcome (success/rejected) straight from the id_token
+    claims — there is no session yet at callback time."""
+    try:
+        from fd_open_data_mcp.models import PanelActionAudit
+        row = PanelActionAudit(
+            actor_sub=claims.get("sub"), actor_name=claims.get("name"),
+            route="/panel/auth/callback", action=action, target=None,
+            outcome="success" if action == "login" else "failure",
+            reason=reason)
+        s = _session()
+        try:
+            s.add(row)
+            s.commit()
+        finally:
+            s.close()
+    except Exception:  # noqa: BLE001
+        logger.warning("login audit write failed", exc_info=True)
 
 
 def _template_concepts(s, frequency: str) -> list[Concept]:
@@ -446,58 +608,90 @@ def create_app() -> FastAPI:
     app.mount("/panel/static", StaticFiles(directory=str(HERE / "static")),
               name="panel_static")
 
-    # ── auth gate (panel-logto-auth, design D3) ────────────────────────────
-    # Precedence: PANEL_TOKEN (programmatic) → OIDC session cookie → redirect
-    # to Logto login (when LOGTO_* configured) → legacy 401. The OIDC routes
+    # ── auth gate + RBAC (panel-logto-auth D3, panel-rbac-i18n-refresh D1) ─
+    # Precedence: PANEL_TOKEN (programmatic, admin-equivalent per ADR-0003)
+    # → OIDC session cookie (tiered role admission) → redirect to Logto
+    # login (when LOGTO_* configured) → legacy 401. The OIDC routes
     # themselves and static assets are always public; every OTHER /panel/auth
     # path — the login-station observation channel and the identity writes
-    # (login-station-console 3.2: 观察通道不裸奔) — goes through this same gate.
+    # (login-station-console 3.2: 观察通道不裸奔) — goes through this same gate
+    # and additionally requires the admin tier.
     token = os.environ.get("PANEL_TOKEN")
     from fd_open_data_mcp.panel import auth as _auth
 
-    _PUBLIC_AUTH_PATHS = ("/panel/auth/login", "/panel/auth/callback",
-                          "/panel/auth/logout", "/panel/auth/whoami")
-
     @app.middleware("http")
     async def gate(request: Request, call_next):
+        from fd_open_data_mcp.panel import i18n
         cfg = _auth.logto_config()
         path = request.url.path
-        if path in _PUBLIC_AUTH_PATHS or path.startswith("/panel/static"):
+        # locale rides every request (design D4): cookie > Accept-Language > zh
+        request.state.panel_locale = i18n.resolve_locale(
+            request.cookies.get(i18n.LANG_COOKIE),
+            request.headers.get("accept-language"))
+        if path in _PUBLIC_PATHS or path.startswith("/panel/static"):
             return await call_next(request)
+        required = _required_perm(request.method, path)
         if token:
             # query/header only — a browser-held panel_token cookie defeated
             # both interactive paths (never redirected to Logto; logout could
             # not log out), so the cookie variant is not admitted or set
             if (request.query_params.get("token") == token
                     or request.headers.get("X-Panel-Token") == token):
+                request.state.panel_token = True
+                request.state.panel_perm = PERM_ADMIN
                 return await call_next(request)
         session = _auth.read_session(request.cookies.get(_auth.SESSION_COOKIE))
         if session is not None:
-            # Role gate takes precedence (panel-role-gate D2): re-check the
-            # roles frozen into the session at login — removals in Logto
-            # propagate at next login, not mid-session.
-            role = _auth.required_role()
-            if role is not None:
-                if role in session["roles"]:
-                    request.state.panel_user = session
-                    return await call_next(request)
+            # Tiered admission (design D1): roles frozen into the session at
+            # login decide both admission (any Scout role) and the permission
+            # level; removals in Logto propagate at next login, not
+            # mid-session. No roles claim at login → fail closed (callback).
+            level = permission_level(session["roles"])
+            if cfg is not None and level == 0:
+                # PANEL_USER_IDS fallback (panel-role-gate): allow-listed subs
+                # keep legacy operator admission while roles are being rolled
+                # out; everyone else fails closed.
+                allowed = _auth.allow_list()
+                if not (allowed is not None and session["sub"] in allowed):
+                    return HTMLResponse(
+                        "<h1>403 - no Scout role granted</h1>", status_code=403)
+                level = PERM_OPERATE
+            request.state.panel_user = session
+            request.state.panel_perm = level
+            if required is not None and level < required:
+                if request.method == "GET" and "text/html" in (
+                        request.headers.get("accept") or ""):
+                    return RedirectResponse(
+                        f"/panel/denied?to={urllib.parse.quote(path)}",
+                        status_code=302)
                 return HTMLResponse(
-                    f"<h1>403 - missing required role {role}</h1>",
+                    "<h1>403 - insufficient role for this action</h1>",
                     status_code=403)
-            allowed = _auth.allow_list()
-            if allowed is None or session["sub"] in allowed:
-                request.state.panel_user = session
-                return await call_next(request)
-            return HTMLResponse("<h1>403 - user not in PANEL_USER_IDS</h1>",
-                                status_code=403)
+            return await call_next(request)
         if cfg is not None:
             return RedirectResponse("/panel/auth/login", status_code=302)
         if token is not None:
             return HTMLResponse("<h1>401 - set PANEL_TOKEN / ?token=</h1>",
                                 status_code=401)
-        return await call_next(request)  # no gate configured — open panel
+        # no gate configured — open panel, no RBAC differentiation (ships-dark)
+        request.state.panel_perm = PERM_ADMIN
+        return await call_next(request)
 
     # ── OIDC routes (panel-logto-auth) ─────────────────────────────────────
+    @app.get("/panel/lang")
+    def lang_toggle(to: str = "", back: str = "/panel"):
+        """Language switch (design D4): GET + cookie, deliberately not a POST
+        (keeps the WAF surface unchanged); `back` only accepts in-app paths."""
+        from fd_open_data_mcp.panel import i18n
+        if to not in i18n.LANGUAGES:
+            to = i18n.DEFAULT_LANG
+        if not back.startswith(("/panel", "/")) or back.startswith("//"):
+            back = "/panel"
+        resp = RedirectResponse(back, status_code=303)
+        resp.set_cookie(i18n.LANG_COOKIE, to, max_age=365 * 86400,
+                        samesite="lax", httponly=True)
+        return resp
+
     @app.get("/panel/auth/login")
     def auth_login():
         cfg = _auth.logto_config()
@@ -526,29 +720,34 @@ def create_app() -> FastAPI:
             claims = _auth.id_token_claims(cfg, token_response)
         except Exception as e:  # noqa: BLE001 - provider/network errors
             return HTMLResponse(f"<h1>login failed</h1><p>{e}</p>", status_code=401)
-        role = _auth.required_role()
-        roles: list[str] = []
-        if role is not None:
-            # Role admission (panel-role-gate): no roles claim anywhere or
-            # role not held → 403 before any session cookie is issued.
-            extracted = _auth.extract_roles(cfg, claims, token_response)
-            if extracted is None:
+        # Tiered admission (panel-rbac-i18n-refresh): extract roles first —
+        # the Scout-role set decides admission AND the permission level the
+        # session carries. PANEL_USER_IDS stays the legacy fallback: a
+        # allow-listed sub keeps admission even without a roles claim;
+        # everyone else without a Scout role fails closed.
+        extracted = _auth.extract_roles(cfg, claims, token_response)
+        roles: list[str] = extracted or []
+        if permission_level(roles) == 0:
+            allowed = _auth.allow_list()
+            if allowed is not None and claims.get("sub") in allowed:
+                roles = []  # legacy allow-listed operator: level applied at gate
+            elif extracted is None:
+                _audit_login(claims, "rejected", "no roles claim in token")
                 return HTMLResponse("<h1>403 - no roles claim in token</h1>",
                                     status_code=403)
-            if role not in extracted:
+            else:
+                _audit_login(claims, "rejected", "no Scout role granted")
                 return HTMLResponse(
-                    f"<h1>403 - missing required role {role}</h1>",
-                    status_code=403)
-            roles = extracted
-        else:
-            allowed = _auth.allow_list()
-            if allowed is not None and claims.get("sub") not in allowed:
-                return HTMLResponse("<h1>403 - user not in PANEL_USER_IDS</h1>",
-                                    status_code=403)
+                    "<h1>403 - no Scout role granted</h1>", status_code=403)
+        _audit_login(claims, "login")
         resp = RedirectResponse("/panel", status_code=302)
         resp.set_cookie(_auth.SESSION_COOKIE,
-                        _auth.make_session_value(claims.get("sub", ""),
-                                                 claims.get("name", ""), roles),
+                        _auth.make_session_value(
+                            claims.get("sub", ""),
+                            # a null `name` claim would otherwise freeze the
+                            # literal "None" into the cookie payload (sidebar
+                            # showed "None" — fixed panel-rbac-i18n-refresh 6.2)
+                            claims.get("name") or "", roles),
                         httponly=True, samesite="lax",
                         max_age=_auth.SESSION_HOURS * 3600)
         resp.delete_cookie(_auth.STATE_COOKIE)
@@ -576,12 +775,19 @@ def create_app() -> FastAPI:
             return HTMLResponse("")
         return HTMLResponse(
             f'<span>{session["name"]}</span> '
-            f'<a href="/panel/auth/logout" class="btn">退出 logout</a>')
+            f'<a href="/panel/auth/logout" class="btn">{_t(request, "退出")}</a>')
 
     # ── pages ──────────────────────────────────────────────────────────────
     @app.get("/", response_class=HTMLResponse)
     def index():
         return RedirectResponse("/panel")
+
+    @app.get("/panel/denied", response_class=HTMLResponse)
+    def denied(request: Request, to: str = ""):
+        """Explanatory landing for permission-blocked page GETs (spec:
+        interactive pages redirect here instead of dead-ending on 403)."""
+        return templates.TemplateResponse(
+            request, "denied.html", {"to": to}, status_code=403)
 
     def _unavailable(e: Exception) -> HTMLResponse:
         # One failing partial must not fail the page (spec: live panel refresh)
@@ -831,7 +1037,7 @@ def create_app() -> FastAPI:
             s.close()
 
     @app.post("/panel/data/coverage/refresh")
-    def data_coverage_refresh():
+    def data_coverage_refresh(request: Request):
         from fd_open_data_mcp.visibility.coverage import refresh_concept_coverage
 
         s = _session()
@@ -840,10 +1046,12 @@ def create_app() -> FastAPI:
         finally:
             s.close()
         logger.info("manual coverage refresh: %s", out)
+        _audit(request, "coverage_refresh", target="concepts",
+               outcome="success")
         return RedirectResponse("/panel/data", status_code=303)
 
     @app.post("/panel/data/census/refresh")
-    def data_census_refresh():
+    def data_census_refresh(request: Request):
         from fd_open_data_mcp.visibility.census import refresh_census
 
         s = _session()
@@ -851,6 +1059,7 @@ def create_app() -> FastAPI:
             refresh_census(s)
         finally:
             s.close()
+        _audit(request, "census_refresh", target="census", outcome="success")
         return RedirectResponse("/panel/data", status_code=303)
 
     @app.get("/panel/policies", response_class=HTMLResponse)
@@ -958,15 +1167,19 @@ def create_app() -> FastAPI:
                                  launcher=_run_launcher())
             except HTTPException:
                 raise
+            _audit(request, "run_cancel", target=str(run_id),
+                   outcome="success" if out["status"] == "cancelled" else "failure",
+                   reason=str(out.get("current_status") or out["status"]))
             if hx:
                 if out["status"] == "cancelled":
                     row = _run_row_response(request, s, run_id)
-                    return _toast(row, f"运行 Run #{run_id} 已取消 cancelled")
+                    return _toast(row, _msg(request, "运行 #{} 已取消", "Run {} cancelled", run_id))
                 if out["status"] == "not_found":
                     return _toast(HTMLResponse(""), f"run {run_id} not found", "err")
                 return _toast(_run_row_response(request, s, run_id),
-                              f"运行 Run #{run_id} 已结束，未取消 already finished "
-                              f"({out.get('current_status')})", "err")
+                              _msg(request, "运行 #{} 已结束，未取消（{}）",
+                                   "Run {} already finished ({})", run_id,
+                                   out.get('current_status')), "err")
         finally:
             s.close()
         if out["status"] == "cancelled":
@@ -986,12 +1199,12 @@ def create_app() -> FastAPI:
         except (TypeError, ValueError):
             if hx:
                 return _toast(HTMLResponse("", status_code=400),
-                              "capacity 必须是整数 must be an integer", "err")
+                              _t(request, "capacity 必须是整数"), "err")
             raise HTTPException(400, "capacity must be an integer")
         if value < 0:
             if hx:
                 return _toast(HTMLResponse("", status_code=400),
-                              "capacity 必须 >= 0 must be >= 0", "err")
+                              _t(request, "capacity 必须 >= 0"), "err")
             raise HTTPException(400, "capacity must be >= 0")
         s = _session()
         try:
@@ -1003,13 +1216,15 @@ def create_app() -> FastAPI:
                 raise HTTPException(404, f"cluster {cluster_id} not found")
             c.capacity = value
             s.commit()
+            _audit(request, "cluster_capacity", target=str(cluster_id),
+                   outcome="success", reason=f"capacity={value}")
             if hx:
                 row = next((f for f in _snapshot.fleet_health(s)
                             if f["id"] == cluster_id), None)
                 resp = (templates.TemplateResponse(request, "_fleet_row.html",
                                                    {"f": row}) if row
                         else HTMLResponse(""))
-                return _toast(resp, f"{c.name} 容量已保存 capacity saved: {value}")
+                return _toast(resp, _msg(request, "{} 容量已保存：{}", "{} capacity saved: {}", c.name, value))
         finally:
             s.close()
         return RedirectResponse("/panel", status_code=303)
@@ -1105,14 +1320,19 @@ def create_app() -> FastAPI:
         s = _session()
         try:
             out = trigger_platform_run(s, source, requested_by="panel")
+            _audit(request, "source_trigger", target=source,
+                   outcome="success" if out["status"] == "triggered" else "failure",
+                   reason=str(out.get("reason") or out.get("pending_id")))
             if out["status"] == "triggered":
-                msg = (f"{source} 已触发 queued: pending #{out['pending_id']} "
-                       f"(site {out.get('site') or '—'})")
+                msg = _msg(request, "{} 已触发：pending #{}（site {}）",
+                           "{} queued: pending #{} (site {})", source,
+                           out['pending_id'], out.get('site') or '—')
                 if hx:
                     return _toast(_source_row_response(request, s, source), msg)
                 return RedirectResponse(f"/panel/sources/{source}",
                                         status_code=303)
-            msg = f"{source} 未触发 not triggered: {out['reason']}"
+            msg = _msg(request, "{} 未触发：{}", "{} not triggered: {}",
+                       source, out['reason'])
             if out["status"] == "not_found":
                 if hx:
                     return _toast(HTMLResponse(""), msg, "err")
@@ -1135,21 +1355,25 @@ def create_app() -> FastAPI:
         s = _session()
         try:
             out = cancel_platform_run(s, run_id)
+            _audit(request, "platform_run_cancel", target=str(run_id),
+                   outcome="success" if out["status"] == "cancel_requested" else "failure",
+                   reason=str(out.get("current_status") or out["status"]))
             if hx:
                 if out["status"] == "cancel_requested":
                     return _toast(
                         _platform_run_row_response(request, s, run_id),
-                        f"平台运行 Platform run #{run_id} 已请求取消 cancel "
-                        f"requested — 运行器将在下个检查点退出 the runner "
-                        f"exits at its next checkpoint")
+                        _msg(request, "平台运行 #{} 已请求取消——运行器将在下个检查点退出",
+                             "Platform run {} cancel requested — the runner exits "
+                             "at its next checkpoint", run_id))
                 if out["status"] == "not_found":
                     return _toast(HTMLResponse(""),
                                   f"platform run {run_id} not found", "err")
                 return _toast(
                     _platform_run_row_response(request, s, run_id)
                     or HTMLResponse(""),
-                    f"运行 Run #{run_id} 已结束，未取消 already finished "
-                    f"({out.get('current_status')})", "err")
+                    _msg(request, "运行 #{} 已结束，未取消（{}）",
+                         "Run {} already finished ({})", run_id,
+                         out.get('current_status')), "err")
         finally:
             s.close()
         if out["status"] == "cancel_requested":
@@ -1170,19 +1394,24 @@ def create_app() -> FastAPI:
             if p is not None:
                 back = f"/panel/sources/{p.source}"
             out = cancel_pending_run(s, pending_id)
+            _audit(request, "pending_cancel", target=str(pending_id),
+                   outcome="success" if out["status"] == "cancelled" else "failure",
+                   reason=str(out.get("current_status") or out["status"]))
             if hx:
                 if out["status"] == "cancelled":
                     return _toast(
                         _pending_row_response(request, s, pending_id),
-                        f"待运行务 Pending #{pending_id} 已取消 cancelled")
+                        _msg(request, "待运行务 #{} 已取消", "Pending {} cancelled",
+                             pending_id))
                 if out["status"] == "not_found":
                     return _toast(HTMLResponse(""),
                                   f"pending run {pending_id} not found", "err")
                 return _toast(
                     _pending_row_response(request, s, pending_id)
                     or HTMLResponse(""),
-                    f"待运行务 Pending #{pending_id} 已是终态，未取消 already "
-                    f"{out.get('current_status')}", "err")
+                    _msg(request, "待运行务 #{} 已是终态，未取消（{}）",
+                         "Pending {} already {} — nothing cancelled", pending_id,
+                         out.get('current_status')), "err")
         finally:
             s.close()
         if out["status"] == "cancelled":
@@ -1332,15 +1561,19 @@ def create_app() -> FastAPI:
                 s, source, alias, requested_by="panel",
                 egress_ref=egress_ref)
             if ensured.get("status") != "queued":
-                msg = f"{source}/{alias} 未登记 not registered: {ensured.get('reason')}"
+                msg = _msg(request, "{}/{} 未登记：{}", "{}/{} not registered: {}",
+                           source, alias, ensured.get('reason'))
                 if hx:
                     return _toast(HTMLResponse(""), msg, "err")
                 raise HTTPException(400, ensured.get("reason", "invalid"))
             out = station_ops.create_station(s, source, alias,
                                              client=_station_client())
+            _audit(request, "station_launch", target=f"{source}/{alias}",
+                   outcome="success" if out["status"] == "launched" else "failure",
+                   reason=str(out.get("reason") or out.get("station_id")))
             if out["status"] != "launched":
-                msg = (f"{source}/{alias} 拉起失败 launch failed: "
-                       f"{out.get('reason')}")
+                msg = _msg(request, "{}/{} 拉起失败：{}", "{}/{} launch failed: {}",
+                           source, alias, out.get('reason'))
                 if hx:
                     return _toast(HTMLResponse(""), msg, "err")
                 raise HTTPException(502, out.get("reason", "launch failed"))
@@ -1356,9 +1589,10 @@ def create_app() -> FastAPI:
             {"st": st, "vnc_url": station_ops.station_vnc_path(out["station_id"]),
              "egresses": egresses})
         resp.headers["HX-Trigger"] = json.dumps({
-            "toast": {"message": (f"登录站已拉起 station #{out['station_id']} "
-                                  f"launched — 请在观察窗内完成登录 complete "
-                                  f"the login in the observation view"),
+            "toast": {"message": _msg(
+                          request, "登录站 #{} 已拉起——请在观察窗内完成登录",
+                          "Station #{} launched — complete the login in the "
+                          "observation view", out['station_id']),
                       "level": "ok"},
             "auth-refresh": {}})
         return resp
@@ -1385,8 +1619,12 @@ def create_app() -> FastAPI:
                 egress_ref=egress_ref)
         finally:
             s.close()
+        _audit(request, "identity_create", target=f"{source}/{alias}",
+               outcome="success" if out.get("status") == "queued" else "failure",
+               reason=str(out.get("reason")))
         if out.get("status") != "queued":
-            msg = f"{source}/{alias} 未登记 not registered: {out.get('reason')}"
+            msg = _msg(request, "{}/{} 未登记：{}", "{}/{} not registered: {}",
+                       source, alias, out.get('reason'))
             if hx:
                 return _toast(HTMLResponse(""), msg, "err")
             raise HTTPException(400, out.get("reason", "invalid"))
@@ -1397,8 +1635,10 @@ def create_app() -> FastAPI:
             {"out": out,
              "proxy_masked": station_ops.mask_proxy_url(out.get("proxy_url"))})
         resp.headers["HX-Trigger"] = json.dumps({
-            "toast": {"message": (f"{source}/{alias} 已登记 registered — 出口 "
-                                  f"egress {out.get('egress_ref') or '未分配 none'}"),
+            "toast": {"message": _msg(
+                          request, "{}/{} 已登记——出口 {}",
+                          "{}/{} registered — egress {}", source, alias,
+                          out.get('egress_ref') or _t(request, "未分配")),
                       "level": "ok"},
             "auth-refresh": {}})
         return resp
@@ -1451,6 +1691,9 @@ def create_app() -> FastAPI:
             out = station_ops.reclaim_station(s, station_id,
                                               client=_station_client(),
                                               actor="panel")
+            _audit(request, "station_reclaim", target=str(station_id),
+                   outcome="success" if out["status"] == "reclaimed" else "failure",
+                   reason=str(out.get("current_status") or out["status"]))
             if out["status"] == "not_found":
                 if hx:
                     return _toast(HTMLResponse(""),
@@ -1463,10 +1706,11 @@ def create_app() -> FastAPI:
             s.close()
         if not hx:
             return RedirectResponse("/panel/auth", status_code=303)
-        msg = (f"登录站 station #{station_id} 已回收 reclaimed"
+        msg = (_msg(request, "登录站 #{} 已回收", "Station #{} reclaimed", station_id)
                if out["status"] == "reclaimed" else
-               f"登录站 station #{station_id} 已结束 already "
-               f"{out.get('current_status')}；集群对象已清理 objects cleaned")
+               _msg(request, "登录站 #{} 已结束（{}）；集群对象已清理",
+                    "Station #{} already {}; cluster objects cleaned", station_id,
+                    out.get('current_status')))
         row = (templates.TemplateResponse(request, "_station_row.html",
                                           {"t": st, "egresses": egresses})
                if st is not None else HTMLResponse(""))
@@ -1536,14 +1780,12 @@ def create_app() -> FastAPI:
         sess = _auth.read_session(
             websocket.cookies.get(_auth.SESSION_COOKIE))
         if sess is not None:
-            role = _auth.required_role()
-            if role is not None:
-                if role in sess["roles"]:
-                    return True
-            else:
-                allowed = _auth.allow_list()
-                if allowed is None or sess["sub"] in allowed:
-                    return True
+            # station VNC relay is admin-tier (design D1 route table)
+            if permission_level(sess["roles"]) >= PERM_ADMIN:
+                return True
+            allowed = _auth.allow_list()
+            if allowed is not None and sess["sub"] in allowed:
+                return True  # legacy allow-listed operator (panel-role-gate)
         if token is None and _auth.logto_config() is None:
             return True  # no gate configured — open panel (http parity)
         return False
@@ -1844,9 +2086,13 @@ def create_app() -> FastAPI:
             out = _scoping.scope_create(
                 s, name, rules, description=form.get("description") or None)
         except ValueError as e:  # empty scope / reserved / duplicate
+            _audit(request, "scope_create", target=name,
+                   outcome="failure", reason=str(e))
             return _scopes_redirect(err=str(e))
         finally:
             s.close()
+        _audit(request, "scope_create", target=name, outcome="success",
+               reason=f"matched={out.get('matched')}")
         return _scopes_redirect(
             msg=f"scope {out['name']} 已创建 created — 匹配 matched "
                 f"{out.get('matched')} 指标 indicators，立即可供 MCP scope "
@@ -1884,6 +2130,8 @@ def create_app() -> FastAPI:
             _scoping.scope_update(
                 s, scope_name, rules, description=form.get("description") or None)
         except ValueError as e:
+            _audit(request, "scope_update", target=scope_name,
+                   outcome="failure", reason=str(e))
             return RedirectResponse(
                 f"/panel/indicators/scopes/{scope_name}?err={quote(str(e))}",
                 status_code=303)
@@ -1891,12 +2139,13 @@ def create_app() -> FastAPI:
             raise HTTPException(404, str(e)) from e
         finally:
             s.close()
+        _audit(request, "scope_update", target=scope_name, outcome="success")
         return RedirectResponse(
             f"/panel/indicators/scopes/{scope_name}?msg="
             + quote("scope 规则已更新 rules updated"), status_code=303)
 
     @app.post("/panel/indicators/scopes/{scope_name}/delete")
-    def scope_delete_page(scope_name: str):
+    def scope_delete_page(scope_name: str, request: Request):
         s = _session()
         try:
             _scoping.scope_delete(s, scope_name)
@@ -1904,6 +2153,7 @@ def create_app() -> FastAPI:
             raise HTTPException(404, str(e))
         finally:
             s.close()
+        _audit(request, "scope_delete", target=scope_name, outcome="success")
         return _scopes_redirect(msg=f"scope {scope_name} 已删除 deleted")
 
     # ── editor ─────────────────────────────────────────────────────────────
@@ -1979,6 +2229,9 @@ def create_app() -> FastAPI:
             s.commit()
         finally:
             s.close()
+        _audit(request, "policy_save", target=str(payload["name"]),
+               outcome="success",
+               reason=f"policy_id={form.get('policy_id') or 'new'}")
         return RedirectResponse("/panel/policies", status_code=303)
 
     def _policy_row_response(request: Request, s, pid: int):
@@ -1995,8 +2248,11 @@ def create_app() -> FastAPI:
             p = _policy_or_404(s, policy_id)
             p.enabled = not p.enabled
             s.commit()
+            _audit(request, "policy_toggle", target=str(policy_id),
+                   outcome="success",
+                   reason=f"enabled={p.enabled} name={p.name}")
             if request.headers.get("hx-request") == "true":
-                state = "已启用 enabled" if p.enabled else "已停用 disabled"
+                state = _t(request, "已启用" if p.enabled else "已停用")
                 return _toast(_policy_row_response(request, s, policy_id),
                               f"{p.name} {state}")
         finally:
@@ -2010,9 +2266,11 @@ def create_app() -> FastAPI:
             p = _policy_or_404(s, policy_id)
             s.delete(p)
             s.commit()
+            _audit(request, "policy_delete", target=str(policy_id),
+                   outcome="success", reason=f"name={p.name}")
             if request.headers.get("hx-request") == "true":
                 # empty 200 body removes the swapped row
-                return _toast(HTMLResponse(""), f"{p.name} 已删除 deleted")
+                return _toast(HTMLResponse(""), _msg(request, "{} 已删除", "{} deleted", p.name))
         finally:
             s.close()
         return RedirectResponse("/panel/policies", status_code=303)
@@ -2026,14 +2284,18 @@ def create_app() -> FastAPI:
         try:
             p = _policy_or_404(s, policy_id)
             result = launch_policy(s, p, _default_launcher())
+            _audit(request, "policy_run_now", target=str(policy_id),
+                   outcome="success" if result.get("status") == "launched" else "failure",
+                   reason=str(result.get("reason") or result.get("run_id")))
             if hx:
                 if result.get("status") == "launched":
                     return _toast(_policy_row_response(request, s, policy_id),
-                                  f"{p.name} 已触发运行 launched "
-                                  f"(run #{result.get('run_id')})")
+                                  _msg(request, "{} 已触发运行（run #{}）",
+                                       "{} launched (run #{})", p.name,
+                                       result.get('run_id')))
                 return _toast(_policy_row_response(request, s, policy_id),
-                              f"{p.name} 未触发 not launched: {result.get('reason')}",
-                              "err")
+                              _msg(request, "{} 未触发：{}", "{} not launched: {}",
+                                   p.name, result.get('reason')), "err")
         finally:
             s.close()
         return RedirectResponse(f"/panel/runs?policy_id={policy_id}", status_code=303)
@@ -2091,10 +2353,15 @@ def create_app() -> FastAPI:
             plan = _compile_plan(s, payload)
             result = launch_adhoc(s, plan, _run_launcher())
         except Exception as e:  # noqa: BLE001 - bad form input: show, don't 500
+            _audit(request, "crawl_adhoc", target=payload.get("name"),
+                   outcome="failure", reason=str(e))
             return RedirectResponse(f"/panel/policies/new?err={quote(str(e))}",
                                     status_code=303)
         finally:
             s.close()
+        _audit(request, "crawl_adhoc", target=payload.get("name"),
+               outcome="success" if result["status"] == "launched" else "failure",
+               reason=str(result.get("reason") or result.get("run_id")))
         if result["status"] == "launched":
             return RedirectResponse("/panel/runs?status=running", status_code=303)
         return RedirectResponse(
@@ -2164,7 +2431,10 @@ def create_app() -> FastAPI:
                 "text": form.get("text", ""),
             })
         except RuntimeError as e:
+            _audit(request, "proxy_import", outcome="failure", reason=str(e))
             return _proxy_redirect(err=str(e))
+        _audit(request, "proxy_import", outcome="success",
+               reason=f"imported={out.get('imported', 0)} skipped={out.get('skipped', 0)}")
         return _proxy_redirect(msg=(
             f"imported {out.get('imported', 0)}, skipped {out.get('skipped', 0)}"
             + (f", updated {out['updated']}" if out.get("updated") else "")))
@@ -2177,7 +2447,10 @@ def create_app() -> FastAPI:
                 "source": form.get("source"), "proxy_id": int(form.get("proxy_id", 0)),
                 "actor": form.get("actor") or "panel"})
         except (RuntimeError, TypeError, ValueError) as e:
+            _audit(request, "proxy_circuit_reset", outcome="failure", reason=str(e))
             return _proxy_redirect(err=str(e))
+        _audit(request, "proxy_circuit_reset", outcome="success",
+               target=f"{form.get('source')}/{form.get('proxy_id')}")
         return _proxy_redirect(msg=f"circuit {form.get('source')}/{form.get('proxy_id')} -> HALF_OPEN")
 
     @app.post("/panel/proxy/rate-limits/{source}")
@@ -2190,7 +2463,11 @@ def create_app() -> FastAPI:
                 "max_qps": max_qps,
                 "max_concurrent": int(form.get("max_concurrent") or 4)})
         except (RuntimeError, TypeError, ValueError) as e:
+            _audit(request, "proxy_rate_limit", target=source,
+                   outcome="failure", reason=str(e))
             return _proxy_redirect(err=str(e))
+        _audit(request, "proxy_rate_limit", target=source, outcome="success",
+               reason=f"max_qps={max_qps}")
         return _proxy_redirect(msg=f"rate limit for {source} saved")
 
     # NOTE: the dynamic {proxy_id} route goes LAST so the literal paths above
@@ -2202,9 +2479,15 @@ def create_app() -> FastAPI:
             out = _proxy_control("POST", f"/management/proxies/{proxy_id}/status", {
                 "status": form.get("status"), "actor": form.get("actor") or "panel"})
         except RuntimeError as e:
+            _audit(request, "proxy_status", target=str(proxy_id),
+                   outcome="failure", reason=str(e))
             return _proxy_redirect(err=str(e))
         if out.get("status") == "not_found":
+            _audit(request, "proxy_status", target=str(proxy_id),
+                   outcome="failure", reason="not_found")
             return _proxy_redirect(err=f"proxy {proxy_id} not found")
+        _audit(request, "proxy_status", target=str(proxy_id), outcome="success",
+               reason=str(out.get("proxy_status")))
         return _proxy_redirect(msg=f"proxy {proxy_id} -> {out.get('proxy_status')}")
 
     return app

@@ -2,17 +2,19 @@
     design D3/D4). Geometry comes from panel.charts; these macros only render. -#}
 
 {% macro th(zh, en='') -%}
-<th scope="col">{{ zh }}{% if en %} <span class="en">{{ en }}</span>{% endif %}</th>
+{#- locale-aware single-language chrome (panel-rbac-i18n-refresh): en mode
+    prefers the explicit en arg, else falls back to the zh key via t() -#}
+<th scope="col">{% if locale == 'en' %}{{ en or t(zh) }}{% else %}{{ zh }}{% endif %}</th>
 {%- endmacro %}
 
 {% macro lbl(zh, en='') -%}
-{{ zh }}{% if en %} <span class="en">{{ en }}</span>{% endif %}
+{% if locale == 'en' %}{{ en or t(zh) }}{% else %}{{ zh }}{% endif %}
 {%- endmacro %}
 
 {#- Column chart: g = charts.bar_geometry(...); label feeds aria-label (role=img
     needs an accessible name — per-rect <title>s are only hover tooltips) -#}
 {% macro svg_bars(g, label=None) -%}
-<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or '柱状图 bar chart' }}" preserveAspectRatio="xMidYMid meet">
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or t('柱状图') }}" preserveAspectRatio="xMidYMid meet">
   <line class="axis" x1="{{ g.pad }}" y1="{{ g.h - g.pad }}" x2="{{ g.w - g.pad }}" y2="{{ g.h - g.pad }}"/>
   {% for b in g.bars %}
   <rect class="bar" x="{{ b.x }}" y="{{ b.y }}" width="{{ b.bw }}" height="{{ b.bh }}" rx="2"><title>{{ b.title }}</title></rect>
@@ -24,7 +26,7 @@
 {#- Grouped columns: g = charts.grouped_bar_geometry([(key, vals), ...], labels);
     series keys feed a tiny legend (registered vs verified — observatory coverage) -#}
 {% macro svg_grouped_bars(g, label=None) -%}
-<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or '分组柱状图 grouped bar chart' }}" preserveAspectRatio="xMidYMid meet">
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or t('分组柱状图') }}" preserveAspectRatio="xMidYMid meet">
   <line class="axis" x1="{{ g.pad }}" y1="{{ g.h - g.pad }}" x2="{{ g.w - g.pad }}" y2="{{ g.h - g.pad }}"/>
   {% for grp in g.groups %}
     {% for b in grp.bars %}
@@ -40,7 +42,7 @@
 
 {#- Sparkline: g = charts.sparkline_geometry(...) -#}
 {% macro svg_sparkline(g, label=None) -%}
-<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or '趋势线 sparkline' }}" preserveAspectRatio="none">
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or t('趋势线') }}" preserveAspectRatio="none">
   {% if g.points %}
   <polygon class="spark-area" points="{{ g.area }}"/>
   <polyline class="spark" points="{{ g.points }}"/>
@@ -50,7 +52,7 @@
 
 {#- Stacked ok/err timeline: g = charts.timeline_geometry(...) -#}
 {% macro svg_timeline(g, label=None) -%}
-<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or '抓取时间线 fetch timeline' }}" preserveAspectRatio="xMidYMid meet">
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or t('抓取时间线') }}" preserveAspectRatio="xMidYMid meet">
   <line class="axis" x1="{{ g.pad }}" y1="{{ g.h - g.pad }}" x2="{{ g.w - g.pad }}" y2="{{ g.h - g.pad }}"/>
   {% for c in g.cols %}
     {% if c.ok_h %}<rect class="bar-ok" x="{{ c.x }}" y="{{ c.ok_y }}" width="{{ c.bw }}" height="{{ c.ok_h }}"><title>{{ c.title }}</title></rect>{% endif %}
@@ -74,7 +76,7 @@
     each tile drill into the filtered detail table, active_key outlines the
     currently selected bucket -#}
 {% macro svg_heatmap(g, link_prefix=None, active_key=None, label=None) -%}
-<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or '分布图 distribution' }}" preserveAspectRatio="xMidYMid meet">
+<svg class="chart" viewBox="0 0 {{ g.w }} {{ g.h }}" role="img" aria-label="{{ label or t('分布图') }}" preserveAspectRatio="xMidYMid meet">
   {% for t in g.tiles %}
   {% if link_prefix %}<a href="{{ link_prefix }}{{ t.key }}">{% endif %}
   <g class="{{ 'heat-active' if active_key == t.key }}">
@@ -90,9 +92,9 @@
 
 {% macro legend_freshness() -%}
 <div class="legend">
-  <span><span class="swatch sw-fresh"></span>新鲜 ≤7d fresh</span>
-  <span><span class="swatch sw-aging"></span>老化 7–30d aging</span>
-  <span><span class="swatch sw-stale"></span>过期 &gt;30d stale</span>
-  <span><span class="swatch sw-never"></span>无观测 never</span>
+  <span><span class="swatch sw-fresh"></span>{{ lbl('新鲜 ≤7d', 'Fresh ≤7d') }}</span>
+  <span><span class="swatch sw-aging"></span>{{ lbl('老化 7–30d', 'Aging 7–30d') }}</span>
+  <span><span class="swatch sw-stale"></span>{{ lbl('过期 >30d', 'Stale >30d') }}</span>
+  <span><span class="swatch sw-never"></span>{{ lbl('无观测', 'Never observed') }}</span>
 </div>
 {%- endmacro %}

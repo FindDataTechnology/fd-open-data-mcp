@@ -1,10 +1,10 @@
 {% from "_macros.html" import th %}
 <table>
   <thead>
-  <tr>{{ th('集群', 'Cluster') }}{{ th('并发 开/上限', 'Open/Cap') }}{{ th('任务（实时）', 'Jobs (live)') }}{{ th('可达', 'Reachable') }}{{ th('出口', 'Egress') }}{{ th('标签', 'Tags') }}</tr>
+  <tr>{{ th(t('集群'), 'Cluster') }}{{ th(t('并发 开/上限'), 'Open/Cap') }}{{ th(t('任务（实时）'), 'Jobs (live)') }}{{ th(t('可达'), 'Reachable') }}{{ th(t('出口'), 'Egress') }}{{ th(t('标签'), 'Tags') }}</tr>
   </thead>
   {% for f in fleet %}{% include "_fleet_row.html" %}{% else %}
-  <tr><td colspan="6" class="muted">没有注册的集群 No clusters registered.</td></tr>
+  <tr><td colspan="6" class="muted">{{ t('没有注册的集群') }}</td></tr>
   {% endfor %}
 </table>
-<p class="muted">* done* = Job 已退出但 run 行尚未关闭（reconciler 延迟） Job exited but its run row is not closed yet (reconciler lag).</p>
+<p class="muted">{{ t('done 星注') }}</p>

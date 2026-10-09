@@ -1520,3 +1520,43 @@ class ScopeStat(Base):
             "scope_name": self.scope_name, "day": self.day,
             "calls": self.calls, "results_returned": self.results_returned,
         }
+
+
+# --- panel operation audit (panel-rbac-i18n-refresh) ----------------------------
+# One row per audited panel action: every POST the panel serves (trigger /
+# cancel / toggle / save / delete / run-now / capacity / launch / ...) plus the
+# login-callback events (success and refusal). Actor attribution is decided by
+# the auth middleware: a session caller records sub + display name, a token
+# caller records NULL sub and the literal "token". Timestamps follow the
+# naive-UTC contract (TIMESTAMP WITHOUT TIME ZONE, writer supplies UTC) — the
+# same convention as the discovery-mirror tables above.
+AUDIT_OUTCOMES = ("success", "failure")
+
+
+class PanelActionAudit(Base):
+    """Audit trail of panel actions and login events (panel_action_audit).
+
+    Written by the ``audit()`` helper after each POST handler resolves — the
+    target id and business outcome are handler-side facts the middleware
+    cannot see; write failures are logged and swallowed, never raised. No FK
+    to the acted-on rows: the trail must outlive deletions.
+    """
+    __tablename__ = "panel_action_audit"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    actor_sub = Column(String(255), nullable=True)   # session sub; NULL for token actions
+    actor_name = Column(String(255), nullable=False) # display name, or "token"
+    route = Column(String(255), nullable=False)      # panel route that served the action
+    action = Column(String(64), nullable=False)      # trigger/cancel/toggle/save/delete/login/...
+    target = Column(String(255), nullable=True)      # acted-on id/name; NULL when not applicable
+    outcome = Column(String(16), nullable=False)     # success / failure (AUDIT_OUTCOMES)
+    reason = Column(Text, nullable=True)             # failure detail / refusal reason
+    ts = Column(DateTime, nullable=False, default=_now_naive, index=True)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "actor_sub": self.actor_sub, "actor_name": self.actor_name,
+            "route": self.route, "action": self.action, "target": self.target,
+            "outcome": self.outcome, "reason": self.reason,
+            "ts": self.ts.isoformat() if self.ts else None,
+        }

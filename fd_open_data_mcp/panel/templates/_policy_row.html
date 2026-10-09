@@ -1,7 +1,7 @@
   <tr>
     <td>{{ p.id }}</td>
     <td><a href="/panel/policies/{{ p.id }}">{{ p.name }}</a></td>
-    <td>{{ p.entity_type }}{% if p.entity_ids %}<span class="muted"> ({{ p.entity_ids|length }} ids)</span>{% else %}<span class="muted"> (全部 all)</span>{% endif %}</td>
+    <td>{{ p.entity_type }}{% if p.entity_ids %}<span class="muted"> ({{ p.entity_ids|length }} ids)</span>{% else %}<span class="muted"> ({{ t('全部') }})</span>{% endif %}</td>
     <td class="muted">{{ p.concept_ids|length }}</td>
     <td>{{ p.mode }}</td>
     <td>{{ p.frequency }}</td>
@@ -10,28 +10,28 @@
     <td>
       <button type="button" class="badge {{ 'success' if p.enabled else 'refused' }}"
               hx-post="/panel/policies/{{ p.id }}/toggle"
-              hx-target="closest tr" hx-swap="outerHTML">{{ '启用 ON' if p.enabled else '停用 OFF' }}</button>
-      <noscript><form class="inline-form" method="post" action="/panel/policies/{{ p.id }}/toggle"><button type="submit" class="badge {{ 'success' if p.enabled else 'refused' }}">{{ '启用 ON' if p.enabled else '停用 OFF' }}</button></form></noscript>
+              hx-target="closest tr" hx-swap="outerHTML">{{ t('启用') if p.enabled else t('停用') }}</button>
+      <noscript><form class="inline-form" method="post" action="/panel/policies/{{ p.id }}/toggle"><button type="submit" class="badge {{ 'success' if p.enabled else 'refused' }}">{{ t('启用') if p.enabled else t('停用') }}</button></form></noscript>
     </td>
     <td>
       <button type="button" class="link"
-              title="绕过 cron，但不绕过护栏 bypasses cron, not guardrails"
+              title="{{ t('绕过 cron，但不绕过护栏') }}"
               hx-post="/panel/policies/{{ p.id }}/run-now"
-              hx-target="closest tr" hx-swap="outerHTML">立即运行 run-now</button>
+              hx-target="closest tr" hx-swap="outerHTML">{{ t('立即运行') }}</button>
       <span class="confirm">
         <button type="button" class="link link-danger"
-                onclick="this.closest('.confirm').classList.add('armed')">删除 delete</button>
+                onclick="this.closest('.confirm').classList.add('armed')">{{ t('删除') }}</button>
         <span class="confirm-arm">
           <button type="button" class="link link-danger"
                   hx-post="/panel/policies/{{ p.id }}/delete"
-                  hx-target="closest tr" hx-swap="outerHTML">确认删除 confirm</button>
+                  hx-target="closest tr" hx-swap="outerHTML">{{ t('确认删除') }}</button>
           <button type="button" class="link"
-                  onclick="this.closest('.confirm').classList.remove('armed')">保留 keep</button>
+                  onclick="this.closest('.confirm').classList.remove('armed')">{{ t('保留') }}</button>
         </span>
       </span>
       <noscript>
-        <form class="inline-form" method="post" action="/panel/policies/{{ p.id }}/run-now"><button type="submit" class="link">立即运行 run-now</button></form>
-        <form class="inline-form" method="post" action="/panel/policies/{{ p.id }}/delete"><button type="submit" class="link link-danger">删除 delete</button></form>
+        <form class="inline-form" method="post" action="/panel/policies/{{ p.id }}/run-now"><button type="submit" class="link">{{ t('立即运行') }}</button></form>
+        <form class="inline-form" method="post" action="/panel/policies/{{ p.id }}/delete"><button type="submit" class="link link-danger">{{ t('删除') }}</button></form>
       </noscript>
     </td>
   </tr>

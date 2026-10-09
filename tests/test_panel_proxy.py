@@ -67,7 +67,7 @@ def test_readonly_fallback_when_control_unset(session, monkeypatch):
     monkeypatch.delenv("PROXY_CONTROL_URL", raising=False)
     _seed_proxy(session)
     r = client.get("/panel/proxy")
-    assert r.status_code == 200 and "read-only" in r.text
+    assert r.status_code == 200 and "本页面为只读" in r.text
     # management POST degrades to a redirect with the error, not a 500
     resp = client.post("/panel/proxy/import", data={"provider": "paid-static",
                                                     "text": "1.2.3.4|8080"},

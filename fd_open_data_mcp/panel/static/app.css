@@ -426,3 +426,26 @@ button.link:active, .chip:active, a.btn:active, button.btn:active,
   border: 1px solid var(--border); border-radius: var(--radius);
   background: #111; display: block;
 }
+
+/* ── auth console layout refresh (panel-rbac-i18n-refresh 6.1) ────────────
+   Appended only — no rule above is modified. The auth page briefs become
+   short-item lists (说明拆短句), each task lives in its own .auth-card
+   (任务分区互不混杂), and the login-required queue rows carry visible
+   launch controls. Selects are width:100% globally; inside the cards they
+   must stay compact so the inline launch form reads as one row action. */
+.auth-brief { margin: .3rem 0 .7rem; padding-left: 1.25rem;
+  color: var(--muted); font-size: .85rem; }
+.auth-brief li { margin: .16rem 0; }
+.auth-brief li .en { margin-left: .25em; }
+.auth-card { margin: 0 0 1rem; }
+.auth-card .auth-brief { margin: .1rem 0 .7rem; }
+.auth-card .inline-form select,
+.auth-card .inline-form input[name="account_alias"] {
+  width: auto; min-width: 9rem; max-width: 17rem; }
+.auth-card form.station-launch select { max-width: 15rem; }
+
+/* language toggle (panel-rbac-i18n-refresh 4.2) — rides the sidenav foot
+   next to the theme toggle; same chrome, text-only affordance */
+.lang-toggle { padding: 0 .45rem; font-size: .8rem; line-height: 1.9;
+  border: 1px solid var(--border, #444); border-radius: .4rem;
+  text-decoration: none; }

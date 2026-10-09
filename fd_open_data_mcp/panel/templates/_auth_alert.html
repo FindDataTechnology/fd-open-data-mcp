@@ -4,6 +4,5 @@
     never a transient toast — an operator who was asleep when the session died
     must still see it at a glance. -#}
 {% if auth_alert and (auth_alert.login_required or auth_alert.stale) %}
-<p class="warn-text">⚠ {{ auth_alert.login_required }} 个身份需登录 · {{ auth_alert.stale }} 个身份会话可能已过期 — 点下方「登录 login」拉起登录站。</p>
-<p class="warn-text muted">⚠ {{ auth_alert.login_required }} identit{{ 'y' if auth_alert.login_required == 1 else 'ies' }} need a login · {{ auth_alert.stale }} active identit{{ 'y' if auth_alert.stale == 1 else 'ies' }} may have an expired session — use the 「登录 login」 buttons below to open a login station.</p>
+<p class="warn-text">⚠ {{ t('{n} 个身份需登录').format(n=auth_alert.login_required) }} · {{ t('{n} 个身份会话可能已过期').format(n=auth_alert.stale) }} — {{ t('点下方「登录」拉起登录站。') }}</p>
 {% endif %}

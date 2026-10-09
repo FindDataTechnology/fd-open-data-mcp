@@ -1,37 +1,37 @@
 {% extends "base.html" %}
 {% from "_macros.html" import th, lbl %}
-{% block title %}策略 Policies · 爬虫控制台{% endblock %}
+{% block title %}{{ t('策略') }} · {{ t('柏讯·寻新') }}{% endblock %}
 {% block content %}
-<h2>策略 <span class="en">Policies</span></h2>
+<h2>{{ t('策略') }}</h2>
 <p class="pill-row">
-  <span class="muted">从频率模板新建 New from frequency template:</span>
+  <span class="muted">{{ t('从频率模板新建') }}:</span>
   {% for f in ['daily', 'weekly', 'monthly', 'quarterly', 'yearly'] %}
   <a class="btn" href="/panel/policies/template?frequency={{ f }}">{{ f }}</a>
   {% endfor %}
 </p>
 <form method="get" action="/panel/policies">
   <div class="pill-row">
-    <input type="text" name="q" placeholder="搜索 名称/实体/id search name/entity/id" aria-label="搜索策略" value="{{ q or '' }}" class="filter-w">
-    <button class="btn" type="submit">搜索 Search</button>
-    {% if q %}<a class="btn" href="/panel/policies">清除 Clear</a>{% endif %}
-    <span class="muted">{{ filtered }}{% if q %} / {{ total }}{% endif %} 条 policies · 第 {{ page }}/{{ pages }} 页</span>
+    <input type="text" name="q" placeholder="{{ t('搜索 名称/实体/id') }}" aria-label="{{ t('搜索策略') }}" value="{{ q or '' }}" class="filter-w">
+    <button class="btn" type="submit">{{ t('搜索') }}</button>
+    {% if q %}<a class="btn" href="/panel/policies">{{ t('清除') }}</a>{% endif %}
+    <span class="muted">{{ filtered }}{% if q %} / {{ total }}{% endif %} {{ t('条 policies') }} · {{ t('第') }} {{ page }}/{{ pages }} {{ t('页') }}</span>
   </div>
 </form>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('ID') }}{{ th('名称', 'Name') }}{{ th('实体', 'Entity') }}{{ th('概念', 'Concepts') }}{{ th('模式', 'Mode') }}{{ th('频率', 'Freq') }}{{ th('Cron', 'tz') }}{{ th('上次运行', 'Last run') }}{{ th('启用', 'Enabled') }}<th></th></tr>
+  <tr>{{ th('ID') }}{{ th(t('名称')) }}{{ th(t('实体')) }}{{ th(t('概念')) }}{{ th(t('模式')) }}{{ th(t('频率')) }}{{ th('Cron tz') }}{{ th(t('上次运行')) }}{{ th(t('启用')) }}<th></th></tr>
   </thead>
   {% for p in policies %}{% include "_policy_row.html" %}  {% else %}
-  <tr><td colspan="10" class="muted">没有匹配的策略 No policies match.{% if not total %} <a href="/panel/policies/new">创建一个 Create one</a>.{% endif %}</td></tr>
+  <tr><td colspan="10" class="muted">{{ t('没有匹配的策略') }}.{% if not total %} <a href="/panel/policies/new">{{ t('创建一个') }}</a>.{% endif %}</td></tr>
   {% endfor %}
 </table>
 </div>
 {% if pages > 1 %}
 <p class="pill-row">
-  {% if page > 1 %}<a class="btn" href="/panel/policies?q={{ q }}&page={{ page - 1 }}">‹ 上一页 Prev</a>{% endif %}
-  {% if page < pages %}<a class="btn" href="/panel/policies?q={{ q }}&page={{ page + 1 }}">下一页 Next ›</a>{% endif %}
-  <span class="muted">共 {{ pages }} 页</span>
+  {% if page > 1 %}<a class="btn" href="/panel/policies?q={{ q }}&page={{ page - 1 }}">‹ {{ t('上一页') }}</a>{% endif %}
+  {% if page < pages %}<a class="btn" href="/panel/policies?q={{ q }}&page={{ page + 1 }}">{{ t('下一页') }} ›</a>{% endif %}
+  <span class="muted">{{ t('共') }} {{ pages }} {{ t('页') }}</span>
 </p>
 {% endif %}
 {% endblock %}

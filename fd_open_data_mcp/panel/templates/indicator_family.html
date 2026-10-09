@@ -1,17 +1,17 @@
 {% extends "base.html" %}
 {% from "_macros.html" import th %}
-{% block title %}{{ fam.code }} · 概念族谱{% endblock %}
+{% block title %}{{ fam.code }} · {{ t('概念族谱') }}{% endblock %}
 {% block content %}
-<h2>族 <code>{{ fam.code }}</code> <span class="en">{{ fam.name_en or '' }}</span> {{ fam.name_zh or '' }}</h2>
+<h2>{{ t('族') }} <code>{{ fam.code }}</code> <span class="en">{{ fam.name_en or '' }}</span> {{ fam.name_zh or '' }}</h2>
 <p class="muted">{{ fam.description or '—' }}</p>
-<p><a href="/panel/indicators/families">← 返回族谱 back to families</a> ·
-<a href="/panel/indicators/graph?family={{ fam.code }}">在关系图中打开 open in graph ↗</a></p>
+<p><a href="/panel/indicators/families">← {{ t('返回族谱') }}</a> ·
+<a href="/panel/indicators/graph?family={{ fam.code }}">{{ t('在关系图中打开') }} ↗</a></p>
 {% include "_indicator_tabs.html" %}
-<h3 class="mt">成员概念 <span class="en">Member concepts ({{ fam.members | length }})</span></h3>
+<h3 class="mt">{{ t('成员概念') }} ({{ fam.members | length }})</h3>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('概念', 'Concept') }}{{ th('实体类型', 'Entity') }}{{ th('频率', 'Freq') }}{{ th('单位', 'Unit') }}{{ th('绑定数', 'Bindings') }}{{ th('状态', 'State') }}</tr>
+  <tr>{{ th(t('概念')) }}{{ th(t('实体类型')) }}{{ th(t('频率')) }}{{ th(t('单位')) }}{{ th(t('绑定数')) }}{{ th(t('状态')) }}</tr>
   </thead>
   {% for c in fam.members %}
   <tr>
@@ -23,7 +23,7 @@
     <td>{% if c.verified %}<span class="badge success">verified</span>{% else %}<span class="badge unverified">unverified</span>{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="6" class="muted">该族暂无成员概念 No member concepts.</td></tr>
+  <tr><td colspan="6" class="muted">{{ t('该族暂无成员概念') }}</td></tr>
   {% endfor %}
 </table>
 </div>

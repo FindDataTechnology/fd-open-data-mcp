@@ -3,33 +3,33 @@
   <input type="hidden" name="site" value="{{ site }}">
   <a class="chip {{ 'active' if not health }}" href="/panel/sources"
      hx-get="/panel/sources" hx-vals='{"site": "{{ site }}"}'
-     hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">全部 All</a>
+     hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">{{ t('全部 All') }}</a>
   <a class="chip {{ 'active' if health == 'lit' }}" href="/panel/sources?health=lit"
      hx-get="/panel/sources" hx-vals='{"health": "lit", "site": "{{ site }}"}'
-     hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">已点亮 lit</a>
+     hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">{{ t('已点亮 lit') }}</a>
   <a class="chip {{ 'active' if health == 'unlit' }}" href="/panel/sources?health=unlit"
      hx-get="/panel/sources" hx-vals='{"health": "unlit", "site": "{{ site }}"}'
-     hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">未点亮 not lit</a>
+     hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">{{ t('未点亮 not lit') }}</a>
   <a class="chip {{ 'active' if health == 'stalled' }}" href="/panel/sources?health=stalled"
      hx-get="/panel/sources" hx-vals='{"health": "stalled", "site": "{{ site }}"}'
-     hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">停滞 stalled</a>
-  <select name="site" aria-label="站点 site"
+     hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">{{ t('停滞 stalled') }}</a>
+  <select name="site" aria-label="{{ t('站点 site') }}"
           hx-get="/panel/sources" hx-include="this"
           hx-target="#sources-results" hx-swap="innerHTML" hx-push-url="true">
-    <option value="">全部站点 all sites</option>
+    <option value="">{{ t('全部站点 all sites') }}</option>
     {% for sid in sites %}
     <option value="{{ sid }}" {{ 'selected' if site == sid }}>{{ sid }}</option>
     {% endfor %}
   </select>
-  <noscript><button type="submit" class="btn">筛选 Filter</button></noscript>
+  <noscript><button type="submit" class="btn">{{ t('筛选 Filter') }}</button></noscript>
 </form>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('源', 'Source') }}{{ th('站点', 'Site') }}{{ th('调度', 'Schedule') }}{{ th('启用', 'Enabled') }}{{ th('最近运行', 'Last run') }}{{ th('时间', 'At') }}{{ th('产出行', 'Rows') }}{{ th('待运行', 'Pending') }}<th></th></tr>
+  <tr>{{ th(t('源')) }}{{ th(t('站点')) }}{{ th(t('调度')) }}{{ th(t('启用 Enabled')) }}{{ th(t('最近运行')) }}{{ th(t('时间')) }}{{ th(t('产出行')) }}{{ th(t('待运行')) }}<th></th></tr>
   </thead>
   {% for s in sources %}{% include "_source_row.html" %}{% else %}
-  <tr><td colspan="9" class="muted">没有匹配的源 No matching sources.</td></tr>
+  <tr><td colspan="9" class="muted">{{ t('没有匹配的源 No matching sources.') }}</td></tr>
   {% endfor %}
 </table>
 </div>

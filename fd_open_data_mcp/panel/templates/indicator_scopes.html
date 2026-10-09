@@ -1,13 +1,9 @@
 {% extends "base.html" %}
 {% from "_macros.html" import th %}
-{% block title %}检索范围 Scopes · 指标观察台{% endblock %}
+{% block title %}{{ t('检索范围') }} · {{ t('指标观察台') }}{% endblock %}
 {% block content %}
-<h2>检索范围 <span class="en">Retrieval scopes</span></h2>
-<p class="muted">scope = 命名白名单（源库/域/语义码/原生码四维，空维=不限）；panel 与
-MCP scope 工具直调同一服务函数——此处创建的 scope 立即可供工具使用。A scope is a
-named allow-list over four dimensions; the panel calls the same service
-functions the MCP scope tools call, so anything created here is immediately
-usable via the tools.</p>
+<h2>{{ t('检索范围') }}</h2>
+<p class="muted">{{ t('scope = 命名白名单（源库/域/语义码/原生码四维，空维=不限）；panel 与 MCP scope 工具直调同一服务函数——此处创建的 scope 立即可供工具使用。') }}</p>
 {% include "_indicator_tabs.html" %}
 
 {% if msg %}<p class="badge success">{{ msg }}</p>{% endif %}
@@ -16,7 +12,7 @@ usable via the tools.</p>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('名称', 'Name') }}{{ th('说明', 'Description') }}{{ th('源库', 'source_dbs') }}{{ th('域', 'domains') }}{{ th('语义码', 'semantic_codes') }}{{ th('原生码', 'native_codes') }}{{ th('近7天命中', 'Hits (7d)') }}</tr>
+  <tr>{{ th(t('名称')) }}{{ th(t('说明')) }}{{ th(t('源库')) }}{{ th(t('域')) }}{{ th(t('语义码')) }}{{ th(t('原生码')) }}{{ th(t('近7天命中')) }}</tr>
   </thead>
   {% for sc in scopes %}
   <tr>
@@ -26,24 +22,23 @@ usable via the tools.</p>
     <td>{{ sc.rules.get('domains') | join(', ') or '—' }}</td>
     <td>{{ sc.rules.get('semantic_codes') | join(', ') or '—' }}</td>
     <td>{{ sc.rules.get('native_codes') | join(', ') or '—' }}</td>
-    <td>{{ sc.week_totals.calls }} 次 / {{ sc.week_totals.results }} 行</td>
+    <td>{{ sc.week_totals.calls }} {{ t('次') }} / {{ sc.week_totals.results }} {{ t('行') }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="7" class="muted">暂无 scope No scopes.</td></tr>
+  <tr><td colspan="7" class="muted">{{ t('暂无 scope') }}</td></tr>
   {% endfor %}
 </table>
 </div>
 
-<h3 class="mt">创建 <span class="en">Create</span></h3>
+<h3 class="mt">{{ t('创建') }}</h3>
 <form method="post" action="/panel/indicators/scopes/create" class="chips">
-  <input type="text" name="name" required placeholder="scope 名称 name" aria-label="scope 名称 name">
-  <input type="text" name="description" placeholder="说明 description" aria-label="说明 description">
+  <input type="text" name="name" required placeholder="{{ t('scope 名称') }}" aria-label="{{ t('scope 名称') }}">
+  <input type="text" name="description" placeholder="{{ t('说明') }}" aria-label="{{ t('说明') }}">
   {% for dim in dimensions %}
-  <input type="text" name="{{ dim }}" placeholder="{{ dim }}（逗号分隔 comma-separated，留空=不限 all）" aria-label="{{ dim }}">
+  <input type="text" name="{{ dim }}" placeholder="{{ dim }}{{ t('（逗号分隔，留空=不限）') }}" aria-label="{{ dim }}">
   {% endfor %}
-  <button type="submit" class="btn">创建 create</button>
+  <button type="submit" class="btn">{{ t('创建') }}</button>
 </form>
-<p class="muted">空集校验：规则必须至少匹配一个已知指标（对照 registry_entries/concepts
-活表），否则拒绝创建。Empty scopes are refused — rules must match at least one
-known indicator against the live tables. 保留名 <code>unscoped</code> 不可用。</p>
+<p class="muted">{{ t('空集校验：规则必须至少匹配一个已知指标（对照 registry_entries/concepts 活表），否则拒绝创建。') }}
+{{ t('保留名') }} <code>unscoped</code> {{ t('不可用。') }}</p>
 {% endblock %}

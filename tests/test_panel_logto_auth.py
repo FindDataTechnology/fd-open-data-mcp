@@ -81,7 +81,7 @@ def test_ships_dark_without_logto_env(session, monkeypatch):
 def test_callback_success_sets_session(session, oidc_env, monkeypatch):
     state, cookie_value = _auth.make_state()
     monkeypatch.setattr(_auth, "exchange_code", lambda cfg, code: {
-        "id_token": _stub_id_token()})
+        "id_token": _stub_id_token(roles=["panel-admin"])})
     c = _client()
     r = c.get("/panel/auth/callback", params={"code": "x", "state": state},
               cookies={_auth.STATE_COOKIE: cookie_value})
@@ -185,6 +185,20 @@ def test_session_tamper_and_expiry(session, oidc_env):
     assert _auth.read_session(old) is None
 
 
+def test_callback_null_name_falls_back_to_sub(session, oidc_env, monkeypatch):
+    # a null `name` claim used to freeze the literal "None" into the cookie
+    # (sidebar showed "None") — panel-rbac-i18n-refresh task 6.2
+    state, cookie_value = _auth.make_state()
+    monkeypatch.setattr(_auth, "exchange_code", lambda cfg, code: {
+        "id_token": _stub_id_token(name=None, roles=["panel-admin"])})
+    c = _client()
+    r = c.get("/panel/auth/callback", params={"code": "x", "state": state},
+              cookies={_auth.STATE_COOKIE: cookie_value})
+    assert r.status_code == 302
+    sess = _auth.read_session(r.cookies[_auth.SESSION_COOKIE])
+    assert sess["name"] == "user-1" and sess["name"] != "None"
+
+
 def test_whoami_renders_user_and_logout(session, oidc_env):
     c = _client()
     sess = _auth.make_session_value("user-1", "Op Person")
@@ -229,7 +243,8 @@ def test_callback_role_not_held_403_no_session(session, oidc_env, monkeypatch):
     c = _client()
     r = c.get("/panel/auth/callback", params={"code": "x", "state": state},
               cookies={_auth.STATE_COOKIE: cookie_value})
-    assert r.status_code == 403 and "panel-user" in r.text
+    # tiered admission: a claim without any Scout role fails closed
+    assert r.status_code == 403 and "Scout role" in r.text
     assert not r.cookies.get(_auth.SESSION_COOKIE)
 
 
@@ -305,11 +320,11 @@ def test_allow_list_fallback_when_role_env_unset(session, oidc_env, monkeypatch)
 def test_session_role_recheck_per_request(session, oidc_env, monkeypatch):
     monkeypatch.setenv("PANEL_REQUIRED_ROLE", "panel-user")
     c = _client()
-    # a session frozen WITHOUT the role (e.g. gate enabled after this login)
-    # is rejected per request, with a reason naming the role
+    # a session frozen WITHOUT any Scout role (e.g. gate enabled after this
+    # login) is rejected per request, with a reason naming the tier
     lacking = _auth.make_session_value("user-1", "Op", ["something-else"])
     r = c.get("/panel", cookies={_auth.SESSION_COOKIE: lacking})
-    assert r.status_code == 403 and "panel-user" in r.text
+    assert r.status_code == 403 and "Scout role" in r.text
     holding = _auth.make_session_value("user-1", "Op", ["panel-user"])
     assert c.get("/panel", cookies={_auth.SESSION_COOKIE: holding}).status_code == 200
 
@@ -324,12 +339,21 @@ def test_ws_gate_rechecks_session_role(session, oidc_env, monkeypatch):
                 cookies={_auth.SESSION_COOKIE: lacking}) as ws:
             ws.receive_text()
     assert exc.value.code == 4401
-    # holding the role passes auth (4404: station 1 unresolvable upstream)
-    holding = _auth.make_session_value("user-1", "Op", ["panel-user"])
+    # the station VNC relay is admin-tier (design D1): an operator (legacy
+    # panel-user alias) no longer passes the ws gate
+    operator = _auth.make_session_value("user-1", "Op", ["panel-user"])
+    with pytest.raises(WebSocketDisconnect) as exc_op:
+        with c.websocket_connect(
+                "/panel/auth/station/1/websockify",
+                cookies={_auth.SESSION_COOKIE: operator}) as ws:
+            ws.receive_text()
+    assert exc_op.value.code == 4401
+    # holding the admin role passes auth (4404: station 1 unresolvable upstream)
+    admin = _auth.make_session_value("user-1", "Op", ["panel-admin"])
     with pytest.raises(WebSocketDisconnect) as exc2:
         with c.websocket_connect(
                 "/panel/auth/station/1/websockify",
-                cookies={_auth.SESSION_COOKIE: holding}) as ws:
+                cookies={_auth.SESSION_COOKIE: admin}) as ws:
             ws.receive_text()
     assert exc2.value.code == 4404
 

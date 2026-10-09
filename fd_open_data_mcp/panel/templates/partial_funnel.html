@@ -1,7 +1,7 @@
 {% from "_macros.html" import th %}
 <table>
   <thead>
-  <tr>{{ th('发现', 'Discoveries') }}{{ th('候选', 'Candidates') }}{{ th('已分析', 'Analysed') }}{{ th('已生成', 'Generated') }}{{ th('待批准', 'Pending') }}{{ th('已批准', 'Approved') }}{{ th('已落地', 'Landed') }}</tr>
+  <tr>{{ th(t('发现')) }}{{ th(t('候选')) }}{{ th(t('已分析')) }}{{ th(t('已生成')) }}{{ th(t('待批准')) }}{{ th(t('已批准')) }}{{ th(t('已落地')) }}</tr>
   </thead>
   <tr>
     <td>{{ f.counts.discoveries }}</td>
@@ -14,10 +14,10 @@
   </tr>
 </table>
 
-<h3>最新待批准 <span class="en">Latest pending approval</span></h3>
+<h3>{{ t('最新待批准') }}</h3>
 <table>
   <thead>
-  <tr>{{ th('ID') }}{{ th('源名', 'Source name') }}{{ th('模型', 'Model') }}{{ th('更新', 'Updated') }}</tr>
+  <tr>{{ th('ID') }}{{ th(t('源名')) }}{{ th(t('模型')) }}{{ th(t('更新')) }}</tr>
   </thead>
   {% for m in f.pending %}
   <tr>
@@ -27,16 +27,15 @@
     <td class="muted">{{ m.updated_at or '—' }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="4" class="muted">队列为空，没有待批准 manifest Empty queue — no draft manifests.</td></tr>
+  <tr><td colspan="4" class="muted">{{ t('队列为空，没有待批准 manifest Empty queue — no draft manifests.') }}</td></tr>
   {% endfor %}
 </table>
 
-<h3>已批准 <span class="en">Approved</span></h3>
-<p class="muted">「已落地」= 源名精确匹配 crawl_sources（查询期判定，无外键）。
-"Landed" = source_name exactly matches a crawl_sources row (query-time fact, no FK).</p>
+<h3>{{ t('已批准') }}</h3>
+<p class="muted">{{ t('「已落地」= 源名精确匹配 crawl_sources（查询期判定，无外键）。"Landed" = source_name exactly matches a crawl_sources row (query-time fact, no FK).') }}</p>
 <table>
   <thead>
-  <tr>{{ th('ID') }}{{ th('源名', 'Source name') }}{{ th('模型', 'Model') }}{{ th('更新', 'Updated') }}{{ th('状态', 'Status') }}</tr>
+  <tr>{{ th('ID') }}{{ th(t('源名')) }}{{ th(t('模型')) }}{{ th(t('更新')) }}{{ th(t('状态')) }}</tr>
   </thead>
   {% for m in f.approved %}
   <tr>
@@ -44,9 +43,9 @@
     <td>{% if m.landed and m.source_name %}<a href="/panel/sources/{{ m.source_name | urlencode }}">{{ m.source_name }}</a>{% else %}{{ m.source_name or '—' }}{% endif %}</td>
     <td class="muted">{{ m.model_used or '—' }}</td>
     <td class="muted">{{ m.updated_at or '—' }}</td>
-    <td>{% if m.landed %}<span class="badge success">已落地 landed</span>{% else %}<span class="badge">已批准 approved</span>{% endif %}</td>
+    <td>{% if m.landed %}<span class="badge success">{{ t('已落地 landed') }}</span>{% else %}<span class="badge">{{ t('已批准 approved') }}</span>{% endif %}</td>
   </tr>
   {% else %}
-  <tr><td colspan="5" class="muted">尚无已批准 manifest No approved manifests yet.</td></tr>
+  <tr><td colspan="5" class="muted">{{ t('尚无已批准 manifest No approved manifests yet.') }}</td></tr>
   {% endfor %}
 </table>

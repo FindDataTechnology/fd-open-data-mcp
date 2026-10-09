@@ -1,18 +1,29 @@
 {% extends "base.html" %}
-{% block title %}认证 Auth · 爬虫控制台{% endblock %}
+{% block title %}{{ t('认证') }} · {{ t('爬虫控制台') }}{% endblock %}
 {% block content %}
-<h2>认证身份池 <span class="en">Auth identities</span></h2>
-<p class="muted">每源多账号身份池（crawl_identities）：五态身份、租借与会话健康、需登录队列与事件流，来自中央身份池表。
-Per-source multi-account identity pool: five-state identities, leases and session health, the login-required queue and the event stream.
-登录经登录站完成：从本页拉起登录站，在页内嵌入的观察窗中完成滑块/验证 — logins happen on a login station launched from this panel and are completed inside the embedded observation view.
-每 {{ poll_seconds }}s 自动刷新 refreshes every {{ poll_seconds }}s.</p>
-{#- Standing alert in the shell too: visible the moment the page paints, before
-    the first partial swap (the polled partial keeps it current). -#}
+<h2>{{ t('认证身份池') }}</h2>
+
+{#- Page-level warning SLOT, rendered exactly once (panel-rbac-i18n-refresh
+    6.1, spec 警告不重复堆叠): the shell paints it before the first partial
+    swap, and every poll of the partial below updates this SAME slot via an
+    out-of-band swap (hx-swap-oob on #auth-alert in the partial) — the banner
+    stays current without a second copy ever landing in the card stream. -#}
+<div id="auth-alert">
 {% include "_auth_alert.html" %}
+</div>
+
+{#- 说明拆短句 (spec: 操作说明拆分为短句): one fact per line; the old
+    zh+en wall-of-text paragraph is gone. -#}
+<ul class="auth-brief">
+  <li>{{ t('每源多账号身份池：五态身份、租借与会话健康、需登录队列与事件流。') }}</li>
+  <li>{{ t('登录经登录站完成：从本页拉起登录站，在页内嵌入的观察窗中完成滑块/验证。') }}</li>
+  <li>{{ t('每 {n}s 自动刷新。').format(n=poll_seconds) }}</li>
+</ul>
+
 <div id="station-view"></div>
 <div class="table-wrap">
   <div hx-get="/panel/partials/auth" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible'], auth-refresh from:body">
-    <p class="muted">加载中 loading…</p>
+    <p class="muted">{{ t('加载中') }}…</p>
   </div>
 </div>
 {% endblock %}

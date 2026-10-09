@@ -1,4 +1,4 @@
-预估 estimate: <strong>{{ estimate }}</strong> fetches 抓取
-<span class="muted">({{ n_concepts }} 个概念 concepts, {{ mode }} 模式 mode, 上限 cap {{ policy_max }})</span>
-{% if unroutable %}<br><span class="warn-text">无法路由 unroutable: {{ unroutable|map(attribute='code')|join(', ') }}</span>{% endif %}
-{% if unmapped %}<br><span class="warn-text">未映射实体 unmapped entities: {{ unmapped|length }}</span>{% endif %}
+{{ t('预估') }}: <strong>{{ estimate }}</strong> {{ t('抓取') }}
+<span class="muted">({{ n_concepts }} {{ t('个概念') }}, {{ mode }} {{ t('模式') }}, {{ t('上限') }} {{ policy_max }})</span>
+{% if unroutable %}<br><span class="warn-text">{{ t('无法路由') }}: {{ unroutable|map(attribute='code')|join(', ') }}</span>{% endif %}
+{% if unmapped %}<br><span class="warn-text">{{ t('未映射实体') }}: {{ unmapped|length }}</span>{% endif %}

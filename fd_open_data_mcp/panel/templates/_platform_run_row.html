@@ -4,25 +4,25 @@
     <td>#{{ r.id }}</td>
     <td><a href="/panel/sources/{{ r.source }}">{{ r.source }}</a></td>
     <td><span class="badge {{ badge }}">{{ r.status }}</span>
-      {% if r.identity_alias %}<span class="badge no_op" title="本次运行所租身份 the leased identity">{{ r.identity_alias }}</span>{% endif %}
-      {% if r.cancel_requested %}<span class="warn-text">取消请求中 cancel…</span>{% endif %}
+      {% if r.identity_alias %}<span class="badge no_op" title="{{ t('本次运行所租身份') }}">{{ r.identity_alias }}</span>{% endif %}
+      {% if r.cancel_requested %}<span class="warn-text">{{ t('取消请求中') }}…</span>{% endif %}
       {% if r.status == 'running' and not r.cancel_requested %}
       <span class="confirm">
         <button type="button" class="link link-danger"
-                onclick="this.closest('.confirm').classList.add('armed')">取消 cancel</button>
+                onclick="this.closest('.confirm').classList.add('armed')">{{ t('取消') }}</button>
         <span class="confirm-arm">
           <button type="button" class="link link-danger"
                   hx-post="/panel/runs/platform/{{ r.id }}/cancel"
-                  hx-target="closest tr" hx-swap="outerHTML">确认取消 confirm</button>
+                  hx-target="closest tr" hx-swap="outerHTML">{{ t('确认取消') }}</button>
           <button type="button" class="link"
-                  onclick="this.closest('.confirm').classList.remove('armed')">保留 keep</button>
+                  onclick="this.closest('.confirm').classList.remove('armed')">{{ t('保留') }}</button>
         </span>
       </span>
-      <noscript><form class="inline-form" method="post" action="/panel/runs/platform/{{ r.id }}/cancel"><button class="link" type="submit">取消 cancel</button></form></noscript>
+      <noscript><form class="inline-form" method="post" action="/panel/runs/platform/{{ r.id }}/cancel"><button class="link" type="submit">{{ t('取消') }}</button></form></noscript>
       {% endif %}
     </td>
-    <td class="muted">{{ r.started_at or '—' }}</td>
-    <td class="muted">{{ r.finished_at or '—' }}</td>
+    <td class="muted">{{ fmt_ts(r.started_at) or '—' }}</td>
+    <td class="muted">{{ fmt_ts(r.finished_at) or '—' }}</td>
     <td>{{ r.rows_written if r.rows_written is not none else '—' }}</td>
     <td class="muted wrap">{% if r.metrics %}{% for k, v in r.metrics.items() %}<code title="{{ r.metrics | tojson }}">{{ k }}={{ v }}</code>{% if not loop.last %} {% endif %}{% endfor %}{% else %}—{% endif %}</td>
     <td class="muted">{% if r.pending_run_id %}<a href="/panel/sources/{{ r.source }}">pending #{{ r.pending_run_id }}</a>{% if r.pending_requested_by %} <span class="muted">by {{ r.pending_requested_by }}</span>{% endif %}{% else %}—{% endif %}</td>

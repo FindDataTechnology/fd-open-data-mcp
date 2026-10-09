@@ -89,17 +89,18 @@ def _matrix() -> str:
 # ── 4.1 page shell: polling, station-launch note, nav ────────────────────────
 def test_auth_page_shell_polling_and_station_note(session):
     page = client.get("/panel/auth").text
-    assert "认证身份池" in page and "Auth identities" in page
+    assert "认证身份池" in page
     # the shell carries the polled region; the page queries only the standing
     # alert summary (prearm-login-station: the banner must be visible on the
     # first paint, before any partial swap) — everything else polls
     assert 'hx-get="/panel/partials/auth"' in page
-    assert "every 15s" in page
+    assert "每 15s" in page
     # logins happen on a login station launched FROM this panel, completed in
     # the embedded observation view (login-station-console 3.3 replaced the
-    # old read-only note) — stated bilingually
+    # old read-only note) — monolingual since panel-rbac-i18n-refresh 4.3
+    # (en wording covered by tests/test_i18n_auth.py)
     assert "登录经登录站完成" in page
-    assert "observation view" in page
+    assert "观察窗" in page
     # the station observation view swaps into this page-side region
     assert 'id="station-view"' in page
     # nav entry visible from the home cockpit
@@ -140,10 +141,10 @@ def test_auth_partial_identity_matrix_grouped_by_source(session):
     for marker in ("acc-a", "acc-b", "acc-x", "auto", "assisted"):
         assert marker in matrix
     # health facts per row: lease held by its owner, zero-run streak surfaced
-    assert "租借中 leased" in matrix and "dispatch-1" in matrix
+    assert "租借中" in matrix and "dispatch-1" in matrix
     assert ">5<" in matrix  # consecutive_zero_runs of the banned identity
     # the authenticated source's group header carries its badge
-    assert "认证源 authenticated" in matrix
+    assert "认证源" in matrix
 
     # the same facts come back from the shared aggregation (partial + tools)
     from fd_open_data_mcp.visibility import snapshot
@@ -184,8 +185,8 @@ def test_auth_partial_lease_expired_vs_held(session):
     matrix = _matrix()
     held_row = matrix.split(">held<", 1)[1].split("</tr>", 1)[0]
     stale_row = matrix.split(">stale<", 1)[1].split("</tr>", 1)[0]
-    assert "租借中 leased" in held_row and "租约过期" not in held_row
-    assert "租约过期 lease expired" in stale_row and "租借中" not in stale_row
+    assert "租借中" in held_row and "租约过期" not in held_row
+    assert "租约过期" in stale_row and "租借中" not in stale_row
 
 
 # ── 4.1 login-required queue ────────────────────────────────────────────────
@@ -203,11 +204,11 @@ def test_auth_partial_login_required_queue(session):
     assert "needs-login" in queue_region and "fresh-reg" in queue_region
     assert "healthy" not in queue_region and "banned-one" not in queue_region
     assert ">4<" in queue_region            # failure_count surfaced
-    assert "从未登录 never logged in" in queue_region
+    assert "从未登录" in queue_region
     # most-failed first: needs-login (4) ahead of fresh-reg (0)
     assert queue_region.index("needs-login") < queue_region.index("fresh-reg")
     # summary chips carry the queue length
-    assert "需登录 login_required 2" in r.text
+    assert "需登录 2" in r.text
 
 
 def test_auth_partial_empty_database(session):
@@ -215,7 +216,7 @@ def test_auth_partial_empty_database(session):
     assert r.status_code == 200 and "<html" not in r.text
     for empty in ("队列为空", "尚无身份", "尚无事件"):
         assert empty in r.text
-    assert "身份 identities 0" in r.text
+    assert "身份 0" in r.text
 
 
 # ── 4.1 event stream ────────────────────────────────────────────────────────
@@ -230,7 +231,7 @@ def test_auth_partial_event_stream_latest_20_with_kind_colors(session):
     events_region = r.text.split("事件流", 1)[1]
     assert "ev-25" in events_region and "ev-06" in events_region  # newest 20
     assert "ev-05" not in events_region and "ev-01" not in events_region  # cut
-    assert "latest 20" in r.text
+    assert "最近 20 条" in r.text
     # newest first
     assert events_region.index("ev-25") < events_region.index("ev-24")
     # kind coloring: the auth_failed row carries the failure badge, note the

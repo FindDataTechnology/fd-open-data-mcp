@@ -122,7 +122,7 @@ def test_home_has_shell_theme_and_toast_hooks(session):
     assert r.status_code == 200
     text = r.text
     # sidebar shell + bilingual nav (design D6, spec bilingual labels)
-    for marker in ('class="shell"', 'class="sidenav"', "总览", "策略", "爬虫控制台"):
+    for marker in ('class="shell"', 'class="sidenav"', "总览", "策略", "柏讯·寻新"):
         assert marker in text, marker
     # theme: pre-paint script + manual toggle (spec theme requirement)
     assert 'localStorage.getItem("panel-theme")' in text

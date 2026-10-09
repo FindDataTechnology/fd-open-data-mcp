@@ -1,48 +1,58 @@
+{% macro _t_identity(s) %}{{ s }}{% endmacro %}
+{#- i18n adapter (panel-rbac-i18n-refresh 4.3): this row renders from two
+    contexts — the auth partial's loop (station as `stn`, translate helper as
+    `t`) and the reclaim route's direct render, whose context key `t` is taken
+    by the station row itself so the panel cannot inject the translate helper.
+    Normalize both: `stn` is always the station; `tr` is translate when it
+    reached us, else the identity macro above (zh passthrough — the next 15s
+    poll replaces this transient swap with a fully-localized row). -#}
+{% set stn = t if t is not callable else stn %}
+{% set tr = t if t is callable else _t_identity %}
 {% set badge = {'launching': 'running', 'waiting_operator': 'refused',
                 'completed': 'success', 'failed': 'failed',
-                'timeout': 'zero_yield', 'reclaimed': 'cancelled'}.get(t.status, 'no_op') %}
+                'timeout': 'zero_yield', 'reclaimed': 'cancelled'}.get(stn.status, 'no_op') %}
   <tr>
-    <td>#{{ t.id }}</td>
-    <td><a href="/panel/sources/{{ t.source | urlencode }}">{{ t.source }}</a> / {{ t.account_alias }}</td>
-    <td><span class="badge {{ badge }}">{{ t.status }}</span></td>
-    <td class="muted">{{ t.proxy_url_masked }}</td>
-    <td class="muted">{{ t.deadline_at or '—' }}
-        {% if t.error %}<br><span class="warn-text wrap">{{ t.error }}</span>{% endif %}</td>
+    <td>#{{ stn.id }}</td>
+    <td><a href="/panel/sources/{{ stn.source | urlencode }}">{{ stn.source }}</a> / {{ stn.account_alias }}</td>
+    <td><span class="badge {{ badge }}">{{ stn.status }}</span></td>
+    <td class="muted">{{ stn.proxy_url_masked }}</td>
+    <td class="muted">{{ stn.deadline_at or '—' }}
+        {% if stn.error %}<br><span class="warn-text wrap">{{ stn.error }}</span>{% endif %}</td>
     <td>
-      {% if t.live %}
+      {% if stn.live %}
       <button type="button" class="link"
-              hx-get="/panel/auth/station/{{ t.id }}/view"
-              hx-target="#station-view" hx-swap="innerHTML">观察窗 view</button>
+              hx-get="/panel/auth/station/{{ stn.id }}/view"
+              hx-target="#station-view" hx-swap="innerHTML">{{ tr('观察窗') }}</button>
       <span class="confirm">
         <button type="button" class="link link-danger"
-                onclick="this.closest('.confirm').classList.add('armed')">回收 reclaim</button>
+                onclick="this.closest('.confirm').classList.add('armed')">{{ tr('回收') }}</button>
         <span class="confirm-arm">
           <button type="button" class="link link-danger"
-                  hx-post="/panel/auth/station/{{ t.id }}/reclaim"
-                  hx-target="closest tr" hx-swap="outerHTML">确认回收 confirm</button>
+                  hx-post="/panel/auth/station/{{ stn.id }}/reclaim"
+                  hx-target="closest tr" hx-swap="outerHTML">{{ tr('确认回收') }}</button>
           <button type="button" class="link"
-                  onclick="this.closest('.confirm').classList.remove('armed')">保留 keep</button>
+                  onclick="this.closest('.confirm').classList.remove('armed')">{{ tr('保留') }}</button>
         </span>
       </span>
-      <noscript><form class="inline-form" method="post" action="/panel/auth/station/{{ t.id }}/reclaim"><button class="link" type="submit">回收 reclaim</button></form></noscript>
+      <noscript><form class="inline-form" method="post" action="/panel/auth/station/{{ stn.id }}/reclaim"><button class="link" type="submit">{{ tr('回收') }}</button></form></noscript>
       {% else %}
       {#- A dead station's only useful action is to try again with the same
           identity: no re-registration, no hunting for the source name.
           Previously this cell was a bare —, which read as "nothing to do".
           The egress picker lets the operator move the login to another exit
           instead of being stuck with the auto-assigned one. -#}
-      <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
-        <input type="hidden" name="source" value="{{ t.source }}">
-        <input type="hidden" name="account_alias" value="{{ t.account_alias }}">
+      <form class="inline-form station-launch" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
+        <input type="hidden" name="source" value="{{ stn.source }}">
+        <input type="hidden" name="account_alias" value="{{ stn.account_alias }}">
         {% if egresses %}
-        <select name="egress_ref" aria-label="出口 egress" title="重新拉起时使用的出口 egress for the relaunch">
-          <option value="">出口：沿用当前 egress: keep current</option>
+        <select name="egress_ref" aria-label="{{ tr('出口') }}" title="{{ tr('重新拉起时使用的出口') }}">
+          <option value="">{{ tr('出口：沿用当前') }}</option>
           {% for e in egresses %}
           <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
           {% endfor %}
         </select>
         {% endif %}
-        <button class="link" type="submit">重新拉起 relaunch</button>
+        <button class="link" type="submit">{{ tr('重新拉起') }}</button>
       </form>
       {% endif %}
     </td>

@@ -1,29 +1,29 @@
 {% from "_macros.html" import th %}
-<h3>词表映射 <span class="en">Vocabulary mappings ({{ mappings.total }})</span></h3>
+<h3>{{ t('词表映射') }} ({{ mappings.total }})</h3>
 <form method="get" action="/panel/indicators/relations" class="chips"
       hx-get="/panel/indicators/relations" hx-target="#indicator-relations"
       hx-swap="innerHTML" hx-push-url="true">
-  <select name="vocabulary" aria-label="词表 vocabulary" hx-get="/panel/indicators/relations" hx-include="closest form">
-    <option value="">全部词表 all vocabularies</option>
+  <select name="vocabulary" aria-label="{{ t('词表') }}" hx-get="/panel/indicators/relations" hx-include="closest form">
+    <option value="">{{ t('全部词表') }}</option>
     {% for v in vocabularies %}
     <option value="{{ v }}" {{ 'selected' if v == vocabulary }}>{{ v }}</option>
     {% endfor %}
   </select>
-  <select name="relation" aria-label="关系类型 relation type" hx-get="/panel/indicators/relations" hx-include="closest form">
-    <option value="">全部关系 all relations</option>
+  <select name="relation" aria-label="{{ t('关系类型') }}" hx-get="/panel/indicators/relations" hx-include="closest form">
+    <option value="">{{ t('全部关系') }}</option>
     {% for r in relation_types %}
     <option value="{{ r }}" {{ 'selected' if r == relation }}>{{ r }}</option>
     {% endfor %}
   </select>
-  <input type="search" name="q" value="{{ q }}" placeholder="概念/词条关键词 keyword"
-         aria-label="关键词 keyword" hx-get="/panel/indicators/relations"
+  <input type="search" name="q" value="{{ q }}" placeholder="{{ t('概念/词条关键词') }}"
+         aria-label="{{ t('关键词') }}" hx-get="/panel/indicators/relations"
          hx-include="closest form" hx-trigger="search">
-  <noscript><button type="submit" class="btn">筛选 Filter</button></noscript>
+  <noscript><button type="submit" class="btn">{{ t('筛选') }}</button></noscript>
 </form>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('词表', 'Vocabulary') }}{{ th('词条', 'Term') }}{{ th('关系', 'Relation') }}{{ th('概念', 'Concept') }}{{ th('置信度', 'Confidence') }}{{ th('来源', 'Provenance') }}</tr>
+  <tr>{{ th(t('词表')) }}{{ th(t('词条')) }}{{ th(t('关系')) }}{{ th(t('概念')) }}{{ th(t('置信度')) }}{{ th(t('来源')) }}</tr>
   </thead>
   {% for m in mappings.rows %}
   <tr>
@@ -35,27 +35,27 @@
     <td>{{ m.provenance }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="6" class="muted">无匹配映射 No matching mappings.</td></tr>
+  <tr><td colspan="6" class="muted">{{ t('无匹配映射') }}</td></tr>
   {% endfor %}
 </table>
 </div>
 
-<h3 class="mt">跨源绑定 <span class="en">Cross-source bindings ({{ bindings.total }})</span></h3>
+<h3 class="mt">{{ t('跨源绑定') }} ({{ bindings.total }})</h3>
 <form method="get" action="/panel/indicators/relations" class="chips"
       hx-get="/panel/indicators/relations" hx-target="#indicator-relations"
       hx-swap="innerHTML" hx-push-url="true">
-  <select name="source" aria-label="源 source" hx-get="/panel/indicators/relations" hx-include="closest form">
-    <option value="">全部源 all sources</option>
+  <select name="source" aria-label="{{ t('源') }}" hx-get="/panel/indicators/relations" hx-include="closest form">
+    <option value="">{{ t('全部源') }}</option>
     {% for src in binding_sources %}
     <option value="{{ src }}" {{ 'selected' if src == source }}>{{ src }}</option>
     {% endfor %}
   </select>
-  <noscript><button type="submit" class="btn">筛选 Filter</button></noscript>
+  <noscript><button type="submit" class="btn">{{ t('筛选') }}</button></noscript>
 </form>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('源', 'Source') }}{{ th('列（原生代码）', 'Column (native code)') }}{{ th('概念', 'Concept') }}{{ th('置信度', 'Confidence') }}{{ th('来源', 'Provenance') }}{{ th('复核', 'Reviewed') }}</tr>
+  <tr>{{ th(t('源')) }}{{ th(t('列（原生代码）')) }}{{ th(t('概念')) }}{{ th(t('置信度')) }}{{ th(t('来源')) }}{{ th(t('复核')) }}</tr>
   </thead>
   {% for b in bindings.rows %}
   <tr>
@@ -67,7 +67,7 @@
     <td>{{ '✓' if b.reviewed else '—' }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="6" class="muted">无匹配绑定 No matching bindings.</td></tr>
+  <tr><td colspan="6" class="muted">{{ t('无匹配绑定') }}</td></tr>
   {% endfor %}
 </table>
 </div>

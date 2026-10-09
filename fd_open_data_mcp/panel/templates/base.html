@@ -1,9 +1,9 @@
 <!doctype html>
-<html lang="zh-CN">
+<html lang="{{ 'en' if locale == 'en' else 'zh-CN' }}">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>{% block title %}爬虫控制台 Crawl Control Center{% endblock %}</title>
+  <title>{% block title %}{{ t('柏讯·寻新') }}{% endblock %}</title>
   {#- apply the stored theme before first paint (design D2); no-JS clients
       fall back to prefers-color-scheme tokens in app.css -#}
   <script>(function(){try{var t=localStorage.getItem("panel-theme");if(t)document.documentElement.dataset.theme=t}catch(e){}})();</script>
@@ -13,7 +13,7 @@
   <script src="/panel/static/app.js?v={{ css_v }}" defer></script>
 </head>
 <body>
-  <a class="skip-link" href="#main">跳到内容 Skip to content</a>
+  <a class="skip-link" href="#main">{{ t('跳到内容') }}</a>
   <svg xmlns="http://www.w3.org/2000/svg" hidden>
     <symbol id="i-home" viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></symbol>
     <symbol id="i-policies" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="3"/><path d="m8 12 3 3 5-6"/></symbol>
@@ -28,22 +28,37 @@
 
   <div class="shell">
     <aside class="sidenav">
-      <h1 class="brand">fd 爬虫控制台<span class="en">CRAWL CONTROL</span></h1>
+      {#- brand (spec panel-i18n: 对外文案一律用寻新/Wire Scout，
+          「爬虫控制台/Crawl Control Center」退出用户可见文案) -#}
+      <h1 class="brand">{{ t('柏讯·寻新') }}</h1>
       {% set path = request.url.path %}
       <nav>
-        <a class="nav-link {{ 'active' if path == '/panel' }}" href="/panel"><svg><use href="#i-home"/></svg>总览 <span class="en">Home</span></a>
-        <a class="nav-link {{ 'active' if path.startswith('/panel/policies') }}" href="/panel/policies"><svg><use href="#i-policies"/></svg>策略 <span class="en">Policies</span></a>
-        <a class="nav-link {{ 'active' if path.startswith('/panel/runs') }}" href="/panel/runs"><svg><use href="#i-runs"/></svg>运行 <span class="en">Runs</span></a>
-        <a class="nav-link {{ 'active' if path.startswith('/panel/sources') }}" href="/panel/sources"><svg><use href="#i-sources"/></svg>平台源 <span class="en">Sources</span></a>
-        <a class="nav-link {{ 'active' if path.startswith('/panel/funnel') }}" href="/panel/funnel"><svg><use href="#i-funnel"/></svg>候选源 <span class="en">Funnel</span></a>
-        <a class="nav-link {{ 'active' if path == '/panel/auth' }}" href="/panel/auth"><svg><use href="#i-auth"/></svg>认证 <span class="en">Auth</span></a>
-        <a class="nav-link {{ 'active' if path.startswith('/panel/proxy') }}" href="/panel/proxy"><svg><use href="#i-proxy"/></svg>代理 <span class="en">Proxy</span></a>
-        <a class="nav-link {{ 'active' if path.startswith('/panel/data') }}" href="/panel/data"><svg><use href="#i-data"/></svg>数据 <span class="en">Data</span></a>
-        <a class="nav-link {{ 'active' if path.startswith('/panel/indicators') }}" href="/panel/indicators"><svg><use href="#i-indicators"/></svg>指标 <span class="en">Indicators</span></a>
+        {#- nav visibility per tier (panel-rbac-i18n-refresh design D2):
+            总览/运行/候选源/数据/指标 = everyone; 策略/平台源 = operate+;
+            认证/代理 = admin only -#}
+        <a class="nav-link {{ 'active' if path == '/panel' }}" href="/panel"><svg><use href="#i-home"/></svg>{{ t('总览') }}</a>
+        {%- if perm >= 2 %}
+        <a class="nav-link {{ 'active' if path.startswith('/panel/policies') }}" href="/panel/policies"><svg><use href="#i-policies"/></svg>{{ t('策略') }}</a>
+        {%- endif %}
+        <a class="nav-link {{ 'active' if path.startswith('/panel/runs') }}" href="/panel/runs"><svg><use href="#i-runs"/></svg>{{ t('运行') }}</a>
+        {%- if perm >= 2 %}
+        <a class="nav-link {{ 'active' if path.startswith('/panel/sources') }}" href="/panel/sources"><svg><use href="#i-sources"/></svg>{{ t('平台源') }}</a>
+        {%- endif %}
+        <a class="nav-link {{ 'active' if path.startswith('/panel/funnel') }}" href="/panel/funnel"><svg><use href="#i-funnel"/></svg>{{ t('候选源') }}</a>
+        {%- if perm >= 3 %}
+        <a class="nav-link {{ 'active' if path == '/panel/auth' }}" href="/panel/auth"><svg><use href="#i-auth"/></svg>{{ t('认证') }}</a>
+        <a class="nav-link {{ 'active' if path.startswith('/panel/proxy') }}" href="/panel/proxy"><svg><use href="#i-proxy"/></svg>{{ t('代理') }}</a>
+        {%- endif %}
+        <a class="nav-link {{ 'active' if path.startswith('/panel/data') }}" href="/panel/data"><svg><use href="#i-data"/></svg>{{ t('数据') }}</a>
+        <a class="nav-link {{ 'active' if path.startswith('/panel/indicators') }}" href="/panel/indicators"><svg><use href="#i-indicators"/></svg>{{ t('指标') }}</a>
       </nav>
       <div class="sidenav-foot">
-        <a class="nav-new" href="/panel/policies/new">＋ 新建策略 <span class="en">New</span></a>
-        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="切换主题 Toggle theme">☾</button>
+        {%- if perm >= 2 %}
+        <a class="nav-new" href="/panel/policies/new">＋ {{ t('新建策略') }}</a>
+        {%- endif %}
+        <a class="lang-toggle" href="{{ lang_toggle_url }}"
+           title="{{ t('切换语言') }}">{{ 'EN' if locale == 'zh' else '中文' }}</a>
+        <button id="theme-toggle" class="theme-toggle" type="button" aria-label="{{ t('切换主题') }}">☾</button>
         <span class="whoami" hx-get="/panel/auth/whoami" hx-trigger="load" hx-swap="innerHTML"></span>
       </div>
     </aside>

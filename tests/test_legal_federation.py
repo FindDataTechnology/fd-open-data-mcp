@@ -79,7 +79,7 @@ def mig8():
 
 def test_revision_wiring(mig, mig8):
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0009_source_schedule_tz"
+    assert script.get_current_head() == "0010_panel_action_audit"
     assert script.get_revision("0009_source_schedule_tz").down_revision == (
         "0008_federation_runner_env")
     assert script.get_revision("0008_federation_runner_env").down_revision == (
@@ -777,6 +777,6 @@ def test_panel_renders_run_metrics(session):
     _seed_run_with_metrics("mfa-treaty-crawl")
     page = client.get("/panel/runs")
     assert page.status_code == 200
-    assert "质量" in page.text and "Quality" in page.text
+    assert "质量" in page.text  # single-locale chrome (en: Quality)
     assert "effective_body_ratio=0.87" in page.text
     assert "coverage_count=3" in page.text

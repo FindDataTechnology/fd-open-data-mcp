@@ -27,6 +27,28 @@ STATE_COOKIE = "panel_auth_state"
 # named `roles` and carries a list of role names.
 ROLES_CLAIM = "roles"
 
+# ── tiered admission (panel-rbac-i18n-refresh, design D1 / ADR-0002) ─────────
+# Ordinal permission levels: 1=view (read-only data surfaces), 2=operate
+# (+ crawl actions), 3=admin (+ proxy / login stations / cluster capacity).
+PERM_VIEW, PERM_OPERATE, PERM_ADMIN = 1, 2, 3
+
+# Scout roles → level; `panel-user` stays an alias of operator so existing
+# operators keep admission across the rollout (ADR-0002 migration note).
+ROLE_LEVELS = {
+    "panel-viewer": PERM_VIEW,
+    "panel-operator": PERM_OPERATE,
+    "panel-user": PERM_OPERATE,   # legacy alias
+    "panel-admin": PERM_ADMIN,
+}
+
+# Admission set: any of these admits; multiple roles → the highest level.
+ADMITTED_ROLES = set(ROLE_LEVELS)
+
+
+def permission_level(roles: list[str] | None) -> int:
+    """Highest permission level held by the given roles (0 = none held)."""
+    return max((ROLE_LEVELS.get(r, 0) for r in roles or []), default=0)
+
 
 def logto_config() -> dict | None:
     """OIDC config from env, or None when Logto is not configured."""

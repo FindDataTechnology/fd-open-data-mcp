@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import datetime as dt
+import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -166,7 +167,7 @@ def test_partial_renders_egress_picker(session):
     assert r.status_code == 200
     # picker exists with an auto default + the masked choice
     assert 'name="egress_ref"' in r.text
-    assert "egress: auto" in r.text or "egress: keep current" in r.text
+    assert "自动分配出口" in r.text or "出口：沿用当前" in r.text
     assert "gost-xinru3" in r.text and f"proxy:{pid}" in r.text
     assert "u:sekret" not in r.text      # credentials never render
 
@@ -190,15 +191,16 @@ def test_auth_page_shows_standing_alert_banner(session, monkeypatch):
         assert page.status_code == 200
         assert "1 个身份需登录" in page.text
         assert "1 个身份会话可能已过期" in page.text
-        assert "点下方「登录 login」拉起登录站" in page.text
-        # the English second line rides along
-        assert "may have an expired session" in page.text
+        assert "点下方「登录」拉起登录站" in page.text
+        # the stale-session clause rides along (monolingual since
+        # panel-rbac-i18n-refresh 4.3 — en wording covered by test_i18n_auth)
+        assert "会话可能已过期" in page.text
         # the polled partial carries the same banner (it stays current)
         part = gated.get("/panel/partials/auth", headers=ok)
         assert part.status_code == 200
         assert "1 个身份需登录" in part.text
         # banner sits at the top, ahead of the summary badges
-        assert part.text.index("个身份需登录") < part.text.index("身份 identities")
+        assert part.text.index("个身份需登录") < part.text.index("活跃")
     finally:
         monkeypatch.undo()
         reload(appmod)
@@ -295,13 +297,13 @@ def test_partial_shows_station_board_and_login_button(session):
     matrix = r.text.split("身份矩阵", 1)[1].split("事件流", 1)[0]
     row_a = matrix.split("acc-a", 1)[1].split("</tr>", 1)[0]
     row_b = matrix.split("acc-b", 1)[1].split("</tr>", 1)[0]
-    assert "登录 login" in row_a
-    assert "登录 login" not in row_b
+    assert "登录" in row_a
+    assert "登录" not in row_b
 
     # the station board: row, badge, masked egress, two-step reclaim
     board = r.text.split("登录站", 2)[-1]
     assert "waiting_operator" in board and "#1" in board
-    assert "确认回收 confirm" in board
+    assert "确认回收" in board
     assert "user:pass" not in r.text          # credentials never render
     assert "••••" in board
 
@@ -310,9 +312,118 @@ def test_partial_shows_station_board_and_login_button(session):
     # auth_profile and a crawl-source-named row is invisible to the dispatcher
     # (2026-10-09 fix — the seeded source here is rmfyalk / rmfyalk-login)
     assert 'value="rmfyalk-login"' in r.text
-    form_region = r.text.split("新建账号", 1)[1].split("需登录队列", 1)[0]
+    # 6.1 layout refresh: the login-required queue card moved ABOVE the
+    # registration card (the banner's 「点下方登录」 points at the queue
+    # first), so the form region now ends at the identity matrix instead of
+    # at the queue heading
+    form_region = r.text.split("新建账号", 1)[1].split("身份矩阵", 1)[0]
     assert 'value="rmfyalk"' not in form_region
     assert "anon" not in form_region
+
+
+# ── panel-rbac-i18n-refresh 6.1: auth page layout refresh ───────────────────
+def test_login_queue_rows_carry_inline_launch_entry(session):
+    """Spec 队列行内登录入口可见: every login_required queue row renders a
+    visible 拉起登录站 button whose form posts the existing launch route with
+    that row's identity (source/account_alias[/egress_ref]). The 2026-10
+    production complaint: the banner said 「点击下方『登录』」 while the queue
+    rows themselves carried no button at all — the guidance pointed nowhere."""
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    _proxy(ip="10.0.0.4")
+    _ident("rmfyalk", "q-a", "login_required", failure_count=2)
+    _ident("rmfyalk", "q-c", "login_required")
+    _ident("rmfyalk", "q-b", "active")        # healthy -> never queued
+
+    r = client.get("/panel/partials/auth")
+    queue_card = r.text.split('data-auth-section="login-queue"', 1)[1] \
+                    .split('data-auth-section="new-account"', 1)[0]
+
+    row_a = queue_card.split("q-a", 1)[1].split("</tr>", 1)[0]
+    assert 'hx-post="/panel/auth/station/launch"' in row_a
+    assert 'name="source" value="rmfyalk"' in row_a
+    assert 'name="account_alias" value="q-a"' in row_a
+    assert 'name="egress_ref"' in row_a          # optional egress rides along
+    assert "拉起登录站" in row_a                  # the visible entry itself
+    # a real button (not a bare link): the entry must be visible at a glance,
+    # and the observation view swaps into the page-level station-view slot
+    assert 'class="btn btn-primary"' in row_a
+    assert 'hx-target="#station-view"' in row_a
+
+    # every queued row carries the entry (two queued -> two launch forms);
+    # the healthy identity is not in the queue card at all
+    assert queue_card.count('hx-post="/panel/auth/station/launch"') == 2
+    assert "q-b" not in queue_card
+
+
+def test_standing_warning_renders_exactly_once(session):
+    """Spec 警告不重复堆叠: the same warning appears once on the whole page.
+    The shell renders the banner into the single #auth-alert slot; the polled
+    partial now ships it as an OUT-OF-BAND update (hx-swap-oob) of that slot
+    instead of an inline copy among the cards — the 2026-10 production
+    complaint was the banner rendering twice (page level + card level)."""
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    _ident("rmfyalk", "dup-a", "login_required")
+    _ident("rmfyalk", "dup-b", "login_required")
+
+    page = client.get("/panel/auth").text
+    assert page.count("个身份需登录") == 1
+    assert page.count('id="auth-alert"') == 1       # exactly one slot
+
+    part = client.get("/panel/partials/auth").text
+    assert part.count("个身份需登录") == 1
+    # the partial's banner is the oob UPDATE of that slot, never an inline
+    # card copy: everything after the oob element's close (the card stream)
+    # carries no second restatement…
+    assert '<div id="auth-alert" hx-swap-oob="true">' in part
+    assert part.split("</div>", 1)[1].count("个身份需登录") == 0
+    # …and simulating htmx's oob outerHTML swap keeps the page at one banner
+    oob_body = part.split('<div id="auth-alert" hx-swap-oob="true">', 1)[1] \
+                   .split("</div>", 1)[0]
+    slot_body = page.split('id="auth-alert"', 1)[1].split("</div>", 1)[0]
+    composed = page.replace(slot_body, oob_body, 1)
+    assert composed.count("个身份需登录") == 1
+
+
+def test_queue_and_new_account_occupy_separate_cards(session):
+    """Spec 任务分区互不混杂: the login-required queue and the new-account
+    form each live in their own card, neither embedded in the other (the
+    2026-10 complaint: two different tasks crammed into one card)."""
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    _ident("rmfyalk", "sep-a", "login_required")
+
+    r = client.get("/panel/partials/auth").text
+    queue_card = r.split('data-auth-section="login-queue"', 1)[1] \
+                  .split('data-auth-section="new-account"', 1)[0]
+    acct_card = r.split('data-auth-section="new-account"', 1)[1] \
+                 .split('data-auth-section="identity-matrix"', 1)[0]
+    assert 'class="card auth-card"' in r
+    assert "需登录队列" in queue_card and "新建账号" not in queue_card
+    assert "新建账号" in acct_card and "需登录队列" not in acct_card
+    # one task, one card, one route: registration posts identities; the
+    # queue card posts only station launches
+    assert 'hx-post="/panel/auth/identities"' in acct_card
+    assert 'hx-post="/panel/auth/identities"' not in queue_card
+    assert 'hx-post="/panel/auth/station/launch"' in queue_card
+    assert 'hx-post="/panel/auth/station/launch"' not in acct_card
+
+
+def test_auth_page_brief_is_short_items_not_a_paragraph(session):
+    """Spec 说明拆短句: page and section explanations are marker-classed
+    short-item lists (auth-brief), one fact per line — the old zh+en
+    wall-of-text single paragraph is gone."""
+    page = client.get("/panel/auth").text
+    assert 'class="auth-brief"' in page
+    assert page.count("<li>") >= 3              # split into scannable items
+    # the old mega-paragraph (pool inventory + login-station sentence +
+    # refresh note in one <p>) no longer renders
+    assert "租借与会话健康、需登录队列与事件流，来自中央身份池表" not in page
+    # the load-bearing facts survive as their own short items
+    assert "登录经登录站完成" in page
+    assert "观察窗" in page
+    # every partial section briefs the same way — short items, not walls
+    part = client.get("/panel/partials/auth").text
+    assert part.count('class="auth-brief"') >= 5
+    assert "失败次数多者先处理" in part          # the queue brief, own item
 
 
 def test_station_view_route_embeds_live_station_only(session):
@@ -349,7 +460,7 @@ def test_station_view_shows_failure_reason_and_relaunch(session):
     assert "ERR_INVALID_AUTH_CREDENTIALS" in r.text
     # playwright's call log is noise, never rendered
     assert "navigating to" not in r.text
-    assert "重新拉起登录站 relaunch" in r.text
+    assert "重新拉起登录站" in r.text
     # the relaunch reuses the identity's source/alias
     assert 'name="source" value="rmfyalk"' in r.text
     assert 'name="account_alias" value="acc-f"' in r.text
@@ -417,7 +528,11 @@ def test_reclaim_route_tears_station_down(session, monkeypatch):
                     headers={"hx-request": "true"})
 
     assert r.status_code == 200
-    assert "reclaimed" in r.headers.get("hx-trigger", "")
+    # locale-aware toast since the app.py i18n batch: zh announces the reclaim
+    # (en wording "Station #{} reclaimed" keyed off the same route); the
+    # header is JSON, whose escapes hide the raw zh bytes — decode it
+    toast = json.loads(r.headers.get("hx-trigger", "{}")).get("toast", {})
+    assert "已回收" in toast.get("message", "")
     assert fake.created == []
     s = _db()
     try:
@@ -426,7 +541,7 @@ def test_reclaim_route_tears_station_down(session, monkeypatch):
         s.close()
     # a terminal row offers no reclaim, but does offer a one-click relaunch
     assert "/reclaim" not in r.text
-    assert "重新拉起 relaunch" in r.text
+    assert "重新拉起" in r.text
 
 
 def test_proxy_credentials_never_render_in_failure_reason(session):

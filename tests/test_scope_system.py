@@ -118,7 +118,7 @@ def test_sqlite_chain_upgrade_runs_green(tmp_path, monkeypatch):
     monkeypatch.setenv("FD_OPEN_DATA_MCP_DATABASE_URL", f"sqlite:///{tmp_path/'m.db'}")
     command.upgrade(cfg, "head")
     script = ScriptDirectory(str(PROJECT_ROOT / "alembic"))
-    assert script.get_current_head() == "0009_source_schedule_tz"
+    assert script.get_current_head() == "0010_panel_action_audit"
 
 
 # ─── 3.2 CRUD + 空集校验 + unscoped 保留名 ──────────────────────────────────

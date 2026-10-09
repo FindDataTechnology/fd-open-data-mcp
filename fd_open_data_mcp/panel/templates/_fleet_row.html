@@ -1,18 +1,18 @@
   <tr>
-    <td>{{ f.name }}{% if not f.enabled %} <span class="muted">（已停用 disabled）</span>{% endif %}</td>
+    <td>{{ f.name }}{% if not f.enabled %} <span class="muted">{{ t('（已停用）') }}</span>{% endif %}</td>
     <td>
       <form class="inline-form" method="post" action="/panel/clusters/{{ f.id }}/capacity"
             hx-post="/panel/clusters/{{ f.id }}/capacity" hx-target="closest tr" hx-swap="outerHTML">
         <input type="number" name="capacity" value="{{ f.capacity }}" min="0"
-               class="num-xs" title="最大并发运行数，下个 tick 生效 max concurrent open runs — effective next tick"
-               aria-label="{{ f.name }} 最大并发运行数 max concurrent runs">
-        <button type="submit" class="link" title="保存容量 save capacity" aria-label="保存容量 save capacity">↧</button>
+               class="num-xs" title="{{ t('最大并发运行数，下个 tick 生效') }}"
+               aria-label="{{ f.name }} {{ t('最大并发运行数') }}">
+        <button type="submit" class="link" title="{{ t('保存容量') }}" aria-label="{{ t('保存容量') }}">↧</button>
       </form>
       <span class="muted">open {{ f.open_runs }}</span>
-      {% if f.open_runs > f.capacity %}<span class="badge refused">超载 over</span>{% endif %}
+      {% if f.open_runs > f.capacity %}<span class="badge refused">{{ t('超载') }}</span>{% endif %}
     </td>
     <td>
-      {% if f.open_runs == 0 %}<span class="muted">空闲 idle</span>{% else %}
+      {% if f.open_runs == 0 %}<span class="muted">{{ t('空闲') }}</span>{% else %}
         {% if f.job_states.running %}<span class="badge running">{{ f.job_states.running }} running</span>{% endif %}
         {% if f.job_states.failed %}<span class="badge failed">{{ f.job_states.failed }} crashed</span>{% endif %}
         {% if f.job_states.success %}<span class="badge success">{{ f.job_states.success }} done*</span>{% endif %}
@@ -20,10 +20,10 @@
       {% endif %}
     </td>
     <td>{% if f.reachable is none %}<span class="muted">—</span>
-        {% elif f.reachable %}<span class="badge success">正常 up</span>
-        {% else %}<span class="badge failed">不可达 unreachable</span>{% endif %}</td>
+        {% elif f.reachable %}<span class="badge success">{{ t('正常') }}</span>
+        {% else %}<span class="badge failed">{{ t('不可达') }}</span>{% endif %}</td>
     <td>{% if not f.egress_known %}<span class="muted">—</span>
-        {% elif f.egress_banned_count == 0 %}<span class="badge success">正常 ok</span>
+        {% elif f.egress_banned_count == 0 %}<span class="badge success">{{ t('正常') }}</span>
         {% else %}<span class="badge failed">{{ f.egress_banned_count }} banned</span>
           <span class="muted">{{ f.egress_banned | join(', ') }}</span>{% endif %}</td>
     <td class="muted">{{ f.tags | join(', ') or '—' }}</td>

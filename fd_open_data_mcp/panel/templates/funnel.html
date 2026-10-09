@@ -1,14 +1,12 @@
 {% extends "base.html" %}
-{% block title %}候选源漏斗 Discovery funnel · 爬虫控制台{% endblock %}
+{% block title %}{{ t('候选源漏斗 Discovery funnel · 爬虫控制台') }}{% endblock %}
 {% block content %}
-<h2>候选源漏斗 <span class="en">Discovery funnel</span></h2>
-<p class="muted">发现 → 候选 → 分析 → 生成 manifest 的各阶段计数与最新待批准清单，来自中央流水线表。
-Stage counts and the latest approval queue over the central pipeline tables.
-审批在 harness 工具面完成（agent 操作），此处只读。
-Approval happens on the harness tool surface (agent-operated); this view is read-only.</p>
+<h2>{{ t('候选源漏斗') }}</h2>
+<p class="muted">{{ t('发现 → 候选 → 分析 → 生成 manifest 的各阶段计数与最新待批准清单，来自中央流水线表。Stage counts and the latest approval queue over the central pipeline tables.') }}
+{{ t('审批在 harness 工具面完成（agent 操作），此处只读。Approval happens on the harness tool surface (agent-operated); this view is read-only.') }}</p>
 <div class="table-wrap">
   <div hx-get="/panel/partials/funnel" hx-trigger="load, every {{ poll_seconds }}s [document.visibilityState === 'visible']">
-    <p class="muted">加载中 loading…</p>
+    <p class="muted">{{ t('加载中 loading…') }}</p>
   </div>
 </div>
 {% endblock %}

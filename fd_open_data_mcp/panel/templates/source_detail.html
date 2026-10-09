@@ -1,89 +1,86 @@
 {% extends "base.html" %}
 {% from "_macros.html" import th %}
-{% block title %}源 {{ src.source }} · 爬虫控制台{% endblock %}
+{% block title %}{{ t('源') }} {{ src.source }} · {{ t('爬虫控制台') }}{% endblock %}
 {% block content %}
-<h2>源 <span class="en">Source</span> — {{ src.source }}</h2>
+<h2>{{ t('源') }} — {{ src.source }}</h2>
 
 {% if health and health.stalled %}
 <div class="banner warn">
-  ⚠ 停滞提示 Stalled: 该源已点亮（schedule={{ src.schedule or '—' }}）但超过 7 天没有任何 crawl_runs 记录
-  lit but no run recorded in >7 days — 停滞是提示，不是错误 a hint, not an error.
+  ⚠ {{ t('停滞提示 Stalled') }}: {{ t('该源已点亮（schedule=') }}{{ src.schedule or '—' }}{{ t('）但超过 7 天没有任何 crawl_runs 记录 lit but no run recorded in >7 days') }} — {{ t('停滞是提示，不是错误 a hint, not an error.') }}
 </div>
 {% endif %}
 
 {% if src.frozen_reason %}
 <div class="banner warn">
-  ❄ 冻结成员 Frozen member: {{ src.frozen_reason }} — 触发被拒绝，登记保留可见
-  triggers are refused; the registration stays visible.
+  ❄ {{ t('冻结成员 Frozen member') }}: {{ src.frozen_reason }} — {{ t('触发被拒绝，登记保留可见 triggers are refused; the registration stays visible.') }}
 </div>
 {% endif %}
 
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('类别', 'Kind') }}{{ th('站点', 'Site') }}{{ th('调度', 'Schedule') }}{{ th('启用', 'Enabled') }}{{ th('最近提交', 'Last commit') }}{{ th('清单更新', 'Manifest updated') }}</tr>
+  <tr>{{ th(t('类别')) }}{{ th(t('站点')) }}{{ th(t('调度')) }}{{ th(t('启用 Enabled')) }}{{ th(t('最近提交')) }}{{ th(t('清单更新')) }}</tr>
   </thead>
   <tr>
-    <td>{% if src.kind == 'federated' %}<span class="badge running" title="联邦成员 federated member — 按声明触发 triggers by runner declaration">联邦 federated</span>{% else %}<span class="muted">平台 platform</span>{% endif %}</td>
+    <td>{% if src.kind == 'federated' %}<span class="badge running" title="{{ t('联邦成员 federated member — 按声明触发 triggers by runner declaration') }}">{{ t('联邦 federated') }}</span>{% else %}<span class="muted">{{ t('平台 platform') }}</span>{% endif %}</td>
     <td class="muted">{{ src.site or '—' }}</td>
-    <td>{% if src.schedule %}<code>{{ src.schedule }}</code>{% else %}<span class="muted">未点亮 not lit（无自动运行 no automatic runs）</span>{% endif %}</td>
-    <td><span class="badge {{ 'success' if src.enabled else 'refused' }}">{{ '启用 ON' if src.enabled else '停用 OFF' }}</span></td>
+    <td>{% if src.schedule %}<code>{{ src.schedule }}</code>{% else %}<span class="muted">{{ t('未点亮 not lit（无自动运行 no automatic runs）') }}</span>{% endif %}</td>
+    <td><span class="badge {{ 'success' if src.enabled else 'refused' }}">{{ t('启用 ON') if src.enabled else t('停用 OFF') }}</span></td>
     <td class="muted">{{ src.last_commit or '—' }}</td>
     <td class="muted">{{ src.updated_at or '—' }}</td>
   </tr>
 </table>
 </div>
 {% if src.kind == 'federated' %}
-<p><span class="badge running">runner 声明 runner declaration</span>
+<p><span class="badge running">{{ t('runner 声明 runner declaration') }}</span>
   {% if src.runner_image %}
   <span class="muted wrap"><code>{{ src.runner_image }}</code>
     {%- if src.runner_command %} — <code>{{ src.runner_command | join(' ') }}</code>{% endif %}
-    {%- if src.timeout_seconds %} — 超时 timeout {{ src.timeout_seconds }}s{% endif %}</span>
+    {%- if src.timeout_seconds %} — {{ t('超时 timeout') }} {{ src.timeout_seconds }}s{% endif %}</span>
   {% else %}
-  <span class="muted">未声明 no declaration{% if src.frozen_reason %}（冻结成员 frozen member）{% endif %}</span>
+  <span class="muted">{{ t('未声明 no declaration') }}{% if src.frozen_reason %}{{ t('（冻结成员 frozen member）') }}{% endif %}</span>
   {% endif %}
 </p>
 {% endif %}
 {% if src.auth_profile %}
-<p><span class="badge running">认证源 authenticated</span>
-  <span class="muted">auth_profile=<code>{{ src.auth_profile }}</code> — 登录身份见 the identity pool lives on the
-  <a href="/panel/auth">认证面板 auth panel</a></span></p>
+<p><span class="badge running">{{ t('认证源 authenticated') }}</span>
+  <span class="muted">auth_profile=<code>{{ src.auth_profile }}</code> — {{ t('登录身份见 the identity pool lives on the') }}
+  <a href="/panel/auth">{{ t('认证面板 auth panel') }}</a></span></p>
 {% endif %}
 {% if pipeline %}
-<p><span class="badge success">来自发现流水线 from discovery pipeline</span>
-  <span class="muted">manifest #{{ pipeline.manifest_id }} 批准于 approved
-  {{ pipeline.updated_at or '—' }}{% if pipeline.model_used %}（模型 model: {{ pipeline.model_used }}）{% endif %} —
-  <a href="/panel/funnel">查看漏斗 view funnel</a></span></p>
+<p><span class="badge success">{{ t('来自发现流水线 from discovery pipeline') }}</span>
+  <span class="muted">manifest #{{ pipeline.manifest_id }} {{ t('批准于 approved') }}
+  {{ pipeline.updated_at or '—' }}{% if pipeline.model_used %}（{{ t('模型 model') }}: {{ pipeline.model_used }}）{% endif %} —
+  <a href="/panel/funnel">{{ t('查看漏斗 view funnel') }}</a></span></p>
 {% endif %}
 <p>
   <button type="button" class="btn btn-primary"
           hx-post="/panel/sources/{{ src.source }}/trigger"
-          hx-swap="none">立即触发 trigger now</button>
-  <span class="muted">写入 pending_runs（requested_by=panel），由站点 dispatcher 认领执行
-  queues a pending_runs row for the site dispatcher.</span>
-  <noscript><form class="inline-form" method="post" action="/panel/sources/{{ src.source }}/trigger"><button class="btn btn-primary" type="submit">立即触发 trigger now</button></form></noscript>
+          hx-swap="none">{{ t('立即触发 trigger now') }}</button>
+  <span class="muted">{{ t('写入 pending_runs（requested_by=panel），由站点 dispatcher 认领执行 queues a pending_runs row for the site dispatcher.') }}</span>
+  <noscript><form class="inline-form" method="post" action="/panel/sources/{{ src.source }}/trigger"><button class="btn btn-primary" type="submit">{{ t('立即触发 trigger now') }}</button></form></noscript>
 </p>
 
-<h3>待运行 <span class="en">Pending</span></h3>
+<h3>{{ t('待运行') }}</h3>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('ID') }}{{ th('源', 'Source') }}{{ th('状态', 'Status') }}{{ th('请求者', 'Requested by') }}{{ th('创建', 'Created') }}<th></th></tr>
+  <tr>{{ th('ID') }}{{ th(t('源')) }}{{ th(t('状态')) }}{{ th(t('请求者')) }}{{ th(t('创建 Created')) }}<th></th></tr>
   </thead>
   {% for p in pending %}{% include "_pending_row.html" %}{% else %}
-  <tr><td colspan="6" class="muted">没有待运行务 No pending runs.</td></tr>
+  <tr><td colspan="6" class="muted">{{ t('没有待运行务 No pending runs.') }}</td></tr>
   {% endfor %}
 </table>
 </div>
 
-<h3>最近 20 次运行 <span class="en">Last 20 runs</span></h3>
+<h3>{{ t('最近 20 次运行') }}</h3>
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('ID') }}{{ th('源', 'Source') }}{{ th('状态', 'Status') }}{{ th('开始', 'Started') }}{{ th('结束', 'Finished') }}{{ th('产出行', 'Rows') }}{{ th('质量', 'Quality') }}{{ th('触发行', 'Trigger') }}{{ th('错误', 'Error') }}</tr>
+  <tr>{{ th('ID') }}{{ th(t('源')) }}{{ th(t('状态')) }}{{ th(t('开始')) }}{{ th(t('结束')) }}{{ th(t('产出行')) }}{{ th(t('质量')) }}{{ th(t('触发行')) }}{{ th(t('错误')) }}</tr>
   </thead>
   {% for r in runs %}{% include "_platform_run_row.html" %}{% else %}
-  <tr><td colspan="9" class="muted">尚无运行记录 No runs recorded yet.</td></tr>
+  <tr><td colspan="9" class="muted">{{ t('尚无运行记录 No runs recorded yet.') }}</td></tr>
   {% endfor %}
 </table>
 </div>

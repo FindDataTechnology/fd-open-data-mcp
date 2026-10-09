@@ -1,16 +1,15 @@
 {% extends "base.html" %}
 {% from "_macros.html" import th %}
-{% block title %}概念族谱 Families · 指标观察台{% endblock %}
+{% block title %}{{ t('概念族谱') }} · {{ t('指标观察台') }}{% endblock %}
 {% block content %}
-<h2>概念族谱 <span class="en">Concept families</span></h2>
-<p class="muted">两级概念模型的第一级：族 → 成员变量。Two-level concept model, first
-level: families → member variables. 点开族看成员与绑定数。Open a family for its
-members and their binding counts.</p>
+<h2>{{ t('概念族谱') }}</h2>
+<p class="muted">{{ t('两级概念模型的第一级：族 → 成员变量。') }}
+{{ t('点开族看成员与绑定数。') }}</p>
 {% include "_indicator_tabs.html" %}
 <div class="table-wrap">
 <table>
   <thead>
-  <tr>{{ th('族代码', 'Family code') }}{{ th('名称', 'Name') }}{{ th('成员概念', 'Members') }}{{ th('绑定数', 'Bindings') }}{{ th('说明', 'Description') }}</tr>
+  <tr>{{ th(t('族代码')) }}{{ th(t('名称')) }}{{ th(t('成员概念')) }}{{ th(t('绑定数')) }}{{ th(t('说明')) }}</tr>
   </thead>
   {% for f in families %}
   <tr>
@@ -21,7 +20,7 @@ members and their binding counts.</p>
     <td class="muted">{{ (f.description or '')[:80] }}</td>
   </tr>
   {% else %}
-  <tr><td colspan="5" class="muted">暂无族 No families.</td></tr>
+  <tr><td colspan="5" class="muted">{{ t('暂无族') }}</td></tr>
   {% endfor %}
 </table>
 </div>

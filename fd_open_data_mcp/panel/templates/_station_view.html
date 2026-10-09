@@ -12,43 +12,42 @@
   <div class="station-modal">
     <div class="station-head">
       <div class="station-head-main">
-        <h3>登录 · {{ st.source_label }}</h3>
+        <h3>{{ t('登录') }} · {{ st.source_label }}</h3>
         <p class="station-sub">
-          账号 <strong>{{ st.account_alias }}</strong>
+          {{ t('账号') }} <strong>{{ st.account_alias }}</strong>
           {% if st.source_url %}· <a href="{{ st.source_url }}" target="_blank" rel="noopener">{{ st.source_url }}</a>{% endif %}
-          · 站 #{{ st.id }}
+          · {{ t('站') }} #{{ st.id }}
           <span class="badge running" id="station-status-badge">{{ st.status }}</span>
         </p>
       </div>
-      <button type="button" class="link" onclick="this.closest('.station-backdrop').remove()">关闭 ×</button>
+      <button type="button" class="link" onclick="this.closest('.station-backdrop').remove()">{{ t('关闭') }} ×</button>
     </div>
 
     <ol class="station-steps">
-      <li>在下方画面中输入该站的账号密码（如遇滑块 / 验证码请一并完成）。</li>
-      <li>登录成功后本窗口自动提示并关闭，无需手动刷新。</li>
+      <li>{{ t('在下方画面中输入该站的账号密码（如遇滑块 / 验证码请一并完成）。') }}</li>
+      <li>{{ t('登录成功后本窗口自动提示并关闭，无需手动刷新。') }}</li>
     </ol>
 
     <div id="station-modal-body">
     {% if st.live %}
       <iframe id="station-frame" src="{{ vnc_url }}" title="login station {{ st.id }} observation view"
               data-booting="1"></iframe>
-      <p class="muted" id="station-hint">拉起中：站桌面约需 20-40 秒出现，会自动重试，无需手动刷新。
-      Booting: the desktop appears within ~40s and retries itself.</p>
+      <p class="muted" id="station-hint">{{ t('拉起中：站桌面约需 20-40 秒出现，会自动重试，无需手动刷新。') }}</p>
     {% else %}
-      <p class="warn-text">该站已结束（{{ st.status }}）—— 观察通道已关闭。This station has finished ({{ st.status }}); the observation channel is closed.</p>
-      {% if st.error %}<p class="warn-text wrap">失败原因 failure reason: {{ st.error }}</p>{% endif %}
+      <p class="warn-text">{{ t('该站已结束') }}（{{ st.status }}）—— {{ t('观察通道已关闭。') }}</p>
+      {% if st.error %}<p class="warn-text wrap">{{ t('失败原因') }}: {{ st.error }}</p>{% endif %}
       <form class="inline-form" hx-post="/panel/auth/station/launch" hx-target="#station-view" hx-swap="innerHTML">
         <input type="hidden" name="source" value="{{ st.source }}">
         <input type="hidden" name="account_alias" value="{{ st.account_alias }}">
         {% if egresses %}
-        <select name="egress_ref" aria-label="出口 egress" title="重新拉起时使用的出口 egress for the relaunch">
-          <option value="">出口：沿用当前 egress: keep current</option>
+        <select name="egress_ref" aria-label="{{ t('出口') }}" title="{{ t('重新拉起时使用的出口') }}">
+          <option value="">{{ t('出口：沿用当前') }}</option>
           {% for e in egresses %}
           <option value="{{ e.egress_ref }}">{{ e.label }}（{{ e.url_masked }}）</option>
           {% endfor %}
         </select>
         {% endif %}
-        <button type="submit">重新拉起登录站 relaunch</button>
+        <button type="submit">{{ t('重新拉起登录站') }}</button>
       </form>
     {% endif %}
     </div>
@@ -87,7 +86,7 @@
     } else {
       clearInterval(timer);
       var hint = document.getElementById('station-hint');
-      if (hint) hint.textContent = '画面已就绪：请在上方完成登录。Ready — complete the login above.';
+      if (hint) hint.textContent = {{ t('画面已就绪：请在上方完成登录。') | tojson }};
     }
   }, 3000);
 
@@ -105,9 +104,8 @@
         clearInterval(poll); clearInterval(timer);
         var body = document.getElementById('station-modal-body');
         if (body) body.innerHTML =
-          '<p class="badge success">✔ 登录成功 login captured</p>' +
-          '<p class="muted">身份 ' + st.source_label + ' / ' + st.account_alias +
-          ' 已激活，站点即将自动关闭。Identity active — closing shortly.</p>';
+          '<p class="badge success">✔ ' + {{ t('登录成功') | tojson }} + '</p>' +
+          '<p class="muted">' + {{ t('身份 {s} / {a} 已激活，站点即将自动关闭。') | tojson }}.replace('{s}', st.source_label).replace('{a}', st.account_alias) + '</p>';
         if (window.htmx) htmx.trigger('body', 'auth-refresh');
         setTimeout(function () {
           var m = document.getElementById('station-modal-root');
@@ -120,12 +118,12 @@
           body2.textContent = '';
           var p1 = document.createElement('p');
           p1.className = 'warn-text';
-          p1.textContent = '登录站结束（' + st.status + '）';
+          p1.textContent = {{ t('登录站结束') | tojson }} + '（' + st.status + '）';
           body2.appendChild(p1);
           if (st.error) {
             var p2 = document.createElement('p');
             p2.className = 'warn-text wrap';
-            p2.textContent = '失败原因: ' + st.error;   // textContent: never innerHTML
+            p2.textContent = {{ t('失败原因') | tojson }} + ': ' + st.error;   // textContent: never innerHTML
             body2.appendChild(p2);
           }
           var f = document.createElement('form');
@@ -138,7 +136,7 @@
           var h2 = document.createElement('input');
           h2.type = 'hidden'; h2.name = 'account_alias'; h2.value = st.account_alias;
           var b = document.createElement('button');
-          b.type = 'submit'; b.textContent = '重新拉起 relaunch';
+          b.type = 'submit'; b.textContent = {{ t('重新拉起') | tojson }};
           f.appendChild(h1); f.appendChild(h2); f.appendChild(b);
           body2.appendChild(f);
           if (window.htmx) htmx.process(f);

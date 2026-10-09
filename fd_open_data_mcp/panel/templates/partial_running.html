@@ -1,11 +1,11 @@
 {% from "_macros.html" import th, svg_progress %}
 <table>
   <thead>
-  <tr>{{ th('运行', 'Run') }}{{ th('策略', 'Policy') }}{{ th('位置', 'Where') }}{{ th('已用时', 'Elapsed') }}{{ th('进度', 'Progress') }}</tr>
+  <tr>{{ th(t('运行'), 'Run') }}{{ th(t('策略'), 'Policy') }}{{ th(t('位置'), 'Where') }}{{ th(t('已用时'), 'Elapsed') }}{{ th(t('进度'), 'Progress') }}</tr>
   </thead>
   {% for r in runs %}
   <tr>
-    <td><a href="/panel/runs/{{ r.id }}">#{{ r.id }}</a></td>
+    <td>{% if perm >= 2 %}<a href="/panel/runs/{{ r.id }}">{% endif %}#{{ r.id }}{% if perm >= 2 %}</a>{% endif %}</td>
     <td>{{ r.policy }}</td>
     <td class="muted">{{ r.cluster or 'scrapyd' }}{% if r.job_ref %} · {{ r.job_ref }}{% endif %}</td>
     <td class="muted">{{ r.elapsed_minutes }}m</td>
@@ -14,14 +14,14 @@
         {% if r.plan_cells %}
           {{ svg_progress(r.rows_attempted, r.plan_cells) }}
         {% endif %}
-        {{ r.rows_attempted }}{{ ' / ' ~ r.plan_cells if r.plan_cells else '' }} 已试 att ·
-        <strong>{{ r.rows_new or 0 }} 新增 new</strong>
+        {{ r.rows_attempted }}{{ ' / ' ~ r.plan_cells if r.plan_cells else '' }} {{ t('已试') }} ·
+        <strong>{{ r.rows_new or 0 }} {{ t('新增') }}</strong>
       {% else %}
-        <span class="muted">尚未上报产出 pod has not reported yield yet</span>
+        <span class="muted">{{ t('尚未上报产出') }}</span>
       {% endif %}
     </td>
   </tr>
   {% else %}
-  <tr><td colspan="5" class="muted">暂无运行中的爬取 Nothing running.</td></tr>
+  <tr><td colspan="5" class="muted">{{ t('暂无运行中的爬取') }}</td></tr>
   {% endfor %}
 </table>

@@ -6,6 +6,8 @@ action; editor and proxy pages render on the bilingual token substrate.
 """
 from __future__ import annotations
 
+import json
+
 from fastapi.testclient import TestClient
 from sqlalchemy import select
 
@@ -15,6 +17,11 @@ from fd_open_data_mcp.panel.app import app
 
 client = TestClient(app)
 HX = {"HX-Request": "true"}
+
+
+def _toast_msg(response) -> str:
+    """HX-Trigger toast message (JSON-encoded, CJK as \\uXXXX escapes)."""
+    return json.loads(response.headers["HX-Trigger"])["toast"]["message"]
 
 
 def _policy(name="pa", enabled=True) -> int:
@@ -45,12 +52,16 @@ def test_toggle_via_htmx_swaps_row_with_toast(session):
     r = client.post(f"/panel/policies/{pid}/toggle", headers=HX)
     assert r.status_code == 200
     assert "<html" not in r.text  # row fragment only
-    assert "停用 OFF" in r.text  # re-rendered row flipped
-    assert "disabled" in r.headers.get("HX-Trigger", "")
+    # panel-rbac-i18n-refresh 4.3: rows render single-locale now, so the zh
+    # page carries the zh half only (en halves live in the dictionary and
+    # are pinned in tests/test_i18n_policies.py)
+    assert "停用" in r.text  # re-rendered row flipped
+    assert "已停用" in _toast_msg(r)  # toast single-locale zh (app.py 4.2/4.3)
     assert _get(pid)["enabled"] is False  # list state matches DB
 
     back = client.post(f"/panel/policies/{pid}/toggle", headers=HX)
-    assert "启用 ON" in back.text
+    assert "启用" in back.text
+    assert "已启用" in _toast_msg(back)
     assert _get(pid)["enabled"] is True
 
 
@@ -67,7 +78,7 @@ def test_run_now_via_htmx_toasts_launch_result(session, monkeypatch):
     r = client.post(f"/panel/policies/{pid}/run-now", headers=HX)
     assert r.status_code == 200
     assert "<html" not in r.text
-    assert "launched" in r.headers.get("HX-Trigger", "")
+    assert "已触发运行" in _toast_msg(r)
     assert "runnow-hx" in r.text  # row re-rendered
 
     def refuse(s, p, launcher):
@@ -85,23 +96,23 @@ def test_delete_via_htmx_removes_row_and_confirms_inline(session):
     pid = _policy("del-hx")
     # the row template carries the two-step confirm, not a native dialog
     page = client.get("/panel/policies").text
-    assert "confirm-arm" in page and "确认删除 confirm" in page
+    assert "confirm-arm" in page and "确认删除" in page
 
     r = client.post(f"/panel/policies/{pid}/delete", headers=HX)
     assert r.status_code == 200
     assert "<html" not in r.text and "<tr" not in r.text  # empty body removes row
-    assert "deleted" in r.headers.get("HX-Trigger", "")
+    assert "已删除" in _toast_msg(r)
     assert _get(pid) is None
 
 
 def test_editor_and_proxy_pages_on_substrate(session):
     editor = client.get("/panel/policies/new").text
-    assert "新建策略 New policy" in editor
+    assert "新建策略" in editor  # single-locale zh (4.3); en pinned in test_i18n_policies
     assert 'class="btn btn-primary"' in editor  # token-class buttons
-    assert "预估 estimate" in editor
+    assert "预估" in editor
 
     proxy = client.get("/panel/proxy").text
-    assert "代理与出口" in proxy and "Proxy / Egress" in proxy
+    assert "代理与出口" in proxy  # single-locale zh (4.3); en pinned in test_i18n_auth
     assert "出口健康" in proxy
     # management disabled note renders read-only (no PROXY_CONTROL_URL in tests)
     assert "PROXY_CONTROL_URL" in proxy

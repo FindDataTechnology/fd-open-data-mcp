@@ -89,7 +89,8 @@ def test_cancel_via_htmx_returns_row_fragment_and_toast(session, monkeypatch):
     assert "<html" not in r.text  # row fragment only
     assert "cancelled" in r.text  # re-rendered row shows the new badge
     assert "toast" in r.headers.get("HX-Trigger", "")
-    assert "cancelled" in r.headers["HX-Trigger"]
+    import json as _json
+    assert "已取消" in _json.loads(r.headers["HX-Trigger"])["toast"]["message"]
 
 
 def test_cancel_terminal_run_via_htmx_error_toast_row_unchanged(session):
@@ -99,8 +100,9 @@ def test_cancel_terminal_run_via_htmx_error_toast_row_unchanged(session):
 
     r = client.post(f"/panel/runs/{rid}/cancel", headers=HX)
     assert r.status_code == 200
+    import json as _json
     trigger = r.headers.get("HX-Trigger", "")
-    assert '"err"' in trigger and "already finished" in trigger
+    assert '"err"' in trigger and "已结束" in _json.loads(trigger)["toast"]["message"]
     assert ">success<" in r.text  # row re-rendered unchanged
 
 
@@ -122,7 +124,9 @@ def test_capacity_via_htmx_returns_row_and_toast(session):
     assert r.status_code == 200
     assert "<html" not in r.text
     assert "caphx" in r.text and 'value="7"' in r.text
-    assert "capacity saved" in r.headers.get("HX-Trigger", "")
+    import json as _json
+    assert "容量已保存" in _json.loads(
+        r.headers["HX-Trigger"])["toast"]["message"]
 
     bad = client.post(f"/panel/clusters/{cid}/capacity",
                       data={"capacity": "abc"}, headers=HX)

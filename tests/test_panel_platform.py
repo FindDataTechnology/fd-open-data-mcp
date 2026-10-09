@@ -178,7 +178,7 @@ def test_runs_page_shows_platform_runs_side_by_side(session):
     _run("mix-src", "success", finished=NOW, rows=7)
 
     page = client.get("/panel/runs").text
-    assert "平台运行" in page and "Platform runs" in page  # second table present
+    assert "平台运行" in page  # second table present (single-locale)
     assert "mix-src" in page and "7" in page                # platform row rendered
     assert f"/panel/policies/{pid}" in page                 # policy columns unchanged
 
@@ -235,7 +235,7 @@ def test_trigger_inserts_pending_row_and_swaps_row(session):
     r = client.post("/panel/sources/trig-ok/trigger", headers=HX)
     assert r.status_code == 200
     assert "<html" not in r.text and "trig-ok" in r.text  # row re-rendered
-    assert "queued" in r.headers.get("HX-Trigger", "")
+    assert "已触发" in _toast_msg(r)
     s = get_database().get_session()
     try:
         p = s.query(PendingRun).filter_by(source="trig-ok").one()
@@ -256,7 +256,7 @@ def test_trigger_refusals_carry_clear_text(session):
     assert "not registered" in r.text
     hx = client.post("/panel/sources/ghost/trigger", headers=HX)
     assert hx.status_code == 200 and '"err"' in hx.headers["HX-Trigger"]
-    assert "not registered" in hx.headers["HX-Trigger"]
+    assert "未触发" in _toast_msg(hx)
     # disabled source
     _source("trig-off", enabled=False)
     r = client.post("/panel/sources/trig-off/trigger")
@@ -267,7 +267,7 @@ def test_trigger_refusals_carry_clear_text(session):
     r = client.post("/panel/sources/trig-open/trigger")
     assert r.status_code == 409 and "single-flight" in r.text
     hx = client.post("/panel/sources/trig-open/trigger", headers=HX)
-    assert "single-flight" in hx.headers["HX-Trigger"]
+    assert "single-flight" in _toast_msg(hx)  # reason text from shared tool
     s = get_database().get_session()
     try:
         assert s.query(PendingRun).count() == 0  # no rows from refusals
@@ -325,7 +325,7 @@ def test_trigger_integrity_error_becomes_friendly_text(session):
         hx = client.post("/panel/sources/trig-fk/trigger", headers=HX)
         assert hx.status_code == 200
         assert '"err"' in hx.headers["HX-Trigger"]
-        assert "crawl_sites" in hx.headers["HX-Trigger"]
+        assert "crawl_sites" in _toast_msg(hx)  # reason text from shared tool
         plain = client.post("/panel/sources/trig-fk/trigger")
         assert plain.status_code == 400 and "crawl_sites" in plain.text
     finally:
@@ -339,8 +339,8 @@ def test_cancel_platform_run_cas_semantics(session):
 
     r = client.post(f"/panel/runs/platform/{rid}/cancel", headers=HX)
     assert r.status_code == 200
-    assert "cancel requested" in r.headers["HX-Trigger"]
-    assert "取消请求中 cancel" in r.text  # row re-rendered with the flag
+    assert "已请求取消" in _toast_msg(r)
+    assert "取消请求中" in r.text  # row re-rendered with the flag
     s = get_database().get_session()
     try:
         run = s.get(CrawlRun, rid)
@@ -361,7 +361,7 @@ def test_cancel_platform_run_cas_semantics(session):
     assert r3.status_code == 409 and "already finished" in r3.text
     hx = client.post(f"/panel/runs/platform/{done}/cancel", headers=HX)
     assert '"err"' in hx.headers["HX-Trigger"]
-    assert "already finished" in hx.headers["HX-Trigger"]
+    assert "已结束" in _toast_msg(hx)
     assert client.post("/panel/runs/platform/99999/cancel").status_code == 404
 
 
@@ -373,7 +373,7 @@ def test_cancel_pending_cas_semantics(session):
 
     r = client.post(f"/panel/pending/{pend}/cancel", headers=HX)
     assert r.status_code == 200
-    assert "已取消 cancelled" in _toast_msg(r)
+    assert "已取消" in _toast_msg(r)
     assert "cancelled" in r.text  # re-rendered row shows the terminal badge
     s = get_database().get_session()
     try:
@@ -389,7 +389,7 @@ def test_cancel_pending_cas_semantics(session):
     r = client.post(f"/panel/pending/{done}/cancel")
     assert r.status_code == 409 and "already done" in r.text
     hx = client.post(f"/panel/pending/{done}/cancel", headers=HX)
-    assert "already done" in hx.headers["HX-Trigger"]
+    assert "已是终态" in _toast_msg(hx)
     assert client.post("/panel/pending/99999/cancel").status_code == 404
     # already-cancelled re-request is a 409 too (CAS on pending/claimed only)
     assert client.post(f"/panel/pending/{pend}/cancel").status_code == 409

@@ -113,8 +113,12 @@ def test_home_trend_chart_has_titled_points(session):
     finally:
         s.close()
 
+    # single-language chrome (panel-rbac-i18n-refresh): zh renders only
+    # Chinese, the en locale renders the English heading
     text = client.get("/panel").text
-    assert "产出趋势" in text and "Yield trend" in text
+    assert "产出趋势" in text and "Yield trend" not in text
+    assert "Yield trend" in client.get(
+        "/panel", cookies={"panel-lang": "en"}).text
     assert "<title>" in text  # per-point values inspectable without JS
     assert 'class="bar"' in text
 

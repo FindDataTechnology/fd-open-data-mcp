@@ -1,7 +1,7 @@
 {% from "_macros.html" import th %}
 <table>
   <thead>
-  <tr>{{ th('源总数', 'Sources') }}{{ th('已点亮', 'Lit') }}{{ th('停滞', 'Stalled') }}{{ th('24h 成功', '24h ok') }}{{ th('24h 失败', '24h failed') }}</tr>
+  <tr>{{ th(t('源总数'), 'Sources') }}{{ th(t('已点亮'), 'Lit') }}{{ th(t('停滞'), 'Stalled') }}{{ th(t('24h 成功'), '24h ok') }}{{ th(t('24h 失败'), '24h failed') }}</tr>
   </thead>
   <tr>
     <td><a href="/panel/sources">{{ h.total }}</a></td>

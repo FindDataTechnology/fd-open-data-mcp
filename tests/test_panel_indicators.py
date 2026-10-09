@@ -152,7 +152,7 @@ def test_board_pages_render_and_nav_entry(session):
     for p in ("/panel/policies", "/panel/runs", "/panel/indicators/families"):
         html = client.get(p).text
         assert 'href="/panel/indicators"' in html, p
-        assert '指标 <span class="en">Indicators</span></a>' in html, p
+        assert '>指标</a>' in html, p  # single-locale nav (en: Indicators)
 
 
 def test_gate_parity_with_other_boards(session, monkeypatch):
@@ -543,13 +543,15 @@ def test_missing_registry_degrades(session):
     # session fixture: ORM tables only — no registry_entries created
     r = client.get("/panel/indicators")
     assert r.status_code == 200
-    assert "注册目录表" in _norm(r.text) and "not present" in _norm(r.text)
+    # panel-rbac-i18n-refresh 4.3: notices render single-locale now, so the
+    # zh page carries the zh half only (the en halves moved to the en locale,
+    # pinned in tests/test_i18n_indicators.py)
+    assert "注册目录表" in _norm(r.text)
 
     r = client.get("/panel/indicators/coverage")
     assert r.status_code == 200
     t = _norm(r.text)
-    assert "无法统计" in t and "not present" in t
-    assert "counts are unavailable" in t
+    assert "无法统计" in t
 
     body = client.get("/panel/indicators/graph.json",
                       params={"domain": "macro"}).json()

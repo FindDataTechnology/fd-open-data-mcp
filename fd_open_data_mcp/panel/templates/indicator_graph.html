@@ -1,46 +1,44 @@
 {% extends "base.html" %}
 {% from "_macros.html" import th %}
-{% block title %}关系图 Graph · 指标观察台{% endblock %}
+{% block title %}{{ t('关系图') }} · {{ t('指标观察台') }}{% endblock %}
 {% block content %}
-<h2>关系图 <span class="en">Interactive relation graph</span></h2>
-<p class="muted">按族 / 指标 / 域圈定的邻域图：平移、缩放、点选节点看详情。
-Neighborhood graph scoped by family / indicator / domain — pan, zoom, and
-select a node for its detail. 视图规模有服务端上限。Views are bounded
-server-side.</p>
+<h2>{{ t('关系图') }}</h2>
+<p class="muted">{{ t('按族 / 指标 / 域圈定的邻域图：平移、缩放、点选节点看详情。') }}
+{{ t('视图规模有服务端上限。') }}</p>
 {% include "_indicator_tabs.html" %}
 
 <form method="get" action="/panel/indicators/graph" class="chips">
-  <label for="graph-family">族 family</label>
+  <label for="graph-family">{{ t('族') }}</label>
   <select id="graph-family" name="family">
     <option value="">—</option>
     {% for f in families %}
     <option value="{{ f.code }}" {{ 'selected' if f.code == family }}>{{ f.code }} ({{ f.n_members }})</option>
     {% endfor %}
   </select>
-  <label for="graph-indicator">指标 id indicator</label>
+  <label for="graph-indicator">{{ t('指标 id') }}</label>
   <input id="graph-indicator" name="indicator" type="number" min="1" value="{{ indicator if indicator is not string else '' }}">
-  <label for="graph-domain">域 domain</label>
+  <label for="graph-domain">{{ t('域') }}</label>
   <select id="graph-domain" name="domain">
     <option value="">—</option>
     {% for d in registry_filters.domains %}
     <option value="{{ d }}" {{ 'selected' if d == domain }}>{{ d }}</option>
     {% endfor %}
   </select>
-  <label for="graph-depth">深度 depth</label>
+  <label for="graph-depth">{{ t('深度') }}</label>
   <select id="graph-depth" name="depth">
     {% for d in [1, 2] %}
     <option value="{{ d }}" {{ 'selected' if d == depth }}>depth {{ d }}</option>
     {% endfor %}
   </select>
-  <button type="submit" class="btn">查看 view</button>
+  <button type="submit" class="btn">{{ t('查看') }}</button>
 </form>
 
 <div id="graph-wrap" class="graph-wrap"
      data-graph-src="/panel/indicators/graph.json?family={{ family | urlencode }}&indicator={{ indicator or '' }}&domain={{ domain | urlencode }}&depth={{ depth }}">
-  <div id="graph-canvas" class="graph-canvas" aria-label="关系图画布 relation graph canvas"></div>
+  <div id="graph-canvas" class="graph-canvas" aria-label="{{ t('关系图画布') }}"></div>
   <aside id="graph-detail" class="graph-detail" aria-live="polite">
-    <h3>节点详情 <span class="en">Node detail</span></h3>
-    <p class="muted" id="graph-detail-body">点选一个节点查看详情 Select a node to see its detail.</p>
+    <h3>{{ t('节点详情') }}</h3>
+    <p class="muted" id="graph-detail-body">{{ t('点选一个节点查看详情') }}</p>
   </aside>
 </div>
 <p class="muted" id="graph-note"></p>
@@ -48,32 +46,31 @@ server-side.</p>
     the server-rendered listing below when scripting is unavailable
     (panel-ui spec 降级 / 无脚本可视化). -#}
 <noscript>
-  <h3 class="mt">关系列表（无脚本降级）<span class="en">Relation listing (no-script fallback)</span></h3>
-  <p class="muted">客户端脚本不可用——呈现服务端关系列表。Client scripting is
-  unavailable; a server-rendered relation listing is served instead.</p>
+  <h3 class="mt">{{ t('关系列表（无脚本降级）') }}</h3>
+  <p class="muted">{{ t('客户端脚本不可用——呈现服务端关系列表。') }}</p>
   {% if fallback_family %}
-  <h4>族 → 成员概念 <span class="en">Family → member concepts</span></h4>
+  <h4>{{ t('族 → 成员概念') }}</h4>
   <div class="table-wrap">
   <table>
-    <thead><tr>{{ th('族', 'Family') }}{{ th('成员概念', 'Members') }}{{ th('绑定数', 'Bindings') }}</tr></thead>
+    <thead><tr>{{ th(t('族')) }}{{ th(t('成员概念')) }}{{ th(t('绑定数')) }}</tr></thead>
     {% for f in families %}
     <tr><td><code>{{ f.code }}</code></td><td>{{ f.n_members }}</td><td>{{ f.n_bindings }}</td></tr>
     {% endfor %}
   </table>
   </div>
   {% endif %}
-  <h4>最近词表映射 <span class="en">Latest vocabulary mappings</span></h4>
+  <h4>{{ t('最近词表映射') }}</h4>
   <div class="table-wrap">
   <table>
-    <thead><tr>{{ th('词表', 'Vocabulary') }}{{ th('词条', 'Term') }}{{ th('关系', 'Relation') }}{{ th('概念', 'Concept') }}</tr></thead>
+    <thead><tr>{{ th(t('词表')) }}{{ th(t('词条')) }}{{ th(t('关系')) }}{{ th(t('概念')) }}</tr></thead>
     {% for m in fallback_mappings %}
     <tr><td>{{ m.vocabulary }}</td><td><code>{{ m.term }}</code></td><td>{{ m.relation }}</td><td><a href="/panel/indicators/concepts/{{ m.concept_id }}"><code>{{ m.concept_code }}</code></a></td></tr>
     {% else %}
-    <tr><td colspan="4" class="muted">暂无映射 No mappings.</td></tr>
+    <tr><td colspan="4" class="muted">{{ t('暂无映射') }}</td></tr>
     {% endfor %}
   </table>
   </div>
-  <p class="muted">完整关系数据可见于 <a href="/panel/indicators/relations">关系 Relations</a> 页。The full relation data is on the Relations page.</p>
+  <p class="muted">{{ t('完整关系数据可见于') }} <a href="/panel/indicators/relations">{{ t('关系页') }}</a></p>
 </noscript>
 
 {#- Vendored zero-build graph library from the panel's same-origin static

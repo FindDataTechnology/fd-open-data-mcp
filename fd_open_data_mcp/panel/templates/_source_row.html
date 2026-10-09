@@ -1,20 +1,20 @@
   <tr>
     <td><a href="/panel/sources/{{ s.source }}">{{ s.source }}</a>
-      {% if s.kind == 'federated' %}<span class="badge running" title="联邦成员 federated member — runner 声明触发 triggers by runner declaration">联邦 fed</span>{% endif %}
-      {% if s.frozen_reason %}<span class="badge refused" title="冻结 frozen: {{ s.frozen_reason }}">❄ 冻结 frozen</span>{% endif %}
-      {% if s.stalled %}<span class="warn-text" title="已点亮但超过 7 天无运行记录 lit but no run in >7 days">⚠ 停滞 stalled</span>{% endif %}</td>
+      {% if s.kind == 'federated' %}<span class="badge running" title="{{ t('联邦成员 federated member — runner 声明触发 triggers by runner declaration') }}">{{ t('联邦 fed') }}</span>{% endif %}
+      {% if s.frozen_reason %}<span class="badge refused" title="{{ t('冻结 frozen') }}: {{ s.frozen_reason }}">{{ t('❄ 冻结 frozen') }}</span>{% endif %}
+      {% if s.stalled %}<span class="warn-text" title="{{ t('已点亮但超过 7 天无运行记录 lit but no run in >7 days') }}">{{ t('⚠ 停滞 stalled') }}</span>{% endif %}</td>
     <td class="muted">{{ s.site or '—' }}</td>
-    <td>{% if s.schedule %}<code>{{ s.schedule }}</code>{% else %}<span class="muted">未点亮 not lit</span>{% endif %}</td>
-    <td><span class="badge {{ 'success' if s.enabled else 'refused' }}">{{ '启用 ON' if s.enabled else '停用 OFF' }}</span></td>
-    <td>{% if s.last_run_status %}<span class="badge {{ s.last_run_status }}">{{ s.last_run_status }}</span>{% else %}<span class="muted">从未运行 never ran</span>{% endif %}</td>
-    <td class="muted">{{ s.last_run_at or '—' }}</td>
+    <td>{% if s.schedule %}<span title="{{ s.schedule }}">{{ fmt_cron(s.schedule) }}</span>{% else %}<span class="muted">{{ t('未点亮 not lit') }}</span>{% endif %}</td>
+    <td><span class="badge {{ 'success' if s.enabled else 'refused' }}">{{ t('启用 ON') if s.enabled else t('停用 OFF') }}</span></td>
+    <td>{% if s.last_run_status %}<span class="badge {{ s.last_run_status }}">{{ s.last_run_status }}</span>{% else %}<span class="muted">{{ t('从未运行 never ran') }}</span>{% endif %}</td>
+    <td class="muted">{{ fmt_ts(s.last_run_at) or '—' }}</td>
     <td>{{ s.last_run_rows if s.last_run_rows is not none else '—' }}</td>
-    <td>{% if s.pending %}<span class="badge running">{{ s.pending }} 待运行 pending</span>{% else %}<span class="muted">—</span>{% endif %}</td>
+    <td>{% if s.pending %}<span class="badge running">{{ s.pending }} {{ t('待运行 pending') }}</span>{% else %}<span class="muted">—</span>{% endif %}</td>
     <td>
       <button type="button" class="link"
-              title="写入 pending_runs，由站点 dispatcher 认领执行 queues a pending_runs row for the site dispatcher"
+              title="{{ t('写入 pending_runs，由站点 dispatcher 认领执行 queues a pending_runs row for the site dispatcher') }}"
               hx-post="/panel/sources/{{ s.source }}/trigger"
-              hx-target="closest tr" hx-swap="outerHTML">立即触发 trigger</button>
-      <noscript><form class="inline-form" method="post" action="/panel/sources/{{ s.source }}/trigger"><button class="link" type="submit">立即触发 trigger</button></form></noscript>
+              hx-target="closest tr" hx-swap="outerHTML">{{ t('立即触发 trigger') }}</button>
+      <noscript><form class="inline-form" method="post" action="/panel/sources/{{ s.source }}/trigger"><button class="link" type="submit">{{ t('立即触发 trigger') }}</button></form></noscript>
     </td>
   </tr>

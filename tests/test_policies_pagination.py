@@ -33,7 +33,7 @@ class TestPoliciesPagination:
         assert len(_re.findall(r'href="/panel/policies/\d+"', r.text)) == 50   # one name link per row
         assert "120 条 policies" in r.text
         assert "第 1/3 页" in r.text
-        assert "下一页 Next" in r.text and "上一页 Prev" not in r.text
+        assert "下一页 ›</a>" in r.text and "上一页" not in r.text
 
     def test_page_two_offsets(self, session):
         from fd_open_data_mcp.panel.app import app

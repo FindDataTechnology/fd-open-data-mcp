@@ -44,7 +44,9 @@ def test_save_list_toggle_delete_roundtrip(session):
     client.post(f"/panel/policies/{pid}/toggle")
     disabled = [p for p in _policies() if p["id"] == pid]
     assert disabled[0]["enabled"] is False
-    assert "OFF" in client.get("/panel/policies").text
+    # panel-rbac-i18n-refresh 4.3: the badge renders single-locale, so the
+    # zh page carries the zh half only (en half pinned in test_i18n_policies)
+    assert "停用" in client.get("/panel/policies").text
     client.post(f"/panel/policies/{pid}/delete")
     assert all(p["id"] != pid for p in _policies())
 
@@ -55,7 +57,7 @@ def test_estimate_partial(session):
         "mode": "per_date", "date_policy_mode": "since_last",
         "cron_expr": "0 6 * * *", "timezone": "UTC"})
     assert r.status_code == 200
-    assert "fetches" in r.text
+    assert "抓取" in r.text  # zh half (single-locale render, 4.3); en "fetches" in test_i18n_policies
 
 
 def test_panel_token_gate(session, monkeypatch):
@@ -77,14 +79,16 @@ def test_panel_token_gate(session, monkeypatch):
 def test_home_renders_sections_and_polling(session):
     r = client.get("/panel")
     assert r.status_code == 200
-    for marker in ("Fleet", "Running runs", "Next up", "Recent finished"):
+    # single-language chrome (panel-rbac-i18n-refresh): zh page carries
+    # zh only; the English halves render under the en locale
+    for marker in ("舰队", "运行中的爬取", "接下来", "最近完成"):
         assert marker in r.text
     # every section polls its partial
     for p in ("running", "recent", "fleet", "next"):
         assert f"/panel/partials/{p}" in r.text
     assert f"every {15}s" in r.text
     # no runs at all → the suspended/quiet scheduler banner shows
-    assert "No run has started" in r.text
+    assert "调度器静默" in r.text  # single-locale banner
     # / redirects to the home
     assert client.get("/", follow_redirects=False).headers["location"] == "/panel"
 
@@ -104,7 +108,7 @@ def test_home_banner_silent_when_recent_run(session):
         s.commit()
     finally:
         s.close()
-    assert "No run has started" not in client.get("/panel").text
+    assert "调度器静默" not in client.get("/panel").text
 
 
 def test_partials_return_fragments(session, monkeypatch):
