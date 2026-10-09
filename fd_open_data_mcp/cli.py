@@ -141,10 +141,19 @@ def serve_cmd(transport, host, port):
 @click.option("--port", default=8000, show_default=True)
 def panel_cmd(host, port):
     """Serve the crawl control-center panel (add-fund-crawl-control-center)."""
+    import logging
+
     import uvicorn
 
     from fd_open_data_mcp.panel.app import app
 
+    # The panel's background work (coverage refresh, pre-arm) reports at INFO;
+    # without a root handler those lines were dropped and the loops ran dark
+    # (2026-10-09: pre-arm evidence was unfindable in the pod logs). Same
+    # convention as the package's other entry points.
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     uvicorn.run(app, host=host, port=port)
 
 
