@@ -998,6 +998,12 @@ class CrawlSource(Base):
     # crawl_sources is a few dozen rows, a seq scan beats an index.
     site = Column(Text, ForeignKey("crawl_sites.id"), nullable=True)
     schedule = Column(Text, nullable=True)            # NULL = 未点亮
+    # Per-source timezone the ``schedule`` cron is matched in (0009). NULL =
+    # UTC, the historical default the whole fleet is calibrated to; a source
+    # whose window only works at a local hour (login-gated crawls needing a
+    # human at the keyboard) sets e.g. 'Asia/Shanghai'. An unknown/invalid tz
+    # degrades to UTC (never raises).
+    schedule_tz = Column(Text, nullable=True)
     enabled = Column(Boolean, nullable=False, default=True, server_default=true())
     last_commit = Column(Text, nullable=True)
     # session-pool: the source's login profile (spiders/<source>/login.py
@@ -1030,6 +1036,7 @@ class CrawlSource(Base):
     def toDict(self) -> dict:
         return {
             "source": self.source, "site": self.site, "schedule": self.schedule,
+            "schedule_tz": self.schedule_tz,
             "enabled": self.enabled, "last_commit": self.last_commit,
             "auth_profile": self.auth_profile,
             "kind": self.kind, "runner_image": self.runner_image,

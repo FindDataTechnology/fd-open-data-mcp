@@ -90,7 +90,9 @@ def _matrix() -> str:
 def test_auth_page_shell_polling_and_station_note(session):
     page = client.get("/panel/auth").text
     assert "认证身份池" in page and "Auth identities" in page
-    # the shell carries the polled region; the page itself never queries
+    # the shell carries the polled region; the page queries only the standing
+    # alert summary (prearm-login-station: the banner must be visible on the
+    # first paint, before any partial swap) — everything else polls
     assert 'hx-get="/panel/partials/auth"' in page
     assert "every 15s" in page
     # logins happen on a login station launched FROM this panel, completed in

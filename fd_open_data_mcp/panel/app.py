@@ -383,13 +383,64 @@ async def _coverage_refresh_loop() -> None:
         await asyncio.sleep((nxt - now).total_seconds())
 
 
+async def _prearm_loop() -> None:
+    """Background 预拉起 pre-arm pass (change prearm-login-station).
+
+    Every FD_PREARM_INTERVAL_SECONDS (default 300) the Console asks
+    ``station_ops.prearm_tick`` whether any scheduled authenticated source is
+    due soon with a stale/missing identity, and if so opens its login station —
+    so the operator finds the observation window already open instead of
+    discovering a dead session when the schedule fires (2026-10-09: the 03:10
+    rmfyalk run failed 'auth pool dry' while everyone slept).
+
+    Runs in the panel process because only the panel can reach the station
+    cluster (the station-launcher Role rides the fd-panel service account).
+    The panel runs single-replica (replicas=1), so no cross-instance dedupe is
+    needed: one loop, one pass, no lock. DB work runs in a worker thread; a
+    failing pass is logged and the loop continues — pre-arm is a convenience
+    over the manual launch path, never a reason to take the panel down.
+    """
+    if os.environ.get("FD_PREARM_ENABLED", "1").strip() == "0":
+        logger.info("prearm: disabled by FD_PREARM_ENABLED=0")
+        return
+    interval = station_ops.prearm_interval_seconds()
+    logger.info("prearm: loop started (every %ds)", interval)
+    while True:
+        await asyncio.sleep(interval)
+        try:
+            def _run() -> list[dict]:
+                s = _session()
+                try:
+                    return station_ops.prearm_tick(s, client=_station_client())
+                finally:
+                    s.close()
+            launched = await asyncio.to_thread(_run)
+            if launched:
+                logger.info(
+                    "prearm: launched %d station(s): %s", len(launched),
+                    ", ".join(f"{x.get('source')}/{x.get('account_alias')}"
+                              f"#{x.get('station_id')}" for x in launched))
+            else:
+                logger.info("prearm: no station needed this pass")
+        except Exception:
+            logger.exception("prearm: pass failed; continuing")
+
+
 def create_app() -> FastAPI:
     @asynccontextmanager
     async def _lifespan(app: FastAPI):
-        task = asyncio.get_running_loop().create_task(
-            _coverage_refresh_loop())
+        tasks = [asyncio.get_running_loop().create_task(
+            _coverage_refresh_loop())]
+        # Tests must never start the pre-arm loop (it would reach for a
+        # cluster and a real database on every TestClient startup).
+        if (os.environ.get("FD_PREARM_DISABLE_TESTS") == "1"
+                or "PYTEST_CURRENT_TEST" in os.environ):
+            logger.info("prearm: loop not started (test environment)")
+        else:
+            tasks.append(asyncio.get_running_loop().create_task(_prearm_loop()))
         yield
-        task.cancel()
+        for task in tasks:
+            task.cancel()
 
     app = FastAPI(title="Crawl Control Center", lifespan=_lifespan)
     app.mount("/panel/static", StaticFiles(directory=str(HERE / "static")),
@@ -1186,20 +1237,36 @@ def create_app() -> FastAPI:
     # The Console login操作面 (login-station-console 3.3): the identity x
     # health matrix with one-click login-station launch, the login-required
     # queue, the event stream, multi-account registration and the station
-    # board. The page shell never queries; the polled partial carries the data
-    # and degrades independently. Logins happen ON the login station — this
-    # surface orchestrates and observes (spec authenticated-crawling).
+    # board. The page shell carries the standing alert summary (it must be
+    # visible on the first paint) and nothing else; the polled partial carries
+    # the data and degrades independently. Logins happen ON the login station —
+    # this surface orchestrates and observes (spec authenticated-crawling).
     @app.get("/panel/auth", response_class=HTMLResponse)
     def auth_page(request: Request):
+        """The auth console shell. The alert summary is computed here too so a
+        standing banner is visible the moment the page paints (the polled
+        partial then owns it inside the same swap region); a database hiccup
+        degrades to no banner, never a 500 shell."""
+        try:
+            s = _session()
+            try:
+                auth_alert = station_ops.auth_alert_summary(s)
+            finally:
+                s.close()
+        except Exception as e:  # noqa: BLE001 - the shell must still render
+            logger.warning("auth page: alert summary unavailable: %s", e)
+            auth_alert = None
         return templates.TemplateResponse(
-            request, "auth.html", {"poll_seconds": POLL_SECONDS})
+            request, "auth.html",
+            {"poll_seconds": POLL_SECONDS, "auth_alert": auth_alert})
 
     @app.get("/panel/partials/auth", response_class=HTMLResponse)
     def partial_auth(request: Request):
         """Polled auth panel: identity matrix grouped by source, the
         login-required queue and the latest identity events (15s, degrades
         like every home partial); login-station board + registration sources
-        ride along (login-station-console 3.3)."""
+        ride along (login-station-console 3.3). The standing alert banner
+        (prearm-login-station: 需登录 / 会话可能已过期) rides at the top."""
         try:
             s = _session()
             try:
@@ -1210,6 +1277,7 @@ def create_app() -> FastAPI:
                     s.query(CrawlSource.source, CrawlSource.auth_profile).all())
                 stations = station_ops.station_status(s, limit=10)
                 egresses = station_ops.selectable_egresses(s)
+                auth_alert = station_ops.auth_alert_summary(s)
                 station_sources = [
                     {"source": r.source, "auth_profile": r.auth_profile}
                     for r in (s.query(CrawlSource)
@@ -1229,7 +1297,7 @@ def create_app() -> FastAPI:
                 request, "partial_auth.html",
                 {"groups": groups, "queue": queue, "events": events,
                  "stations": stations, "station_sources": station_sources,
-                 "egresses": egresses,
+                 "egresses": egresses, "auth_alert": auth_alert,
                  "summary": {
                      "total": len(pool),
                      "active": sum(1 for r in pool if r["status"] == "active"),

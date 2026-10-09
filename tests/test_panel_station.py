@@ -171,6 +171,90 @@ def test_partial_renders_egress_picker(session):
     assert "u:sekret" not in r.text      # credentials never render
 
 
+# ── standing auth alert banner (prearm-login-station piece 3) ───────────────
+def test_auth_page_shows_standing_alert_banner(session, monkeypatch):
+    """A login-required identity plus a stale active one must produce a
+    STANDING banner on /panel/auth — not a transient toast: the operator who
+    was asleep when the session died still sees it at a glance."""
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    _ident("rmfyalk", "acct001", "login_required")
+    _ident("rmfyalk", "acct002", "active")   # never probed -> stale
+
+    monkeypatch.setenv("PANEL_TOKEN", "sekret")
+    from importlib import reload
+
+    gated = TestClient(reload(appmod).app)
+    try:
+        ok = {"X-Panel-Token": "sekret"}
+        page = gated.get("/panel/auth", headers=ok)
+        assert page.status_code == 200
+        assert "1 个身份需登录" in page.text
+        assert "1 个身份会话可能已过期" in page.text
+        assert "点下方「登录 login」拉起登录站" in page.text
+        # the English second line rides along
+        assert "may have an expired session" in page.text
+        # the polled partial carries the same banner (it stays current)
+        part = gated.get("/panel/partials/auth", headers=ok)
+        assert part.status_code == 200
+        assert "1 个身份需登录" in part.text
+        # banner sits at the top, ahead of the summary badges
+        assert part.text.index("个身份需登录") < part.text.index("身份 identities")
+    finally:
+        monkeypatch.undo()
+        reload(appmod)
+
+
+def test_auth_page_has_no_alert_banner_when_all_healthy(session):
+    _source("rmfyalk", auth_profile="rmfyalk-login")
+    _ident("rmfyalk", "acc-a", "active",
+           last_probe_at=dt.datetime.now(dt.timezone.utc))
+    r = client.get("/panel/auth")
+    assert r.status_code == 200
+    assert "个身份需登录" not in r.text
+    assert "个身份会话可能已过期" not in r.text
+    assert client.get("/panel/partials/auth").text.count("个身份需登录") == 0
+
+
+# ── background 预拉起 pre-arm loop ──────────────────────────────────────────
+def test_prearm_loop_runs_a_pass_and_continues(session, monkeypatch):
+    """The loop must call prearm_tick every interval, log, and survive a
+    failing pass (a cluster hiccup must never kill the background task)."""
+    calls: list[int] = []
+
+    def fake_tick(s, now=None, client=None):
+        calls.append(len(calls) + 1)
+        if len(calls) == 1:
+            raise RuntimeError("cluster hiccup")   # first pass fails
+        return [{"source": "rmfyalk", "account_alias": "acct001",
+                 "station_id": 1, "status": "launched"}]
+
+    monkeypatch.setattr(station_ops, "prearm_tick", fake_tick)
+    monkeypatch.setattr(station_ops, "prearm_interval_seconds", lambda: 0)
+    monkeypatch.setenv("FD_PREARM_ENABLED", "1")
+
+    async def run() -> None:
+        task = asyncio.get_running_loop().create_task(appmod._prearm_loop())
+        for _ in range(200):
+            await asyncio.sleep(0.01)
+            if len(calls) >= 2:
+                break
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    asyncio.run(run())
+    assert len(calls) >= 2
+
+
+def test_prearm_loop_disabled_by_env(monkeypatch):
+    monkeypatch.setenv("FD_PREARM_ENABLED", "0")
+    called = []
+    monkeypatch.setattr(station_ops, "prearm_tick",
+                        lambda *a, **k: called.append(1) or [])
+    asyncio.run(appmod._prearm_loop())     # returns immediately, never loops
+    assert called == []
+
+
 # ── new-account form ────────────────────────────────────────────────────────
 def test_new_account_form_registers_identity_with_egress(session):
     _source("rmfyalk", auth_profile="rmfyalk-login")

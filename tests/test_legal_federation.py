@@ -79,7 +79,9 @@ def mig8():
 
 def test_revision_wiring(mig, mig8):
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0008_federation_runner_env"
+    assert script.get_current_head() == "0009_source_schedule_tz"
+    assert script.get_revision("0009_source_schedule_tz").down_revision == (
+        "0008_federation_runner_env")
     assert script.get_revision("0008_federation_runner_env").down_revision == (
         "0007_legal_federation")
     assert script.get_revision("0007_legal_federation").down_revision == (
@@ -353,6 +355,74 @@ def test_0008_downgrade_drops_only_the_column(mig8):
     bind = _run_on_fake_pg(mig8, fn="downgrade")
     assert bind.statements == [
         "ALTER TABLE crawl_sources DROP COLUMN IF EXISTS runner_env_from"]
+
+
+# ---------------------------------------------------------------------------
+# 0009_source_schedule_tz: the per-source schedule timezone column
+# ---------------------------------------------------------------------------
+
+REVISION_0009_PATH = ALEMBIC_DIR / "versions" / "0009_source_schedule_tz.py"
+
+
+@pytest.fixture(scope="module")
+def mig9():
+    return _load_revision(REVISION_0009_PATH, "mig_0009")
+
+
+def test_0009_upgrade_and_downgrade_are_noop_on_sqlite(mig9, monkeypatch):
+    engine, conn, executed = _sqlite_ops(monkeypatch, mig9)
+    try:
+        mig9.upgrade()
+        mig9.downgrade()
+        assert executed == [], "must not touch a non-postgresql database"
+    finally:
+        conn.close()
+        engine.dispose()
+
+
+def test_0009_guard_returns_before_any_sql(mig9):
+    broken = types.SimpleNamespace(
+        dialect=types.SimpleNamespace(name="mysql"),
+        exec_driver_sql=lambda *_: pytest.fail("guard must return before any SQL"),
+    )
+    original = mig9.op
+    mig9.op = types.SimpleNamespace(get_bind=lambda: broken)
+    try:
+        mig9.upgrade()
+        mig9.downgrade()
+    finally:
+        mig9.op = original
+
+
+def test_0009_adds_the_schedule_tz_column(mig9):
+    """Guarded ADD COLUMN, no backfill: NULL is the historical UTC semantics
+    every existing source is calibrated to, so there is nothing to write."""
+    bind = _run_on_fake_pg(mig9)
+    assert bind.statements == [
+        "ALTER TABLE crawl_sources ADD COLUMN IF NOT EXISTS schedule_tz TEXT"]
+    assert not any("UPDATE" in s for s in bind.statements)
+
+
+def test_0009_replay_is_idempotent_by_construction(mig9):
+    first = _run_on_fake_pg(mig9).statements
+    second = _run_on_fake_pg(mig9).statements
+    assert first == second
+
+
+def test_0009_downgrade_drops_only_the_column(mig9):
+    bind = _run_on_fake_pg(mig9, fn="downgrade")
+    assert bind.statements == [
+        "ALTER TABLE crawl_sources DROP COLUMN IF EXISTS schedule_tz"]
+
+
+def test_schedule_tz_column_matches_the_dispatcher_ddl(mig9):
+    """One shape, two writers: the column this chain adds is character-equal
+    to the dispatcher's out-of-band DDL (fd-industry-data/dispatch.py), which
+    is why the guarded add is a no-op on production."""
+    dispatcher_ddl = (
+        "ALTER TABLE crawl_sources ADD COLUMN IF NOT EXISTS schedule_tz text")
+    ours = mig9._DDL[0]
+    assert ours.lower() == dispatcher_ddl.lower()
 
 
 # ---------------------------------------------------------------------------

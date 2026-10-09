@@ -3,9 +3,10 @@
 Covers station_ops on the per-test sqlite fixture: the egress allocator
 (distinct egress per account, healthy-only, same-source exclusion, least-used,
 idempotent rebind), the station row state machine (launching ->
-waiting_operator -> timeout backstop / reclaim), and the Job/Service manifests
+waiting_operator -> timeout backstop / reclaim), the Job/Service manifests
 against a FakeStationClient — the injectable boundary at which tests stop: no
-k8s API, no pod, nothing really launched.
+k8s API, no pod, nothing really launched — and the 预拉起 pre-arm planner /
+executor plus the standing auth-alert summary (change prearm-login-station).
 """
 from __future__ import annotations
 
@@ -62,14 +63,17 @@ class FakeStationClient:
 
 
 # ── seed helpers ────────────────────────────────────────────────────────────
-def _source(name, site="tencent", auth_profile=None) -> str:
+def _source(name, site="tencent", auth_profile=None, schedule="0 6 * * *",
+            enabled=True, **kw) -> str:
+    """One crawl_sources row (site adopted if needed). Extra kwargs land on the
+    row — the pre-arm tests use them for schedule_tz/kind/last_commit."""
     s = get_database().get_session()
     try:
         if s.get(CrawlSite, site) is None:
             s.add(CrawlSite(id=site, enabled=True))
         if s.get(CrawlSource, name) is None:
-            s.add(CrawlSource(source=name, site=site, schedule="0 6 * * *",
-                              enabled=True, auth_profile=auth_profile))
+            s.add(CrawlSource(source=name, site=site, schedule=schedule,
+                              enabled=enabled, auth_profile=auth_profile, **kw))
         s.commit()
         return name
     finally:
@@ -324,7 +328,8 @@ def test_create_station_job_and_service_spec(session):
 
     js = job["spec"]
     assert js["backoffLimit"] == 0                       # failure is an event, not a retry
-    assert js["activeDeadlineSeconds"] == 1500           # the hard deadline
+    assert js["activeDeadlineSeconds"] == \
+        station_ops.station_deadline_seconds()           # the hard deadline (60 min default)
     assert js["template"]["spec"]["restartPolicy"] == "Never"
 
     # the runtime contract: login_station.py --station <src> <alias> in /content
@@ -356,7 +361,8 @@ def test_create_station_job_and_service_spec(session):
     assert env["PLATFORM_SESSION_KEY"]["valueFrom"]["secretKeyRef"]["name"] == \
         "platform-session-key"
     assert env["STATION_ID"]["value"] == str(sid)
-    assert env["FD_STATION_DEADLINE_SECONDS"]["value"] == "1500"
+    assert env["FD_STATION_DEADLINE_SECONDS"]["value"] == \
+        str(station_ops.station_deadline_seconds())
     assert env["FD_SCHEMA_MANAGED"]["value"] == "1"
     assert env["FD_CONTENT_DIR"]["value"] == "/content/spiders"
     assert env["PROXY_URL"]["value"] == "http://user:pw@10.0.0.7:3128"
@@ -370,13 +376,13 @@ def test_create_station_job_and_service_spec(session):
     assert service["spec"]["ports"] == [{"name": "vnc", "port": 6080,
                                          "targetPort": 6080}]
 
-    # the row: launching -> waiting_operator, deadline = now + 25min, egress recorded
+    # the row: launching -> waiting_operator, deadline = now + the window, egress recorded
     s = get_database().get_session()
     try:
         row = s.get(CrawlLoginStation, sid)
         assert row.status == "waiting_operator"
         assert station_ops._as_aware(row.deadline_at) == \
-            NOW + dt.timedelta(seconds=1500)
+            NOW + dt.timedelta(seconds=station_ops.station_deadline_seconds())
         assert row.proxy_url == "http://user:pw@10.0.0.7:3128"
     finally:
         s.close()
@@ -459,14 +465,15 @@ def test_create_station_requires_an_identity(session):
 def test_station_status_timeout_backstop(session):
     iid = _ident("rmfyalk", "acc-t")
     sid = _station(iid, "rmfyalk", "acc-t", status="waiting_operator",
-                   deadline=NOW + dt.timedelta(seconds=1500))
+                   deadline=NOW + dt.timedelta(
+                       seconds=station_ops.station_deadline_seconds()))
 
     # in flight before the deadline
     rows = station_ops.station_status(session, now=NOW)
     assert rows[0]["status"] == "waiting_operator" and rows[0]["live"]
 
     # one second past it: closed as timeout, finished_at set, evented
-    late = NOW + dt.timedelta(seconds=1501)
+    late = NOW + dt.timedelta(seconds=station_ops.station_deadline_seconds() + 1)
     rows = station_ops.station_status(session, now=late)
     assert rows[0]["status"] == "timeout" and not rows[0]["live"]
     s = get_database().get_session()
@@ -582,3 +589,285 @@ def test_reclaim_unknown_station(session):
     fake = FakeStationClient()
     out = station_ops.reclaim_station(session, 999, client=fake, now=NOW)
     assert out["status"] == "not_found"
+
+
+# ── station window: FD_STATION_DEADLINE_SECONDS (25 min was too short) ──────
+def test_station_deadline_seconds_default_and_override(monkeypatch):
+    monkeypatch.delenv("FD_STATION_DEADLINE_SECONDS", raising=False)
+    assert station_ops.STATION_DEADLINE_SECONDS == 3600      # 60 min default
+    assert station_ops.station_deadline_seconds() == 3600
+
+    monkeypatch.setenv("FD_STATION_DEADLINE_SECONDS", "2700")
+    assert station_ops.station_deadline_seconds() == 2700
+
+    # garbage/blank/zero degrade to the default — a typo must never disarm
+    # the window (the operator would silently lose their login time)
+    for bad in ("nonsense", "", "  ", "0", "-5", "12.5"):
+        monkeypatch.setenv("FD_STATION_DEADLINE_SECONDS", bad)
+        assert station_ops.station_deadline_seconds() == 3600, bad
+
+
+# ── 预拉起 pre-arm: the planner ─────────────────────────────────────────────
+# 2026-09-26 is a Saturday; 19:00 UTC = 2026-09-27 03:00 Beijing, so a
+# '10 3 * * *' Asia/Shanghai schedule fires 10 minutes later at 19:10 UTC.
+PREARM_NOW = dt.datetime(2026, 9, 26, 19, 0, 0, tzinfo=dt.timezone.utc)
+
+
+def test_prearm_plan_skips_when_identity_is_fresh(session):
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    _ident("rmfyalk", "acct001", "active",
+           last_probe_at=PREARM_NOW - dt.timedelta(hours=1))
+
+    assert station_ops.prearm_plan(session, now=PREARM_NOW) == []
+
+
+def test_prearm_plan_flags_stale_identity_before_the_fire(session):
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    iid = _ident("rmfyalk", "acct001", "active",
+                 last_probe_at=PREARM_NOW - dt.timedelta(hours=7))
+
+    plan = station_ops.prearm_plan(session, now=PREARM_NOW)
+
+    assert len(plan) == 1
+    assert plan[0]["source"] == "rmfyalk"
+    assert plan[0]["account_alias"] == "acct001"
+    assert plan[0]["minutes"] == 10
+    assert plan[0]["next_fire"].startswith("2026-09-26T19:10")
+    assert plan[0]["reason"] == "stale or missing identity"
+
+
+def test_prearm_plan_skips_profiles_without_any_identity(session):
+    # no identity rows at all: registration is a deliberate human act
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    assert station_ops.prearm_plan(session, now=PREARM_NOW) == []
+
+
+def test_prearm_plan_skips_when_a_station_is_already_open(session):
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    _station(iid, "rmfyalk", "acct001", status="waiting_operator",
+             deadline=PREARM_NOW + dt.timedelta(minutes=30))
+
+    assert station_ops.prearm_plan(session, now=PREARM_NOW) == []
+    # ...but a terminal station does not block a fresh pre-arm
+    s = get_database().get_session()
+    try:
+        s.get(CrawlLoginStation, 1).status = "completed"
+        s.commit()
+    finally:
+        s.close()
+    assert len(station_ops.prearm_plan(session, now=PREARM_NOW)) == 1
+
+
+def test_prearm_plan_skips_fires_beyond_the_window(session):
+    # 19:00 UTC -> next fire 19:10 (10 min, inside 45); at 18:00 the same fire
+    # is 70 min out, beyond the window
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    _ident("rmfyalk", "acct001", "active",
+           last_probe_at=PREARM_NOW - dt.timedelta(hours=7))
+
+    early = PREARM_NOW - dt.timedelta(hours=1)
+    assert station_ops.prearm_plan(session, now=early) == []
+    assert len(station_ops.prearm_plan(session, now=PREARM_NOW)) == 1
+
+
+def test_prearm_plan_picks_the_most_recently_logged_in_alias(session):
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    _ident("rmfyalk", "old", "active",
+           last_login_at=PREARM_NOW - dt.timedelta(days=30),
+           last_probe_at=PREARM_NOW - dt.timedelta(days=1))
+    _ident("rmfyalk", "recent", "active",
+           last_login_at=PREARM_NOW - dt.timedelta(days=2),
+           last_probe_at=PREARM_NOW - dt.timedelta(days=1))
+
+    plan = station_ops.prearm_plan(session, now=PREARM_NOW)
+    assert [p["account_alias"] for p in plan] == ["recent"]
+
+
+def test_prearm_plan_ignores_unrunnable_and_unauthenticated_sources(session):
+    # no auth_profile: anonymous, nothing to log in
+    _source("anon-src", schedule="10 3 * * *", schedule_tz="Asia/Shanghai")
+    # auth_profile but no mirror/runner declaration: the dispatcher cannot run it
+    _source("unlit-src", auth_profile="unlit", schedule="10 3 * * *",
+            schedule_tz="Asia/Shanghai", kind="platform", last_commit=None)
+    # disabled
+    _source("off-src", auth_profile="off", schedule="10 3 * * *",
+            schedule_tz="Asia/Shanghai", kind="platform", last_commit="abc",
+            enabled=False)
+    # unlit (schedule NULL)
+    _source("dark-src", auth_profile="dark", schedule=None,
+            kind="platform", last_commit="abc")
+    for profile in ("anon-src", "unlit", "off", "dark"):
+        _ident(profile, "acct", "login_required")
+
+    assert station_ops.prearm_plan(session, now=PREARM_NOW) == []
+
+
+def test_prearm_plan_defaults_to_utc_when_schedule_tz_is_null(session):
+    # schedule '0 19 * * *' with no tz = 19:00 UTC; at 18:30 the fire is 30 min
+    # out (inside the 45-min window)
+    _source("utc-src", auth_profile="utc-prof", schedule="0 19 * * *",
+            kind="platform", last_commit="abc")
+    _ident("utc-prof", "acct", "login_required")
+
+    now = dt.datetime(2026, 9, 26, 18, 30, tzinfo=dt.timezone.utc)
+    plan = station_ops.prearm_plan(session, now=now)
+    assert [p["source"] for p in plan] == ["utc-prof"]
+    assert plan[0]["minutes"] == 30
+
+
+def test_prearm_plan_opens_one_station_per_profile(session):
+    """Two sources sharing one auth_profile are one login unit: a single
+    station serves both, so the plan must not emit (and the tick must not
+    launch) two stations for the same account."""
+    _source("case-crawl", auth_profile="shared", schedule="10 3 * * *",
+            schedule_tz="Asia/Shanghai", kind="federated",
+            runner_command=["node", "bin/x.mjs"])
+    _source("bulk-crawl", auth_profile="shared", schedule="10 3 * * *",
+            schedule_tz="Asia/Shanghai", kind="federated",
+            runner_command=["node", "bin/y.mjs"])
+    _ident("shared", "acct001", "login_required")
+    fake = FakeStationClient()
+
+    plan = station_ops.prearm_plan(session, now=PREARM_NOW)
+    assert [p["source"] for p in plan] == ["shared"]
+    assert len(station_ops.prearm_tick(session, now=PREARM_NOW,
+                                       client=fake)) == 1
+    assert len(fake.manifests("Job")) == 1
+
+
+def test_prearm_plan_ignores_a_bad_cron_instead_of_crashing(session):
+    _source("bad-cron", auth_profile="bad", schedule="not a cron",
+            kind="platform", last_commit="abc")
+    _ident("bad", "acct", "login_required")
+    assert station_ops.prearm_plan(session, now=PREARM_NOW) == []
+
+
+# ── 预拉起 pre-arm: the executor ────────────────────────────────────────────
+def test_prearm_tick_launches_station_for_stale_identity(session, monkeypatch):
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    _proxy(ip="10.0.0.1")
+    iid = _ident("rmfyalk", "acct001", "active",
+                 last_probe_at=PREARM_NOW - dt.timedelta(hours=7))
+    fake = FakeStationClient()
+
+    out = station_ops.prearm_tick(session, now=PREARM_NOW, client=fake)
+
+    assert len(out) == 1
+    assert out[0]["status"] == "launched"
+    assert out[0]["source"] == "rmfyalk"
+    assert out[0]["account_alias"] == "acct001"
+    assert out[0]["station_id"] == 1
+    assert len(fake.manifests("Job")) == 1 and len(fake.manifests("Service")) == 1
+    s = get_database().get_session()
+    try:
+        st = s.get(CrawlLoginStation, 1)
+        assert st.status == "waiting_operator"          # FakeStationClient succeeds
+        assert st.account_alias == "acct001"
+        assert st.deadline_at is not None
+        # ensure_identity_with_egress reset the identity to login_required
+        assert s.get(CrawlIdentity, iid).status == "login_required"
+    finally:
+        s.close()
+    # the pre-arm launch is on the audit trail
+    assert any("login station #1 launched" in d for d in _events(iid))
+
+
+def test_prearm_tick_does_nothing_for_a_fresh_identity(session, monkeypatch):
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    _ident("rmfyalk", "acct001", "active",
+           last_probe_at=PREARM_NOW - dt.timedelta(hours=1))
+    fake = FakeStationClient()
+
+    assert station_ops.prearm_tick(session, now=PREARM_NOW, client=fake) == []
+    assert fake.created == []
+    s = get_database().get_session()
+    try:
+        assert s.query(CrawlLoginStation).count() == 0
+    finally:
+        s.close()
+
+
+def test_prearm_tick_continues_past_one_failing_source(session, monkeypatch):
+    """One source's launch failure must not stop the others: the loop is a
+    convenience and a per-source error is logged, never fatal."""
+    _source("src-a", auth_profile="prof-a", schedule="10 3 * * *",
+            schedule_tz="Asia/Shanghai", kind="platform", last_commit="abc")
+    _source("src-b", auth_profile="prof-b", schedule="10 3 * * *",
+            schedule_tz="Asia/Shanghai", kind="platform", last_commit="abc")
+    _ident("prof-a", "acc-a", "login_required")
+    _ident("prof-b", "acc-b", "login_required")
+    fake = FakeStationClient()
+    real_create = station_ops.create_station
+
+    def flaky_create(s, source, alias, client=None, now=None):
+        if source == "prof-a":
+            raise RuntimeError("kubeconfig exploded")
+        return real_create(s, source, alias, client=client, now=now)
+
+    monkeypatch.setattr(station_ops, "create_station", flaky_create)
+    out = station_ops.prearm_tick(session, now=PREARM_NOW, client=fake)
+
+    assert [x["source"] for x in out] == ["prof-b"]
+    assert len(fake.manifests("Job")) == 1
+
+
+# ── the standing alert summary (piece 3) ────────────────────────────────────
+def test_auth_alert_summary_counts_login_required_and_stale(session):
+    _ident("rmfyalk", "needs-login", "login_required")
+    _ident("rmfyalk", "stale", "active",
+           last_probe_at=NOW - dt.timedelta(hours=7))
+    _ident("rmfyalk", "fresh", "active",
+           last_probe_at=NOW - dt.timedelta(hours=1))
+
+    assert station_ops.auth_alert_summary(session, now=NOW) == \
+        {"login_required": 1, "stale": 1, "total": 3}
+
+
+def test_auth_alert_summary_counts_never_probed_active_as_stale(session):
+    # an active identity that was never probed is the same risk as an old probe
+    _ident("rmfyalk", "never-probed", "active")
+    _ident("rmfyalk", "banned", "banned")
+
+    assert station_ops.auth_alert_summary(session, now=NOW) == \
+        {"login_required": 0, "stale": 1, "total": 2}
+    assert station_ops.auth_alert_summary(session, now=NOW)["stale"] == 1
+
+
+def test_auth_alert_summary_respects_fresh_hours_env(session, monkeypatch):
+    _ident("rmfyalk", "probed-3h-ago", "active",
+           last_probe_at=NOW - dt.timedelta(hours=3))
+    assert station_ops.auth_alert_summary(session, now=NOW)["stale"] == 0
+    monkeypatch.setenv("FD_PREARM_FRESH_HOURS", "2")
+    assert station_ops.auth_alert_summary(session, now=NOW)["stale"] == 1
+
+
+def test_prearm_env_overrides(monkeypatch):
+    monkeypatch.delenv("FD_PREARM_MINUTES", raising=False)
+    monkeypatch.delenv("FD_PREARM_FRESH_HOURS", raising=False)
+    assert station_ops.prearm_minutes() == 45
+    assert station_ops.prearm_fresh_hours() == 6
+    monkeypatch.setenv("FD_PREARM_MINUTES", "120")
+    monkeypatch.setenv("FD_PREARM_FRESH_HOURS", "12")
+    assert station_ops.prearm_minutes() == 120
+    assert station_ops.prearm_fresh_hours() == 12
+    monkeypatch.setenv("FD_PREARM_MINUTES", "junk")
+    monkeypatch.setenv("FD_PREARM_FRESH_HOURS", "-1")
+    assert station_ops.prearm_minutes() == 45
+    assert station_ops.prearm_fresh_hours() == 6

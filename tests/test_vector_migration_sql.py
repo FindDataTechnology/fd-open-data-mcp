@@ -63,10 +63,12 @@ def mig():
 # ---------------------------------------------------------------------------
 
 def test_revision_is_new_head_of_shipped_chain():
-    """The shipped head is 0008 (federated runner envFrom); each revision
+    """The shipped head is 0009 (per-source schedule timezone); each revision
     keeps its own down_revision wiring (their contract tests live above)."""
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0008_federation_runner_env"
+    assert script.get_current_head() == "0009_source_schedule_tz"
+    rev9 = script.get_revision("0009_source_schedule_tz")
+    assert rev9.down_revision == "0008_federation_runner_env"
     rev = script.get_revision("0008_federation_runner_env")
     assert rev.down_revision == "0007_legal_federation"
     rev7 = script.get_revision("0007_legal_federation")
@@ -83,6 +85,7 @@ def test_chain_is_linear_head_to_baseline():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0009_source_schedule_tz",
         "0008_federation_runner_env",
         "0007_legal_federation",
         "0006_control_plane_adoption",
@@ -381,6 +384,6 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0008_federation_runner_env"
+    assert version == "0009_source_schedule_tz"
     # Guarded no-op: only the alembic ledger exists; no app tables were built.
     assert tables == {"alembic_version"}

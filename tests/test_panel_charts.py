@@ -129,6 +129,7 @@ def test_home_has_shell_theme_and_toast_hooks(session):
     assert 'id="theme-toggle"' in text
     # toast region for inline-action feedback (design D5)
     assert 'id="toast-region"' in text
-    # tokens stylesheet + no external origins (spec no-build requirement)
-    assert 'href="/panel/static/app.css"' in text
+    # tokens stylesheet + no external origins (spec no-build requirement);
+    # the ?v=<hash> content fingerprint is part of the asset URL (2026-10-08)
+    assert 'href="/panel/static/app.css?v=' in text
     assert "http://" not in text.replace("http://www.w3.org", "")  # svg ns only

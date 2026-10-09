@@ -27,12 +27,14 @@ import logging
 import os
 import re
 import secrets
+from zoneinfo import ZoneInfo
 
+from croniter import croniter
 from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import (
-    CrawlIdentity, CrawlIdentityEvent, CrawlLoginStation, Proxy,
+    CrawlIdentity, CrawlIdentityEvent, CrawlLoginStation, CrawlSource, Proxy,
 )
 
 logger = logging.getLogger(__name__)
@@ -59,10 +61,60 @@ CREATE TABLE IF NOT EXISTS crawl_login_stations (
 
 STATION_NAMESPACE = "fd-mcp"        # ns with the station-launcher Role (SA fd-panel)
 STATION_PORT = 6080                 # station websockify/noVNC port (login_station.py WS_PORT)
-STATION_DEADLINE_SECONDS = 1500     # 25 min: row deadline, Job activeDeadline and runtime backstop
+STATION_DEADLINE_SECONDS = 3600     # 60 min default: row deadline, Job activeDeadline and runtime backstop
 STATION_IMAGE_DEFAULT = "fd-industry-runner:latest"  # placeholder when STATION_IMAGE is unset
 STATION_TERMINAL = ("completed", "failed", "timeout", "reclaimed")
 STATION_OPEN = ("launching", "waiting_operator")
+
+# Pre-arm defaults (change prearm-login-station): how close a scheduled
+# authenticated run must be before the Console opens a login station for it,
+# and how recently an identity must have been probed to count as fresh.
+PREARM_MINUTES_DEFAULT = 45
+PREARM_FRESH_HOURS_DEFAULT = 6
+PREARM_INTERVAL_SECONDS_DEFAULT = 300
+
+
+def _env_int(name: str, default: int) -> int:
+    """Read a positive integer from the environment; unset, blank or garbage
+    degrades to ``default`` (a typo must never disarm the station window or
+    the pre-arm loop)."""
+    raw = os.environ.get(name)
+    if raw is None or not str(raw).strip():
+        return default
+    try:
+        value = int(str(raw).strip())
+    except (TypeError, ValueError):
+        logger.warning("%s=%r is not an integer; using %d", name, raw, default)
+        return default
+    return value if value > 0 else default
+
+
+def station_deadline_seconds() -> int:
+    """Station window (row deadline, Job activeDeadlineSeconds, runtime budget).
+
+    Env FD_STATION_DEADLINE_SECONDS overrides; a 25-min window proved too short
+    for a human to reach the observation view and finish a phone+password login
+    (stations #16-#19, #26 died waiting, 2026-10-08/09)."""
+    return _env_int("FD_STATION_DEADLINE_SECONDS", STATION_DEADLINE_SECONDS)
+
+
+def prearm_minutes() -> int:
+    """Pre-arm horizon: open a login station when a scheduled authenticated
+    source fires within this many minutes (FD_PREARM_MINUTES)."""
+    return _env_int("FD_PREARM_MINUTES", PREARM_MINUTES_DEFAULT)
+
+
+def prearm_fresh_hours() -> int:
+    """An identity counts as fresh while its last probe is younger than this
+    many hours (FD_PREARM_FRESH_HOURS); also the panel's stale-session cutoff."""
+    return _env_int("FD_PREARM_FRESH_HOURS", PREARM_FRESH_HOURS_DEFAULT)
+
+
+def prearm_interval_seconds() -> int:
+    """Cadence of the panel's background pre-arm pass (FD_PREARM_INTERVAL_SECONDS,
+    default 300 — the planner is cheap and the window is tens of minutes)."""
+    return _env_int("FD_PREARM_INTERVAL_SECONDS", PREARM_INTERVAL_SECONDS_DEFAULT)
+
 
 # git sparse-checkout of spiders/ for the station Job's initContainer — the
 # validated pattern of fd-industry-data k8s/dispatcher.yaml (one image ships
@@ -448,7 +500,9 @@ def build_station_manifests(
     """The (Job, Service) pair for one station launch.
 
     Job: image + ``python3 scripts/login_station.py --station <src> <alias>``,
-    backoffLimit 0 (a failed login is an event, not a retry), deadline 1500s;
+    backoffLimit 0 (a failed login is an event, not a retry), deadline
+    ``station_deadline_seconds()`` (60 min by default — the human needs time to
+    reach the observation view and complete a phone+password login);
     initContainer runs the dispatcher.yaml git sparse-checkout (spiders/ into
     /content, FD_CONTENT_DIR=/content/spiders); env = the four cluster secrets
     + STATION_ID + FD_SCHEMA_MANAGED=1 + optional PROXY_URL + PYTHONUNBUFFERED.
@@ -456,10 +510,11 @@ def build_station_manifests(
     image = image or station_image()
     labels = _labels(station_id, source, identity_id)
     name = station_name(source, account_alias)
+    deadline_seconds = station_deadline_seconds()
     env = [dict(e) for e in STATION_SECRET_ENV] + [
         {"name": "STATION_ID", "value": str(station_id)},
         {"name": "FD_STATION_DEADLINE_SECONDS",
-         "value": str(STATION_DEADLINE_SECONDS)},
+         "value": str(deadline_seconds)},
         {"name": "FD_SCHEMA_MANAGED", "value": "1"},
         {"name": "FD_CONTENT_DIR", "value": "/content/spiders"},
         {"name": "PYTHONUNBUFFERED", "value": "1"},
@@ -471,7 +526,7 @@ def build_station_manifests(
         "metadata": {"name": name, "namespace": namespace, "labels": labels},
         "spec": {
             "backoffLimit": 0,
-            "activeDeadlineSeconds": STATION_DEADLINE_SECONDS,
+            "activeDeadlineSeconds": deadline_seconds,
             "ttlSecondsAfterFinished": 3600,
             "template": {
                 "metadata": {"labels": labels},
@@ -532,7 +587,8 @@ def create_station(
     now: dt.datetime | None = None,
 ) -> dict:
     """Launch a login station for an identity: insert the
-    ``crawl_login_stations`` row (launching, deadline now+25min), create the
+    ``crawl_login_stations`` row (launching, deadline
+    now + ``station_deadline_seconds()`` — 60 min by default), create the
     Job + Service, then mark the row waiting_operator (the runtime's first
     report flips it onward). A launch failure marks the row failed and
     returns the reason — never a bare exception to the panel."""
@@ -548,7 +604,7 @@ def create_station(
     station = CrawlLoginStation(
         identity_id=ident.id, source=source, account_alias=account_alias,
         status="launching", proxy_url=proxy_url, created_at=now,
-        deadline_at=now + dt.timedelta(seconds=STATION_DEADLINE_SECONDS))
+        deadline_at=now + dt.timedelta(seconds=station_deadline_seconds()))
     session.add(station)
     session.flush()  # station.id -> STATION_ID env + labels
     job, service = build_station_manifests(
@@ -698,6 +754,199 @@ def active_stations_summary(session: Session,
     open_rows = (session.query(CrawlLoginStation)
                  .filter(CrawlLoginStation.status.in_(STATION_OPEN)).count())
     return {"active": int(open_rows or 0)}
+
+
+# ── 预拉起 pre-arm (change prearm-login-station) ─────────────────────────────
+# The nightly rmfyalk run failed 'auth pool dry' because the schedule fired at
+# Beijing 03:10 with a session that had expired hours earlier and nobody awake
+# to re-login (2026-10-09). The fix: the Console watches the clock and opens
+# the login station BEFORE the fire, so the operator finds the window already
+# open — or, if they are asleep, the window at least spans the fire.
+def _source_next_fire(src, now: dt.datetime) -> dt.datetime | None:
+    """The source's next fire as an aware UTC datetime, or None when its cron
+    cannot be parsed. The cron is matched in the source's own ``schedule_tz``
+    (NULL = UTC; unknown tz degrades to UTC with a warning, the dispatcher's
+    ``_schedule_now`` convention) — the same semantics the dispatcher uses to
+    enqueue, so pre-arm and execution can never disagree about "due"."""
+    try:
+        tz = ZoneInfo(src.schedule_tz) if src.schedule_tz else dt.timezone.utc
+    except Exception:  # noqa: BLE001 - unknown tz degrades to UTC, never raises
+        logger.warning("source %s: unknown schedule_tz %r; treating schedule "
+                       "as UTC", src.source, src.schedule_tz)
+        tz = dt.timezone.utc
+    try:
+        local = croniter(src.schedule, now.astimezone(tz)).get_next(dt.datetime)
+    except Exception as e:  # noqa: BLE001 - a bad cron must not break the tick
+        logger.warning("source %s: schedule %r cron parse failed: %s",
+                       src.source, src.schedule, e)
+        return None
+    return local.astimezone(dt.timezone.utc)
+
+
+def _runnable_source(src) -> bool:
+    """A source the dispatcher would actually execute: platform rows need a
+    manifest mirror (last_commit), federated rows a runner command. Anything
+    else has no runner to pre-arm for."""
+    if src.kind == "federated":
+        return src.runner_command is not None
+    if src.kind == "platform":
+        return src.last_commit is not None
+    return False
+
+
+def _fresh_identity(session: Session, profile: str,
+                    now: dt.datetime) -> bool:
+    """True while the profile has any identity proven live recently: status
+    active AND probed within the freshness window. A probe is the login
+    unit's own trust step (auth.complete_login writes last_probe_at), so this
+    is the same fact the pool uses to hand out leases."""
+    cutoff = now - dt.timedelta(hours=prearm_fresh_hours())
+    for ident in (session.query(CrawlIdentity)
+                  .filter(CrawlIdentity.source == profile).all()):
+        if ident.status != "active":
+            continue
+        probed = _as_aware(ident.last_probe_at)
+        if probed is not None and probed >= cutoff:
+            return True
+    return False
+
+
+def prearm_plan(session: Session,
+                now: dt.datetime | None = None) -> list[dict]:
+    """Which scheduled authenticated sources need a login station opened now.
+
+    Pure read (no writes, no cluster) so the decision is unit-testable: for
+    every enabled, runnable ``crawl_sources`` row carrying an ``auth_profile``
+    whose next fire is inside the FD_PREARM_MINUTES window (default 45) and
+    whose profile has no fresh identity (status active, probed within
+    FD_PREARM_FRESH_HOURS, default 6), emit one item naming the alias to log
+    in. Skips when an open station already exists for the source (the
+    operator is presumably on it) and when the profile has no identity rows at
+    all (registration stays a manual act).
+
+    Returns a list of ``{"source", "account_alias", "next_fire", "minutes",
+    "reason"}``.
+    """
+    now = _as_aware(now) or _utcnow()
+    window = dt.timedelta(minutes=prearm_minutes())
+    out: list[dict] = []
+    planned: set[str] = set()   # one station per profile: several sources may
+    #                             share one login unit (auth_profile)
+    rows = (session.query(CrawlSource)
+            .filter(CrawlSource.enabled.is_(True),
+                    CrawlSource.auth_profile.isnot(None),
+                    CrawlSource.schedule.isnot(None))
+            .order_by(CrawlSource.source).all())
+    for src in rows:
+        if not _runnable_source(src):
+            continue
+        profile = src.auth_profile
+        if profile in planned:
+            continue
+        next_fire = _source_next_fire(src, now)
+        if next_fire is None:
+            continue
+        minutes = (next_fire - now).total_seconds() / 60.0
+        if minutes > window.total_seconds() / 60.0:
+            continue
+        if _fresh_identity(session, profile, now):
+            continue
+        # An open station means the operator is presumably on it — and this is
+        # what stops the 5-min loop from stacking duplicates across the whole
+        # pre-arm window. Both spellings are checked because both are in use
+        # for one login unit: pre-arm/dispatcher key identities by
+        # auth_profile, while the panel's manual form posts the crawl source
+        # name. A crawl source has one profile, so nothing else is suppressed.
+        open_station = (session.query(CrawlLoginStation)
+                        .filter(CrawlLoginStation.status.in_(STATION_OPEN),
+                                CrawlLoginStation.source.in_(
+                                    (profile, src.source)))
+                        .first())
+        if open_station is not None:
+            continue
+        identities = (session.query(CrawlIdentity)
+                      .filter(CrawlIdentity.source == profile)
+                      .order_by(CrawlIdentity.id).all())
+        if not identities:
+            continue  # no account yet: registration is a deliberate human act
+        planned.add(profile)
+        # most recently logged-in account first; never-logged-in ties break on
+        # the highest id (the newest registration)
+        alias = max(identities,
+                    key=lambda i: (_as_aware(i.last_login_at) or
+                                   dt.datetime.min.replace(
+                                       tzinfo=dt.timezone.utc),
+                                   i.id)).account_alias
+        out.append({"source": profile, "account_alias": alias,
+                    "next_fire": _iso(next_fire), "minutes": int(minutes),
+                    "reason": "stale or missing identity"})
+    return out
+
+
+def prearm_tick(session: Session, now: dt.datetime | None = None,
+                client: StationK8sClient | None = None) -> list[dict]:
+    """Execute one pre-arm pass: for every ``prearm_plan`` item, ensure the
+    identity (+ egress) and open a login station.
+
+    Each source is independent — one failure is logged and skipped, never
+    aborting the others (the caller is a background loop). Returns the
+    launched stations as ``{"source", "account_alias", "station_id",
+    "status", ...}``; a non-launched outcome is logged with its reason and
+    still returned (the operator-facing board reads the row either way).
+    """
+    now = _as_aware(now) or _utcnow()
+    client = client or get_station_client()
+    launched: list[dict] = []
+    for item in prearm_plan(session, now=now):
+        source, alias = item["source"], item["account_alias"]
+        try:
+            ensured = ensure_identity_with_egress(
+                session, source, alias, requested_by="prearm", now=now)
+            if ensured.get("status") != "queued":
+                logger.warning("prearm: %s/%s ensure refused: %s",
+                               source, alias, ensured.get("reason"))
+                continue
+            out = create_station(session, source, alias, client=client,
+                                 now=now)
+            if out.get("status") != "launched":
+                logger.warning("prearm: %s/%s station not launched: %s",
+                               source, alias, out.get("reason"))
+            else:
+                logger.info(
+                    "prearm: station #%s launched for %s/%s "
+                    "(next fire %s, %s min away)",
+                    out["station_id"], source, alias,
+                    item["next_fire"], item["minutes"])
+            launched.append({**item, **out})
+        except Exception:  # noqa: BLE001 - one source must not stop the pass
+            logger.exception("prearm: %s/%s failed", source, alias)
+    return launched
+
+
+def auth_alert_summary(session: Session,
+                       now: dt.datetime | None = None) -> dict:
+    """The /panel/auth standing banner counts.
+
+    ``login_required`` = identities waiting for a login; ``stale`` = identities
+    marked active whose last probe is missing or older than
+    FD_PREARM_FRESH_HOURS (the session almost certainly expired — the exact
+    condition that produced the 2026-10-09 'auth pool dry'); ``total`` = every
+    identity row. A standing banner, not a toast: the operator must see it
+    without having watched the moment it appeared.
+    """
+    now = _as_aware(now) or _utcnow()
+    cutoff = now - dt.timedelta(hours=prearm_fresh_hours())
+    login_required = stale = total = 0
+    for ident in session.query(CrawlIdentity).all():
+        total += 1
+        if ident.status == "login_required":
+            login_required += 1
+        elif ident.status == "active":
+            probed = _as_aware(ident.last_probe_at)
+            if probed is None or probed < cutoff:
+                stale += 1
+    return {"login_required": login_required, "stale": stale,
+            "total": total}
 
 
 def reclaim_station(
