@@ -25,7 +25,11 @@ Pick a source + an alias to register an identity; leave the egress on auto, or p
 <form class="inline-form" hx-post="/panel/auth/identities" hx-target="#identity-created" hx-swap="innerHTML">
   <select name="source" required aria-label="数据源 source">
     {% for src in station_sources %}
-    <option value="{{ src.source }}">{{ src.source }}（{{ src.auth_profile }}）</option>
+    {#- identities ARE keyed by auth_profile (the login unit), not the crawl
+        source name: registering under 'rmfyalk-case-crawl' created a row the
+        dispatcher could never lease (it looks up auth_profile='rmfyalk').
+        Post the profile; show the crawl source as context only. -#}
+    <option value="{{ src.auth_profile }}">{{ src.auth_profile }}{% if src.source != src.auth_profile %}（{{ src.source }}）{% endif %}</option>
     {% else %}
     <option value="">— 无认证源 no auth_profile sources —</option>
     {% endfor %}

@@ -623,6 +623,20 @@ def test_prearm_plan_skips_when_identity_is_fresh(session):
     assert station_ops.prearm_plan(session, now=PREARM_NOW) == []
 
 
+def test_prearm_plan_skips_when_identity_is_leased(session):
+    """An identity in use by a running crawl is never a pre-arm target:
+    ensure_identity_with_egress resets it to login_required and clears the
+    lease, which would yank the session from under the live run (2026-10-09)."""
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    _ident("rmfyalk", "acct001", "active",
+           last_probe_at=PREARM_NOW - dt.timedelta(hours=7),  # stale by probe
+           lease_token="t" * 24, lease_owner="runner-x")
+
+    assert station_ops.prearm_plan(session, now=PREARM_NOW) == []
+
+
 def test_prearm_plan_flags_stale_identity_before_the_fire(session):
     _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
             schedule="10 3 * * *", schedule_tz="Asia/Shanghai",

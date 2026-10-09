@@ -305,9 +305,13 @@ def test_partial_shows_station_board_and_login_button(session):
     assert "user:pass" not in r.text          # credentials never render
     assert "••••" in board
 
-    # the registration form lists only auth_profile sources
-    assert 'value="rmfyalk"' in r.text
+    # the registration form lists only auth_profile sources, and the option
+    # VALUE is the profile, not the crawl-source name: identities are keyed by
+    # auth_profile and a crawl-source-named row is invisible to the dispatcher
+    # (2026-10-09 fix — the seeded source here is rmfyalk / rmfyalk-login)
+    assert 'value="rmfyalk-login"' in r.text
     form_region = r.text.split("新建账号", 1)[1].split("需登录队列", 1)[0]
+    assert 'value="rmfyalk"' not in form_region
     assert "anon" not in form_region
 
 

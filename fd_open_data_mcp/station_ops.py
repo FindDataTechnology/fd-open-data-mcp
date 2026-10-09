@@ -799,12 +799,16 @@ def _fresh_identity(session: Session, profile: str,
     """True while the profile has any identity proven live recently: status
     active AND probed within the freshness window. A probe is the login
     unit's own trust step (auth.complete_login writes last_probe_at), so this
-    is the same fact the pool uses to hand out leases."""
+    is the same fact the pool uses to hand out leases. A currently LEASED
+    identity also counts: a run is using it right now, and pre-arm must never
+    reset an in-flight session (request_identity_login clears the lease)."""
     cutoff = now - dt.timedelta(hours=prearm_fresh_hours())
     for ident in (session.query(CrawlIdentity)
                   .filter(CrawlIdentity.source == profile).all()):
         if ident.status != "active":
             continue
+        if ident.lease_token:
+            return True  # in use by a run: never disturb it
         probed = _as_aware(ident.last_probe_at)
         if probed is not None and probed >= cutoff:
             return True
