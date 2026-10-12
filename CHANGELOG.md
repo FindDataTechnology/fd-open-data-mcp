@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 ## [0.5.38] - 2026-10-06
+- **scope-rest-api**: 新增 REST JSON 面（`/scopes` CRUD + `/indicators/publish|unpublish`），
+  包装既有 scoping 服务；Bearer `SCOPE_API_TOKEN` 鉴权（未配置 503 诚实禁用）；
+  修复 `_known_values` 原生 SQL `deprecated=0` 在 PG BOOLEAN 列的潜伏缺陷
+  （被吞错误毒化事务→建 scope 全 InFailedSqlTransaction；改 `= FALSE` + 降级
+  except 补 rollback）。wire（柏讯）交付私有 scope 全链由此点亮（2026-10-12）。
+
 
 ### Added (indicator-caliber-unification)
 
