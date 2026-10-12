@@ -105,6 +105,9 @@ def validate_rules(session: Session, rules: dict[str, list[str]]) -> tuple[int, 
             ).bindparams(bindparam("vals", expanding=True))
             return session.execute(stmt, {"vals": values}).scalar() or 0
         except (OperationalError, ProgrammingError):
+            # 被吞的 DB 错误在 PG 上会把事务留成 aborted——降级返回前先复位，
+            # 否则同一 session 的后续写全部 InFailedSqlTransaction（sqlite 无此语义）。
+            session.rollback()
             return 0  # registry absent (dev SQLite): registry dimensions match 0
 
     for dim in RULE_DIMENSIONS:
@@ -140,13 +143,15 @@ def _known_values(session: Session, dim: str) -> set[str]:
             reg = {r[0] for r in session.execute(
                 text("SELECT DISTINCT semantic_code FROM registry_entries WHERE verified"))}
             nat = {r[0] for r in session.execute(
-                text("SELECT DISTINCT code FROM concepts WHERE deprecated = 0"))}
+                text("SELECT DISTINCT code FROM concepts WHERE deprecated = FALSE"))}
             return reg | nat
         column = {"source_dbs": "source_db", "domains": "domain",
                   "native_codes": "native_code"}[dim]
         return {r[0] for r in session.execute(
             text(f"SELECT DISTINCT {column} FROM registry_entries WHERE verified"))}
     except (OperationalError, ProgrammingError):
+        # 同 _registry_count：降级前复位事务，防 PG aborted 事务毒化后续写。
+        session.rollback()
         return set()
 
 
