@@ -226,6 +226,45 @@ def scope_list(session: Session) -> list[dict]:
     return [s.toDict() for s in session.query(Scope).order_by(Scope.name).all()]
 
 
+# ─── Registry verified 审核旗治理（scope-rest-api，对齐 wire 冻结契约）──────
+
+def set_indicators_verified(session: Session, codes: Any,
+                            verified: bool) -> dict:
+    """Flip the registry ``verified`` audit flag for the given semantic codes.
+
+    ``verified`` 即公开可读（models 层 registry_entries DDL：verified
+    BOOLEAN NOT NULL DEFAULT FALSE）——publish/unpublish 治理操作只是翻这
+    一个旗，不增删行。返回 ``{"updated": n, "unknown": [...]}``：codes 中
+    未命中任何 registry 行的如实列为 unknown（诚实，不吞）。表不存在
+    （dev sqlite 未建 registry_entries）时捕获 OperationalError/
+    ProgrammingError 返回 updated=0 + 全 unknown——REST 面据此如实报告
+    而不是 500。绑定原生 bool：PG 列是 BOOLEAN，sqlite 存 1/0，两端可移植。
+    """
+    clean = sorted({(c or "").strip() for c in (codes or []) if (c or "").strip()})
+    if not clean:
+        return {"updated": 0, "unknown": []}
+    try:
+        select_stmt = text(
+            "SELECT DISTINCT semantic_code FROM registry_entries "
+            "WHERE semantic_code IN :codes"
+        ).bindparams(bindparam("codes", expanding=True))
+        matched = {r[0] for r in session.execute(select_stmt, {"codes": clean})}
+        update_stmt = text(
+            "UPDATE registry_entries SET verified = :v "
+            "WHERE semantic_code IN :codes"
+        ).bindparams(bindparam("codes", expanding=True))
+        result = session.execute(
+            update_stmt, {"v": bool(verified), "codes": clean})
+        session.commit()
+        return {
+            "updated": result.rowcount or 0,
+            "unknown": [c for c in clean if c not in matched],
+        }
+    except (OperationalError, ProgrammingError):
+        session.rollback()
+        return {"updated": 0, "unknown": clean}
+
+
 def bind_caller(session: Session, caller_key: str, scope_name: str) -> dict:
     """Bind a caller's default scope (applies when no explicit scope passed)."""
     caller_key = (caller_key or "").strip()

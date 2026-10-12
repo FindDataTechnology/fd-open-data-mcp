@@ -1686,12 +1686,18 @@ def _enable_mcp_session_reaping() -> None:
 
 
 def _http_asgi():
-    """Composite ASGI app: /panel/* -> console panel, everything else -> MCP.
+    """Composite ASGI app: /panel/* -> console panel, /scopes|/indicators ->
+    scope REST face, everything else -> MCP.
 
     Both apps carry their own auth (panel gate vs MCP bearer); one uvicorn
     process serves both, so the console ships with zero extra deployments.
     Websocket scopes under /panel (the login-station observation relay,
-    login-station-console 3.2) route to the panel too.
+    login-station-console 3.2) route to the panel too. The scope REST face
+    (scope-rest-api) is a plain request/response JSON surface — no session
+    semantics, so it never opens (or exhausts) MCP Streamable-HTTP sessions;
+    it carries its own SCOPE_API_TOKEN bearer gate and only http scopes are
+    forwarded (websockets fall through to MCP, as before). ``/mcp`` remains
+    the MCP endpoint — no prefix collision.
     """
     from starlette.middleware import Middleware
 
@@ -1702,7 +1708,11 @@ def _http_asgi():
     else:
         mcp_asgi = mcp.http_app()
     panel_asgi = _panel_app()
-    if panel_asgi is None:
+    try:
+        from fd_open_data_mcp.scope_rest import app as scope_rest_asgi
+    except Exception:  # noqa: BLE001 - REST face optional at runtime
+        scope_rest_asgi = None
+    if panel_asgi is None and scope_rest_asgi is None:
         return mcp_asgi
 
     async def composite(scope, receive, send):
@@ -1728,11 +1738,19 @@ def _http_asgi():
                 if task is not None:
                     task.cancel()
             return
-        if (scope["type"] in ("http", "websocket")
+        if (panel_asgi is not None
+                and scope["type"] in ("http", "websocket")
                 and scope["path"].startswith("/panel")):
             await panel_asgi(scope, receive, send)
-        else:
-            await mcp_asgi(scope, receive, send)
+            return
+        # Scope REST face (scope-rest-api): /scopes + /indicators prefixes,
+        # http only — no MCP session opened, its own bearer gate applies.
+        if (scope["type"] == "http" and scope_rest_asgi is not None
+                and (scope["path"].startswith("/scopes")
+                     or scope["path"].startswith("/indicators"))):
+            await scope_rest_asgi(scope, receive, send)
+            return
+        await mcp_asgi(scope, receive, send)
 
     return composite
 
