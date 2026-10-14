@@ -79,7 +79,9 @@ def mig8():
 
 def test_revision_wiring(mig, mig8):
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0010_panel_action_audit"
+    assert script.get_current_head() == "0011_federated_runner_tag"
+    assert script.get_revision("0011_federated_runner_tag").down_revision == (
+        "0010_panel_action_audit")
     assert script.get_revision("0009_source_schedule_tz").down_revision == (
         "0008_federation_runner_env")
     assert script.get_revision("0008_federation_runner_env").down_revision == (

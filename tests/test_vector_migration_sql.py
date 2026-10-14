@@ -63,10 +63,12 @@ def mig():
 # ---------------------------------------------------------------------------
 
 def test_revision_is_new_head_of_shipped_chain():
-    """The shipped head is 0010 (panel action audit); each revision
+    """The shipped head is 0011 (federated runner tag roll); each revision
     keeps its own down_revision wiring (their contract tests live above)."""
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0010_panel_action_audit"
+    assert script.get_current_head() == "0011_federated_runner_tag"
+    rev11 = script.get_revision("0011_federated_runner_tag")
+    assert rev11.down_revision == "0010_panel_action_audit"
     rev10 = script.get_revision("0010_panel_action_audit")
     assert rev10.down_revision == "0009_source_schedule_tz"
     rev9 = script.get_revision("0009_source_schedule_tz")
@@ -87,6 +89,7 @@ def test_chain_is_linear_head_to_baseline():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0011_federated_runner_tag",
         "0010_panel_action_audit",
         "0009_source_schedule_tz",
         "0008_federation_runner_env",
@@ -387,7 +390,7 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0010_panel_action_audit"
+    assert version == "0011_federated_runner_tag"
     # 0001-0009 stay PG-guarded no-ops on sqlite; 0010 is portable DDL
     # (design D3: the audit table must exist on sqlite test databases) and
     # is the one app table the chain builds there.
