@@ -9,6 +9,10 @@ import json
 import click
 
 from fd_open_data_mcp import __version__
+from fd_open_data_mcp.fetch.active_pool import (
+    DEFAULT_POOL_TOP_N,
+    DEFAULT_PREWARM_DAYS,
+)
 
 
 def _echo(obj) -> None:
@@ -755,3 +759,62 @@ def coverage_expand_cmd(resume):
 
 if __name__ == "__main__":
     cli()
+
+
+@cli.command("price-pool")
+@click.option("--add", "add_id", type=int, default=None,
+              help="Add a configured member (needs --entity-type).")
+@click.option("--remove", "remove_id", type=int, default=None,
+              help="Remove a configured member (needs --entity-type).")
+@click.option("--entity-type", default="stock")
+@click.option("--recompute", is_flag=True,
+              help="Recompute frequency membership from recorded requests.")
+@click.option("--top-n", type=int, default=None)
+def price_pool_cmd(add_id, remove_id, entity_type, recompute, top_n):
+    """Inspect and maintain the price active pool.
+
+    With no options it lists members and the reason each is there (config or
+    frequency). --add/--remove maintain the configured side; --recompute
+    re-derives the frequency side from request counts.
+    """
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.fetch.active_pool import (
+        add_config_member,
+        pool_members,
+        recompute_frequency_members,
+        remove_config_member,
+    )
+
+    s = get_database().get_session()
+    try:
+        if add_id is not None:
+            _echo({"added": add_config_member(s, entity_type, add_id)})
+        if remove_id is not None:
+            _echo({"removed": remove_config_member(s, entity_type, remove_id)})
+        if recompute:
+            _echo(recompute_frequency_members(
+                s, top_n=top_n or DEFAULT_POOL_TOP_N))
+        _echo({"members": pool_members(s), "count": len(pool_members(s))})
+    finally:
+        s.close()
+
+
+@cli.command("prewarm-prices")
+@click.option("--days", type=int, default=DEFAULT_PREWARM_DAYS, show_default=True,
+              help="History depth to warm (default matches the backtest window cap).")
+@click.option("--limit", type=int, default=None, help="Warm at most N members.")
+@click.option("--concept", "concept_code", default="price.close", show_default=True)
+def prewarm_prices_cmd(days, limit, concept_code):
+    """Fill the recent window for every price-pool member (offline action).
+
+    One unreachable symbol does not stop the others; the report names each
+    result so a network blip is distinguishable from a broken pool.
+    """
+    from fd_open_data_mcp.db import get_database
+    from fd_open_data_mcp.fetch.active_pool import prewarm
+
+    s = get_database().get_session()
+    try:
+        _echo(prewarm(s, days=days, limit=limit, concept_code=concept_code))
+    finally:
+        s.close()

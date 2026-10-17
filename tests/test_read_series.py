@@ -118,3 +118,71 @@ def test_never_dispatches_upstream(session, concept, monkeypatch):
     write_cache(session, concept, T, E, "2020", "2.0e12", "USD", "worldbank")
     out = _call(concept)
     assert out["count"] == 1
+
+
+# ─── fill_gaps: an explicit opt-in, never the default (design D3) ──────────
+
+
+@pytest.fixture
+def price_concept(session):
+    c = Concept(code="price.close", entity_type="stock", frequency="daily",
+                unit="currency", verified=True)
+    session.add(c)
+    session.commit()
+    return c.id
+
+
+def test_default_call_still_never_dispatches(session, price_concept) -> None:
+    """The guarantee is now 'by default', and it must still hold exactly."""
+    write_cache(session, price_concept, "stock", 7, "2026-03-02", "10.0",
+                "currency", "akshare")
+    out = _call(price_concept, entity_type="stock", entity_id=7,
+                start="2026-01-01", end="2026-06-30")
+    assert out["count"] == 1
+    # The default path is the untouched cache-only read: no fill fields at all,
+    # which is what makes "no surprise fetch" verifiable from the response.
+    for field in ("fill_attempted", "fill_failed", "gaps", "fingerprint"):
+        assert field not in out, f"a default read must not report {field}"
+
+
+def test_default_call_on_a_partial_window_reports_no_fetch(session, price_concept) -> None:
+    """A partial window without opt-in stays a coverage fact, not a fill."""
+    write_cache(session, price_concept, "stock", 7, "2026-03-02", "10.0",
+                "currency", "akshare")
+    out = _call(price_concept, entity_type="stock", entity_id=7,
+                start="2026-01-01", end="2026-06-30", fill_gaps=False)
+    assert out["count"] == 1
+    assert out.get("fill_attempted") in (None, False)
+
+
+def test_fill_gaps_true_returns_the_fill_fields(session, price_concept) -> None:
+    out = _call(price_concept, entity_type="stock", entity_id=7,
+                start="2026-01-01", end="2026-01-31", fill_gaps=True)
+    # No bindings exist in this fixture, so nothing can be fetched — but the
+    # contract is that the fields are present and the failure is labelled
+    # rather than raised.
+    assert "gaps" in out
+    assert "fill_attempted" in out
+    assert "fill_failed" in out
+    assert "fingerprint" in out
+    assert isinstance(out["gaps"], list)
+
+
+def test_fill_gaps_rejected_for_non_price_concept(session, concept) -> None:
+    """Revised-value concepts must not be pinned by an additive fill."""
+    out = _call(concept, fill_gaps=True)
+    assert out["fill_attempted"] is False
+    assert out.get("note")
+
+
+def test_filling_twice_on_a_complete_window_is_stable(session, price_concept) -> None:
+    """Fingerprint is only returned on the fill path; filling a complete window
+    twice must yield the same content both times."""
+    write_cache(session, price_concept, "stock", 7, "2026-01-05", "10.0",
+                "currency", "akshare")
+    args = dict(entity_type="stock", entity_id=7,
+                start="2026-01-01", end="2026-01-10", fill_gaps=True)
+    first = _call(price_concept, **args)
+    second = _call(price_concept, **args)
+    assert first["fingerprint"] == second["fingerprint"]
+    assert first["points"] == second["points"]

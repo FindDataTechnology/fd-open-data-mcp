@@ -63,10 +63,12 @@ def mig():
 # ---------------------------------------------------------------------------
 
 def test_revision_is_new_head_of_shipped_chain():
-    """The shipped head is 0011 (federated runner tag roll); each revision
-    keeps its own down_revision wiring (their contract tests live above)."""
+    """The shipped head is 0012 (price active pool); each revision keeps its
+    own down_revision wiring (their contract tests live above)."""
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0011_federated_runner_tag"
+    assert script.get_current_head() == "0012_price_active_pool"
+    rev12 = script.get_revision("0012_price_active_pool")
+    assert rev12.down_revision == "0011_federated_runner_tag"
     rev11 = script.get_revision("0011_federated_runner_tag")
     assert rev11.down_revision == "0010_panel_action_audit"
     rev10 = script.get_revision("0010_panel_action_audit")
@@ -89,6 +91,7 @@ def test_chain_is_linear_head_to_baseline():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0012_price_active_pool",
         "0011_federated_runner_tag",
         "0010_panel_action_audit",
         "0009_source_schedule_tz",
@@ -390,8 +393,9 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0011_federated_runner_tag"
-    # 0001-0009 stay PG-guarded no-ops on sqlite; 0010 is portable DDL
-    # (design D3: the audit table must exist on sqlite test databases) and
-    # is the one app table the chain builds there.
-    assert tables == {"alembic_version", "panel_action_audit"}
+    assert version == "0012_price_active_pool"
+    # 0001-0009 stay PG-guarded no-ops on sqlite; 0010 and 0012 are portable DDL
+    # (the audit table and the price pool must exist on sqlite test databases)
+    # and are the app tables the chain builds there.
+    assert tables == {"alembic_version", "panel_action_audit",
+                     "price_pool_members", "price_empty_intervals"}

@@ -1560,3 +1560,96 @@ class PanelActionAudit(Base):
             "outcome": self.outcome, "reason": self.reason,
             "ts": self.ts.isoformat() if self.ts else None,
         }
+
+
+#: Membership reason. ``config`` is operator-set and persistent; ``frequency`` is
+#: derived from recent request counts and expires when the symbol leaves the top
+#: N; ``none`` means the row exists purely as request accounting — it is not in
+#: the pool. Membership is therefore "source is config or frequency", which is
+#: why "a row exists" and "is in the pool" are different questions.
+PRICE_POOL_SOURCES = ("config", "frequency")
+PRICE_POOL_NON_MEMBER = "none"
+
+
+class PricePoolMember(Base):
+    """One entry of the price active pool (price_pool_members).
+
+    The pool answers "which symbols are worth pre-warming" (design D5). Members
+    come from two places and both are recorded explicitly, because a symbol that
+    is hot today may not be tomorrow and the two reasons behave differently:
+
+    * ``config`` — written by an operator, and it stays until removed;
+    * ``frequency`` — derived from recent request counts, and it expires when
+      the symbol falls out of the top N.
+
+    Keeping the source as a column (rather than a boolean "is_config") is what
+    lets a pool listing tell an operator *why* something is warm — the question
+    they actually ask when a symbol they never configured shows up.
+    """
+    __tablename__ = "price_pool_members"
+    __table_args__ = (
+        UniqueConstraint("entity_type", "entity_id", name="uq_price_pool_member"),
+        CheckConstraint("source in ('config','frequency','none')",
+                        name="price_pool_members_source_check"),
+        Index("price_pool_members_source_idx", "source"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(Integer, nullable=False)
+    source = Column(String(16), nullable=False,
+                    server_default=PRICE_POOL_NON_MEMBER)  # config|frequency|none
+    # Request accounting for the frequency source; also a useful freshness
+    # signal for configured members (a configured symbol nobody asks for is
+    # warm for nothing).
+    request_count = Column(BigInteger, nullable=False, default=0,
+                           server_default="0")
+    last_requested_at = Column(DateTime, nullable=True)
+    added_at = Column(DateTime, nullable=False, default=_now_naive)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "entity_type": self.entity_type,
+            "entity_id": self.entity_id, "source": self.source,
+            "request_count": self.request_count,
+            "last_requested_at": (self.last_requested_at.isoformat()
+                                  if self.last_requested_at else None),
+            "added_at": self.added_at.isoformat() if self.added_at else None,
+        }
+
+
+class PriceEmptyInterval(Base):
+    """An interval probed upstream and found to hold no data (price_empty_intervals).
+
+    A market holiday looks exactly like a hole: the coverage judgment sees a
+    week with no prices and asks upstream, which also has nothing. Without this
+    record every read repeats that question — six wasted upstream calls per read
+    on a two-year A-share window (measured: Spring Festival, Labour Day,
+    National Day). Recording "asked, empty" makes the probe happen once.
+
+    It is also the honest description of the situation: the series does not
+    trade there, so the interval is not a gap in *our* copy of anything.
+    """
+    __tablename__ = "price_empty_intervals"
+    __table_args__ = (
+        UniqueConstraint("concept_id", "entity_type", "entity_id", "start", "end",
+                         name="uq_price_empty_interval"),
+        Index("price_empty_intervals_lookup_idx", "concept_id", "entity_type",
+              "entity_id"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    concept_id = Column(Integer, nullable=False)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(Integer, nullable=False)
+    start = Column(String(10), nullable=False)   # 'YYYY-MM-DD'
+    end = Column(String(10), nullable=False)
+    probed_at = Column(DateTime, nullable=False, default=_now_naive)
+
+    def toDict(self) -> dict:
+        return {
+            "id": self.id, "concept_id": self.concept_id,
+            "entity_type": self.entity_type, "entity_id": self.entity_id,
+            "start": self.start, "end": self.end,
+            "probed_at": self.probed_at.isoformat() if self.probed_at else None,
+        }

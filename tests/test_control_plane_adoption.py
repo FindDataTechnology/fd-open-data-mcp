@@ -76,7 +76,7 @@ def mig():
 
 def test_chain_head_and_wiring():
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0011_federated_runner_tag"
+    assert script.get_current_head() == "0012_price_active_pool"
     assert script.get_revision("0006_control_plane_adoption").down_revision == (
         "0005_concept_coverage"
     )

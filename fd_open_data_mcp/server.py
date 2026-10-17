@@ -1365,7 +1365,8 @@ MAX_SERIES_ROWS = 5000
 @mcp.tool
 def read_series(concept_id: int | str, entity_type: str | None = None,
                 entity_id: int | None = None, start: str = "", end: str = "",
-                entity: str | None = None, scope: str | None = None) -> dict:
+                entity: str | None = None, scope: str | None = None,
+                fill_gaps: bool = False) -> dict:
     """Read a series for one concept x entity over [start, end].
 
     Local concepts (numeric ``concept_id``): serves the stored cache only,
@@ -1392,6 +1393,8 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         end: window end, inclusive
         entity: region / country / city name for registry-only reads
         scope: optional named retrieval scope
+        fill_gaps: fetch the missing intervals of this window (price concepts
+            only, additive — never overwrites a stored value)
     """
     from fd_open_data_mcp import federation, scoping
     from fd_open_data_mcp.entities.resolver import check_applicability
@@ -1441,6 +1444,38 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         if violation:
             return violation
         rows = read_cache_range(s, cid, entity_type, entity_id, start, end)
+        if fill_gaps:
+            from fd_open_data_mcp.fetch.gapfill import fill_gaps as _fill
+
+            filled = _fill(s, cid, entity_type, entity_id, start, end)
+            points = filled["points"]
+            truncated = len(points) > MAX_SERIES_ROWS
+            kept_points = points[-MAX_SERIES_ROWS:] if truncated else points
+            out: dict = {
+                "concept_id": cid, "entity_type": entity_type, "entity_id": entity_id,
+                "start": start, "end": end, "count": len(kept_points),
+                "points": kept_points,
+                "gaps": filled["gaps"],
+                "fill_attempted": filled["fill_attempted"],
+                "fill_failed": filled["fill_failed"],
+                "fingerprint": filled["fingerprint"],
+            }
+            if filled.get("note"):
+                out["note"] = filled["note"]
+            elif not points:
+                out["note"] = ("no observations in this window and gap filling "
+                               "added none — a coverage gap, not a failure")
+            elif filled["gaps"]:
+                out["note"] = ("window is still incomplete: " + ", ".join(
+                    f"{g['start']}..{g['end']}" for g in filled["gaps"]
+                ) + " — results are partial, not a complete series")
+            elif truncated:
+                out["note"] = (f"window holds more than {MAX_SERIES_ROWS} points; returned the most "
+                               f"recent {MAX_SERIES_ROWS} — narrow the window for the rest")
+            if resolved:
+                scoping.record_hit(s, resolved["name"], len(points))
+            return out
+
         truncated = len(rows) > MAX_SERIES_ROWS
         kept = rows[-MAX_SERIES_ROWS:] if truncated else rows
         points = [
@@ -1448,7 +1483,7 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
              "unit": r.unit, "source_used": r.source_used}
             for r in kept
         ]
-        out: dict = {
+        out = {
             "concept_id": cid, "entity_type": entity_type, "entity_id": entity_id,
             "start": start, "end": end, "count": len(points), "points": points,
         }

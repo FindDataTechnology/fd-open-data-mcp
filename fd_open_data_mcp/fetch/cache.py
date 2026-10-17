@@ -33,6 +33,7 @@ from datetime import datetime, timedelta, timezone
 from typing import Optional, Union
 
 from sqlalchemy import or_, text
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import SemanticObservation
@@ -421,6 +422,58 @@ def write_cache(
     return obs
 
 
+def write_cache_range_new_only(
+    session: Session, concept_id: int, entity_type: str, entity_id: int,
+    rows: dict[str, object], unit: Optional[str], source_used: str,
+) -> int:
+    """Insert-only variant of :func:`write_cache_range` — never overwrites.
+
+    Gap filling must not rewrite history. A stored price is a frozen fact as of
+    when it was fetched; overwriting it with today's fetch changes yesterday's
+    backtest — and a forward-adjusted series is rewritten wholesale upstream
+    after every dividend, so a "refresh" silently rewrites the entire past.
+    This variant adds only dates that are absent and leaves every existing
+    value untouched.
+
+    Uses IntegrityError handling rather than ``ON CONFLICT DO NOTHING`` so it
+    stays portable across SQLite (tests) and Postgres (production), matching
+    the precedent in ``auth_tools.ensure_identity``.
+
+    Returns rows actually inserted — 0 when everything was already present,
+    which is what makes a second gap fill a no-op.
+    """
+    if not rows:
+        return 0
+    existing = {
+        obs.date
+        for obs in _read_base_range(
+            session, concept_id, entity_type, entity_id, min(rows), max(rows),
+            source=source_used,
+        )
+        if obs.source_used == source_used
+    }
+    now = datetime.now(timezone.utc)
+    inserted = 0
+    for d, value in sorted(rows.items()):
+        if d in existing:
+            continue
+        session.add(SemanticObservation(
+            concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
+            date=d, value=str(value), unit=unit, source_used=source_used,
+            fetched_at=now,
+        ))
+        try:
+            session.flush()
+        except IntegrityError:
+            # A concurrent writer, or the same date under a granularity row we
+            # did not see: adopt the existing row and move on.
+            session.rollback()
+            continue
+        inserted += 1
+    session.commit()
+    return inserted
+
+
 def write_cache_range(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     rows: dict[str, object], unit: Optional[str], source_used: str,
@@ -431,6 +484,10 @@ def write_cache_range(
     source); another source's rows are untouched); this is the batch form used
     by ``read_range`` so a range fetch costs one commit instead of one per
     date. Returns rows written.
+
+    This is the *first fetch* path: it may refresh a value (notably today's
+    cell, which the TTL governs). **Gap filling must not use it** — use
+    :func:`write_cache_range_new_only`, which never overwrites a stored value.
     """
     if not rows:
         return 0
