@@ -12,6 +12,7 @@ The second property is that a stored value survives a fill (see
 from __future__ import annotations
 
 import datetime as dt
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -321,3 +322,116 @@ def test_a_failed_interval_stays_retryable(session, cid) -> None:
         )
         assert out["fill_failed"] is True, "a failure stays a failure"
         assert out["gaps"], "and the interval is still reported as missing"
+
+
+# ---------------------------------------------------------------------------
+# the real fetch path (``_fetch_interval``): answered-empty vs could-not-ask
+# ---------------------------------------------------------------------------
+
+
+def test_fetch_interval_reports_the_source_that_answered_empty(
+    session, cid, monkeypatch
+) -> None:
+    """The distinction that makes ``known_empty`` reachable at all.
+
+    ``fill_gaps`` only records a probed-empty interval when the fetcher names a
+    source ("answered and there was nothing"). The real fetcher used to return
+    ``({}, "")`` for that case too, so a market holiday was indistinguishable
+    from an outage and ``_record_empty`` never ran — the ``known_empty`` table
+    stayed empty and every holiday read as a missing interval. Every other test
+    in this file injects its own fetcher, which is exactly why that went
+    unnoticed; this one drives the real one.
+    """
+    from fd_open_data_mcp.fetch import dispatch as dispatch_mod
+    from fd_open_data_mcp.fetch import gapfill as gapfill_mod
+
+    monkeypatch.setattr(
+        dispatch_mod, "rank_sources_for_concept",
+        lambda *a, **kw: [{"source": SRC}],
+    )
+    monkeypatch.setattr(
+        dispatch_mod, "resolve_identifier", lambda *a, **kw: "IDENT",
+    )
+    binding, fn = MagicMock(name="binding"), MagicMock(name="fn")
+    fn.command = "cmd"
+    monkeypatch.setattr(
+        dispatch_mod, "_bindings_for_source",
+        lambda *a, **kw: [(binding, fn)],
+    )
+    # An instrumented fetch that succeeds and yields an empty series — the
+    # signature of a holiday, not of a failure.
+    monkeypatch.setattr(
+        dispatch_mod, "instrumented_fetch", lambda *a, **kw: {"data": []},
+    )
+    monkeypatch.setattr(
+        dispatch_mod, "_extract_series", lambda *a, **kw: {},
+    )
+
+    concept = session.get(Concept, cid)
+    series, used = gapfill_mod._fetch_interval(
+        session, concept, T, EID, "2026-10-01", "2026-10-07",
+    )
+    assert series == {}
+    assert used == SRC, (
+        "an answered-but-empty interval must name its source, otherwise the "
+        "caller cannot tell a holiday from an outage and never records it"
+    )
+
+
+def test_fetch_interval_reports_no_source_when_every_attempt_throws(
+    session, cid, monkeypatch
+) -> None:
+    """A failed ask must stay retryable: no source name, no ``known_empty``."""
+    from fd_open_data_mcp.fetch import dispatch as dispatch_mod
+    from fd_open_data_mcp.fetch import gapfill as gapfill_mod
+
+    monkeypatch.setattr(
+        dispatch_mod, "rank_sources_for_concept",
+        lambda *a, **kw: [{"source": SRC}],
+    )
+    monkeypatch.setattr(
+        dispatch_mod, "resolve_identifier", lambda *a, **kw: "IDENT",
+    )
+    binding, fn = MagicMock(name="binding"), MagicMock(name="fn")
+    fn.command = "cmd"
+    monkeypatch.setattr(
+        dispatch_mod, "_bindings_for_source",
+        lambda *a, **kw: [(binding, fn)],
+    )
+
+    def _boom(*a, **kw):
+        raise dispatch_mod.FetchError("down")
+
+    monkeypatch.setattr(dispatch_mod, "instrumented_fetch", _boom)
+
+    concept = session.get(Concept, cid)
+    series, used = gapfill_mod._fetch_interval(
+        session, concept, T, EID, "2026-10-01", "2026-10-07",
+    )
+    assert series == {}
+    assert used == "", "a failure proves nothing and must not be recorded as empty"
+
+
+def test_holiday_is_recorded_and_a_recovers(session, cid, monkeypatch) -> None:
+    """End to end: a holiday answered empty is recorded, then read as closed.
+
+    The window spans a holiday with data on both sides; after the fill the
+    interval must appear in ``market_closed`` rather than ``missing``, which is
+    what lets the backtest gate accept a window containing it.
+    """
+    before = _weekdays("2026-09-28", "2026-09-30")
+    after = _weekdays("2026-10-08", "2026-10-09")
+    write_cache_range(
+        session, cid, T, EID, {d: 10.0 for d in before + after}, "currency", SRC
+    )
+
+    def answers_empty(start, end):
+        return {}, SRC  # a source answered: genuinely no data here
+
+    out = fill_gaps(session, cid, T, EID, "2026-09-28", "2026-10-09",
+                    fetch_range=answers_empty)
+    closed = [(i["start"], i["end"]) for i in out["market_closed"]]
+    assert closed, f"the holiday must be reported as closed, got {out['gaps']}"
+    assert out["missing"] == [], (
+        f"a proven-empty holiday must not stay in missing: {out['missing']}"
+    )

@@ -226,9 +226,21 @@ def _fetch_interval(
     source's name: writing under a guessed source would create a second,
     parallel history for the same concept.
 
-    Returns ``({}, "")`` when nothing could be fetched; the caller turns that
-    into ``fill_failed`` rather than an exception.
+    The returned source is what tells the caller which of two empty outcomes
+    happened, and the distinction is load-bearing:
+
+    * ``({}, "")`` — no source could be asked (all threw, or none resolved an
+      identifier). Proven nothing; the interval must stay retryable.
+    * ``({}, "<source>")`` — a source answered and its series was empty. That is
+      positive evidence the interval holds no data (a market holiday), which is
+      what makes it recordable as ``known_empty`` and keeps the window from
+      being re-probed on every read.
+
+    Collapsing the second case into the first would make ``_record_empty`` dead
+    code and leave every holiday indistinguishable from a hole — the read path
+    used to do exactly that.
     """
+    asked: Optional[str] = None
     for cand in _dispatch.rank_sources_for_concept(session, concept.id, None):
         cand_source = cand["source"]
         if source is not None and cand_source != source:
@@ -255,12 +267,15 @@ def _fetch_interval(
                     cand_source, start, end, exc,
                 )
                 continue
+            # The source answered (it did not throw): from here on an empty
+            # series is evidence of absence, not of failure.
+            asked = cand_source
             series = _dispatch._extract_series(
                 result, binding.column.name, start, end, cand_source, fn.command,
             )
             if series:
                 return series, cand_source
-    return {}, ""
+    return {}, (asked or "")
 
 
 def _read(
