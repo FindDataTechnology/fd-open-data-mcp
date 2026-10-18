@@ -181,9 +181,16 @@ def fill_gaps(
                    known_empty=after.known_empty)
 
 
-def _known_empty(
+def known_empty_intervals(
     session: Session, concept_id: int, entity_type: str, entity_id: int
 ) -> list[tuple[str, str]]:
+    """Intervals already probed upstream and confirmed to hold no data.
+
+    Public because callers that judge coverage for concepts this module refuses
+    to *fill* still need the same "asked and there was nothing" record. Without
+    it their coverage judgment cannot tell a holiday from a hole, and every
+    window spanning a long holiday reads as missing.
+    """
     from fd_open_data_mcp.models import PriceEmptyInterval
 
     rows = (
@@ -193,6 +200,38 @@ def _known_empty(
         .all()
     )
     return [(r.start, r.end) for r in rows]
+
+
+def record_empty_interval(
+    session: Session, concept_id: int, entity_type: str, entity_id: int,
+    start: str, end: str,
+) -> None:
+    """Remember that upstream answered "no data" for this interval.
+
+    Public counterpart of :func:`known_empty_intervals`; see that docstring for
+    why a non-filling caller needs both.
+    """
+    _record_empty(session, concept_id, entity_type, entity_id, start, end)
+
+
+def probe_interval(
+    session: Session, concept: Concept, entity_type: str, entity_id: int,
+    start: str, end: str, source: Optional[str] = None,
+) -> tuple[dict, str]:
+    """Ask upstream for one interval without writing anything.
+
+    Returns ``(series, answered_source)``. An empty series with a non-empty
+    source means "a source answered and there is nothing there" — the evidence
+    a caller records as a market closure. An empty source means "nothing could
+    be asked", which proves nothing and must stay retryable.
+    """
+    return _fetch_interval(session, concept, entity_type, entity_id, start, end, source)
+
+
+def _known_empty(
+    session: Session, concept_id: int, entity_type: str, entity_id: int
+) -> list[tuple[str, str]]:
+    return known_empty_intervals(session, concept_id, entity_type, entity_id)
 
 
 def _record_empty(
