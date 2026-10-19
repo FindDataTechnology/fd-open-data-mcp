@@ -14,8 +14,9 @@ import os
 
 from fastmcp import FastMCP
 
-from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp import engines
+from fd_open_data_mcp.annotations import annotations_for
+from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.search_cache import cached_search
 
 mcp = FastMCP(
@@ -72,7 +73,7 @@ def _session():
 
 
 # ─── Catalog ────────────────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("import_catalog"))
 def import_catalog(provider: str | None = None) -> dict:
     """Import one (by name) or all fd-* provider registries into the catalog."""
     from fd_open_data_mcp.catalog.importer import import_all, import_provider
@@ -82,7 +83,7 @@ def import_catalog(provider: str | None = None) -> dict:
     return {"providers": import_all()}
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("register_datasource"))
 def register_datasource(manifest_path: str) -> dict:
     """Register a datasource manifest into the ontology database.
 
@@ -115,7 +116,7 @@ def register_datasource(manifest_path: str) -> dict:
 
 
 # ─── Write operations ───────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("update_entity"))
 def update_entity(
     entity_type: str,
     code: str,
@@ -178,7 +179,7 @@ def update_entity(
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("update_concept"))
 def update_concept(
     concept_code: str,
     entity_type: str,
@@ -226,7 +227,7 @@ def update_concept(
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("update_binding"))
 def update_binding(
     column_id: int,
     concept_code: str,
@@ -287,7 +288,7 @@ def update_binding(
 
 
 # ─── Semantic layer ─────────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("consume_concepts"))
 def consume_concepts() -> dict:
     """Seed concept families + variables from the protocol vocabulary."""
     from fd_open_data_mcp.semantic.concepts import consume_indicator_defs
@@ -299,7 +300,7 @@ def consume_concepts() -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("propose_bindings"))
 def propose_bindings() -> dict:
     """Propose column->concept bindings (propose-and-confirm; below-threshold withheld)."""
     from fd_open_data_mcp.semantic.bindings import propose_bindings as _propose
@@ -311,7 +312,7 @@ def propose_bindings() -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_concepts"))
 def list_concepts(
     entity_type: str | None = None, concept_family: str | None = None,
     query: str | None = None,
@@ -360,7 +361,7 @@ def list_concepts(
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_concept_families"))
 def list_concept_families(limit: int = 500, offset: int = 0) -> list[dict]:
     """List the concept families (the curated semantic vocabulary) + variable counts.
 
@@ -376,7 +377,7 @@ def list_concept_families(limit: int = 500, offset: int = 0) -> list[dict]:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_registry_entries"))
 def list_registry_entries(
     status: str | None = None, limit: int = 500, offset: int = 0,
     scope: str | None = None,
@@ -443,7 +444,7 @@ def list_registry_entries(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("record_concept_mapping"))
 def record_concept_mapping(
     concept_id: int,
     vocabulary: str,
@@ -484,7 +485,7 @@ def record_concept_mapping(
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_concept_mappings"))
 def list_concept_mappings(
     concept_id: int | None = None,
     vocabulary: str | None = None,
@@ -511,7 +512,7 @@ def list_concept_mappings(
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("import_crosswalks"))
 def import_crosswalks() -> dict:
     """Ingest the shipped crosswalk registry (crosswalks/*.yaml) as mappings."""
     from fd_open_data_mcp.semantic.crosswalk import import_crosswalks as _import
@@ -523,7 +524,7 @@ def import_crosswalks() -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_bindings"))
 def list_bindings(concept_code: str | None = None) -> list[dict]:
     """List column->concept bindings (optionally filtered by concept code)."""
     from fd_open_data_mcp.models import Concept, ConceptBinding
@@ -540,7 +541,7 @@ def list_bindings(concept_code: str | None = None) -> list[dict]:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("review_bindings"))
 def review_bindings() -> list[dict]:
     """Return the below-threshold review queue (propose-and-confirm)."""
     from fd_open_data_mcp.semantic.bindings import review_queue
@@ -552,7 +553,7 @@ def review_bindings() -> list[dict]:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("confirm_binding"))
 def confirm_binding(binding_id: int) -> dict:
     """Confirm a binding in the review queue (provenance -> manual)."""
     from fd_open_data_mcp.semantic.bindings import confirm_binding as _confirm
@@ -566,7 +567,7 @@ def confirm_binding(binding_id: int) -> dict:
 
 
 # ─── Entity identity ────────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("seed_entity_identifiers"))
 def seed_entity_identifiers() -> dict:
     """Seed akshare/yfinance (stocks) and worldbank (countries) identifier mappings."""
     from fd_open_data_mcp.entities.resolver import (
@@ -580,7 +581,7 @@ def seed_entity_identifiers() -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("resolve_entity"))
 def resolve_entity(
     entity_type: str | None = None,
     entity_id: int | None = None,
@@ -624,7 +625,7 @@ def resolve_entity(
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("add_entity_identifier"))
 def add_entity_identifier(entity_type: str, entity_id: int, source: str, identifier: str) -> dict:
     """Upsert a per-source entity identifier."""
     from fd_open_data_mcp.entities.resolver import add_identifier
@@ -637,7 +638,7 @@ def add_entity_identifier(entity_type: str, entity_id: int, source: str, identif
 
 
 # ─── Entity graph ────────────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_entities"))
 def list_entities(entity_type: str, limit: int = 100, offset: int = 0) -> list[dict]:
     """List entities of a specific type."""
     from fd_open_data_mcp.entity_graph_tools import list_entities as _list
@@ -645,7 +646,7 @@ def list_entities(entity_type: str, limit: int = 100, offset: int = 0) -> list[d
     return _list(entity_type, limit, offset)
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("get_entity"))
 def get_entity(entity_type: str, code: str) -> dict | None:
     """Look up one entity by exact type+code (ticker AAPL, country CN).
     Use when the code is known; do not use search tools for this."""
@@ -654,7 +655,7 @@ def get_entity(entity_type: str, code: str) -> dict | None:
     return _get(entity_type, code)
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("add_entity"))
 def add_entity(
     entity_type: str,
     code: str,
@@ -671,7 +672,7 @@ def add_entity(
     return result
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_relationships"))
 def list_relationships(entity_type: str, code: str, direction: str = "outgoing") -> list[dict]:
     """List relationships for an entity."""
     from fd_open_data_mcp.entity_graph_tools import list_relationships as _list
@@ -679,7 +680,7 @@ def list_relationships(entity_type: str, code: str, direction: str = "outgoing")
     return _list(entity_type, code, direction)
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("add_relationship"))
 def add_relationship(
     source_entity_type: str,
     source_code: str,
@@ -700,7 +701,7 @@ def add_relationship(
 
 
 # ─── Graph search (NetworkX) ─────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("graph_search"))
 def graph_search(
     algorithm: str,
     start_entity_code: str,
@@ -920,7 +921,7 @@ def _finish_scoped_search(resolved: dict | None, out: dict,
     return out
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("semantic_search"))
 def semantic_search(
     query: str,
     entity_type: str | None = None,
@@ -969,7 +970,7 @@ def semantic_search(
     return _finish_scoped_search(resolved, out)
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("semantic_search_entities"))
 def semantic_search_entities(
     query: str,
     entity_type: str | None = None,
@@ -999,7 +1000,7 @@ def semantic_search_entities(
     )
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("semantic_search_unified"))
 def semantic_search_unified(
     query: str,
     entity_type: str | None = None,
@@ -1048,7 +1049,7 @@ def semantic_search_unified(
     return _finish_scoped_search(resolved, out)
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("re_embed_concept"))
 def re_embed_concept(concept_id: int) -> dict:
     """Re-embed a single concept."""
     from fd_open_data_mcp.semantic_search import re_embed_concept as _re_embed
@@ -1060,7 +1061,7 @@ def re_embed_concept(concept_id: int) -> dict:
 
 
 # ─── AI search (orchestrates all layers) ────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("ai_search"))
 def ai_search(
     query: str,
     entity_type: str | None = None,
@@ -1123,7 +1124,7 @@ def ai_search(
 
 
 # ─── Source ranking ─────────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("rank_sources"))
 def rank_sources(concept_id: int, requested_date: str | None = None) -> list[dict]:
     """Rank candidate sources for a concept (best-first) with composite scores."""
     from fd_open_data_mcp.ranking.scorer import rank_sources_for_concept
@@ -1145,7 +1146,7 @@ def _scope_error(exc: Exception) -> dict:
     return {"error": "invalid_scope", "detail": str(exc)}
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("scope_create"))
 def scope_create(name: str, rules: dict, description: str | None = None) -> dict:
     """Create a named retrieval scope.
 
@@ -1169,7 +1170,7 @@ def scope_create(name: str, rules: dict, description: str | None = None) -> dict
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("scope_list"))
 def scope_list() -> list[dict]:
     """List every retrieval scope with its allow-list rules."""
     from fd_open_data_mcp import scoping
@@ -1181,7 +1182,7 @@ def scope_list() -> list[dict]:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("scope_update"))
 def scope_update(name: str, rules: dict | None = None,
                  description: str | None = None) -> dict:
     """Update a scope's rules and/or description (same validation as create)."""
@@ -1197,7 +1198,7 @@ def scope_update(name: str, rules: dict | None = None,
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("scope_delete"))
 def scope_delete(name: str) -> dict:
     """Delete a scope (its caller default bindings go with it; stats remain)."""
     from fd_open_data_mcp import scoping
@@ -1212,7 +1213,7 @@ def scope_delete(name: str) -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("scope_bind_caller"))
 def scope_bind_caller(caller_key: str, scope_name: str) -> dict:
     """Bind a caller's default scope (applies when the caller passes no
     explicit scope; an explicit parameter — or the reserved ``unscoped`` —
@@ -1232,7 +1233,7 @@ def scope_bind_caller(caller_key: str, scope_name: str) -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("scope_unbind_caller"))
 def scope_unbind_caller(caller_key: str) -> dict:
     """Drop a caller's default scope binding."""
     from fd_open_data_mcp import scoping
@@ -1247,7 +1248,7 @@ def scope_unbind_caller(caller_key: str) -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("scope_list_bindings"))
 def scope_list_bindings(caller_key: str | None = None) -> list[dict]:
     """List caller default-scope bindings (optionally one caller's)."""
     from fd_open_data_mcp import scoping
@@ -1259,7 +1260,7 @@ def scope_list_bindings(caller_key: str | None = None) -> list[dict]:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("scope_stats"))
 def scope_stats(scope_name: str, days: int = 30) -> dict:
     """Per-day hit counters for one scope (calls, results_returned), most
     recent first — the cost-savings evidence (spec「Scope effectiveness is
@@ -1277,7 +1278,7 @@ def scope_stats(scope_name: str, days: int = 30) -> dict:
 
 
 # ─── Concept-fetch ──────────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("read"))
 def read(concept_id: int | str, entity_type: str | None = None,
          entity_id: int | None = None, dates: list[str] | None = None,
          source: str | None = None, all_sources: bool = False,
@@ -1362,7 +1363,7 @@ def read(concept_id: int | str, entity_type: str | None = None,
 MAX_SERIES_ROWS = 5000
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("read_series"))
 def read_series(concept_id: int | str, entity_type: str | None = None,
                 entity_id: int | None = None, start: str = "", end: str = "",
                 entity: str | None = None, scope: str | None = None,
@@ -1500,7 +1501,7 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("fetch"))
 def fetch(concept_id: int, entity_type: str, entity_id: int, date: str) -> dict:
     """Force a fetch for one (concept, entity, date), bypassing cache freshness."""
     from fd_open_data_mcp.refresh.runner import refresh_concept
@@ -1513,7 +1514,7 @@ def fetch(concept_id: int, entity_type: str, entity_id: int, date: str) -> dict:
 
 
 # ─── Crawl planning ─────────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("plan_crawl"))
 def plan_crawl(
     concept_ids: list[int], entity_type: str,
     start: str | None = None, end: str | None = None,
@@ -1563,7 +1564,7 @@ def plan_crawl(
 
 
 # ─── Scheduled refresh ──────────────────────────────────────────────────────
-@mcp.tool
+@mcp.tool(annotations=annotations_for("generate_refresh_schedules"))
 def generate_refresh_schedules() -> dict:
     """Generate cron schedules for concepts from their indicator_defs.frequency."""
     from fd_open_data_mcp.refresh.scheduler import generate_schedules
@@ -1575,7 +1576,7 @@ def generate_refresh_schedules() -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_schedules"))
 def list_schedules() -> list[dict]:
     """List all refresh schedules."""
     from fd_open_data_mcp.refresh.scheduler import list_schedules as _list
@@ -1587,7 +1588,7 @@ def list_schedules() -> list[dict]:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("run_schedule"))
 def run_schedule(schedule_id: int) -> dict:
     """Run one refresh schedule now (ranked-failover dispatch + execution record)."""
     from fd_open_data_mcp.refresh.runner import run_schedule as _run
@@ -1599,7 +1600,7 @@ def run_schedule(schedule_id: int) -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("list_cnreport_rules"))
 def list_cnreport_rules(
     indicator: str | None = None, document_type: str | None = None,
     module: str | None = None, kind: str | None = None, limit: int = 100,
@@ -1611,7 +1612,7 @@ def list_cnreport_rules(
     return {"count": len(rules), "rules": rules, "errors": errors}
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("enumerate_wbgapi_indicators"))
 def enumerate_wbgapi_indicators(database: str | None = None) -> dict:
     """Enumerate all WDI indicators into columns + concepts + bindings (idempotent)."""
     from fd_open_data_mcp.catalog.wbgapi_enumerate import enumerate_wbgapi_indicators as _enum
@@ -1623,7 +1624,7 @@ def enumerate_wbgapi_indicators(database: str | None = None) -> dict:
         s.close()
 
 
-@mcp.tool
+@mcp.tool(annotations=annotations_for("register_discovered"))
 def register_discovered() -> dict:
     """Auto-discover + register manifests from entry points + a datasources/ dir."""
     from fd_open_data_mcp.catalog.register import discover_datasources

@@ -32,6 +32,7 @@ from fastmcp import FastMCP
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from fd_open_data_mcp.annotations import annotations_for
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.models import CrawlRun, CrawlSource, PendingRun
 from fd_open_data_mcp.visibility import snapshot as _snapshot
@@ -207,7 +208,7 @@ def register_platform_tools(mcp: FastMCP) -> None:
     def _session() -> Session:
         return get_database().get_session()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("platform_sources"))
     def platform_sources(site: str | None = None) -> dict:
         """Crawl-platform source inventory with health and stall hints.
 
@@ -233,7 +234,7 @@ def register_platform_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("platform_runs"))
     def platform_runs(source: str | None = None, limit: int = 20) -> list[dict]:
         """Platform run history from ``crawl_runs`` (all member sites), newest
         first, with the pending_runs trigger lineage (requested_by) when the
@@ -249,7 +250,7 @@ def register_platform_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("platform_trigger"))
     def platform_trigger(source: str, limit: int | None = None) -> dict:
         """Trigger an immediate platform run for ``source`` (insert pending_runs).
 
@@ -271,7 +272,7 @@ def register_platform_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("platform_cancel_run"))
     def platform_cancel_run(run_id: int) -> dict:
         """Request cancellation of a RUNNING platform run (sets the
         cancel_requested flag; the runner terminates as cancelled at its next
@@ -283,7 +284,7 @@ def register_platform_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("platform_cancel_pending"))
     def platform_cancel_pending(pending_id: int) -> dict:
         """Cancel a pending platform run (pending_runs row). CAS: only rows
         still pending/claimed can be cancelled; terminal rows return an

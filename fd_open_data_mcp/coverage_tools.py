@@ -8,13 +8,14 @@ from __future__ import annotations
 
 from fastmcp import FastMCP
 
+from fd_open_data_mcp.annotations import annotations_for
 from fd_open_data_mcp.db import get_database
 
 
 def register_coverage_tools(mcp: FastMCP) -> None:
     """Attach the coverage tools to the given FastMCP instance."""
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("coverage_report"))
     def coverage_report(
         entity_type: str | None = None,
         detail: bool = False,

@@ -30,6 +30,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp import station_ops
+from fd_open_data_mcp.annotations import annotations_for
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.models import CrawlIdentity, CrawlIdentityEvent
 from fd_open_data_mcp.visibility import snapshot as _snapshot
@@ -159,7 +160,7 @@ def register_auth_tools(mcp: FastMCP) -> None:
     def _session() -> Session:
         return get_database().get_session()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("auth_status"))
     def auth_status(source: str | None = None) -> dict:
         """Authenticated-crawling identity-pool overview.
 
@@ -183,7 +184,7 @@ def register_auth_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("auth_events"))
     def auth_events(source: str | None = None, limit: int = 20) -> list[dict]:
         """Identity event stream (crawl_identity_events), newest first: the
         login/probe/lease audit trail with the identity (source + account
@@ -199,7 +200,7 @@ def register_auth_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("auth_request_login"))
     def auth_request_login(source: str, account_alias: str,
                            automation: str = "assisted") -> dict:
         """Register or reset an identity as login_required (the 需登录队列).
@@ -223,7 +224,7 @@ def register_auth_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("auth_launch_login"))
     def auth_launch_login(source: str, account_alias: str,
                           automation: str = "assisted",
                           egress_ref: str | None = None) -> dict:

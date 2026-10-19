@@ -14,6 +14,7 @@ from croniter import croniter
 from fastmcp import FastMCP
 from sqlalchemy.orm import Session
 
+from fd_open_data_mcp.annotations import annotations_for
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.models import CrawlPolicy, PolicyRun
 from fd_open_data_mcp.refresh.reconciler import (
@@ -117,7 +118,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
                     f"instead, or invoke policy_trigger_now for a deliberate one-shot "
                     f"backfill of the explicit window.")
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_create"))
     def policy_create(
         name: str,
         concept_ids: list[int],
@@ -179,7 +180,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_list"))
     def policy_list(enabled: bool | None = None) -> list[dict]:
         """List crawl policies. Optional filter by enabled status."""
         s = _session()
@@ -191,7 +192,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_get"))
     def policy_get(policy_id: int) -> dict:
         """Get a single crawl policy by ID."""
         s = _session()
@@ -203,7 +204,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_update"))
     def policy_update(
         policy_id: int,
         name: str | None = None,
@@ -250,17 +251,17 @@ def register_policy_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_enable"))
     def policy_enable(policy_id: int) -> dict:
         """Enable a crawl policy."""
         return policy_update(policy_id, enabled=True)
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_disable"))
     def policy_disable(policy_id: int) -> dict:
         """Disable a crawl policy."""
         return policy_update(policy_id, enabled=False)
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_delete"))
     def policy_delete(policy_id: int) -> dict:
         """Delete a crawl policy and all its runs (cascade)."""
         s = _session()
@@ -274,7 +275,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_trigger_now"))
     def policy_trigger_now(policy_id: int) -> dict:
         """Trigger a crawl for the policy immediately.
 
@@ -293,7 +294,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_runs"))
     def policy_runs(
         policy_id: int | None = None,
         status: str | None = None,
@@ -320,7 +321,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("policy_estimate"))
     def policy_estimate(
         concept_ids: list[int],
         entity_type: str,
@@ -360,7 +361,7 @@ def register_policy_tools(mcp: FastMCP) -> None:
         finally:
             s.close()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("data_stats"))
     def data_stats(
         concept_id: int | None = None,
         entity_type: str | None = None,

@@ -12,6 +12,7 @@ from __future__ import annotations
 from fastmcp import FastMCP
 from sqlalchemy.orm import Session
 
+from fd_open_data_mcp.annotations import annotations_for
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.visibility import snapshot
 
@@ -22,7 +23,7 @@ def register_visibility_tools(mcp: FastMCP) -> None:
     def _session() -> Session:
         return get_database().get_session()
 
-    @mcp.tool
+    @mcp.tool(annotations=annotations_for("crawl_status"))
     def crawl_status(
         hours: int = 24,
         run_limit: int = 20,
