@@ -960,7 +960,7 @@ requires-dist = [
     { name = "edgartools", marker = "extra == 'data'", specifier = ">=2.0" },
     { name = "fastapi", specifier = ">=0.110" },
     { name = "fastembed", marker = "extra == 'search'", specifier = ">=0.3" },
-    { name = "fastmcp", specifier = ">=2.0" },
+    { name = "fastmcp", specifier = ">=3.4,<4" },
     { name = "fd-open-data-protocol", directory = "../fd-open-data-protocol" },
     { name = "jinja2", specifier = ">=3.1" },
     { name = "pandas", specifier = ">=2.0" },
