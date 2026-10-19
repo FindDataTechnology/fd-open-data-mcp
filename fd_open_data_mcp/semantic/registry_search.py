@@ -155,6 +155,24 @@ def _search_pgvector(session: Session, query: str, limit: int) -> list[dict]:
     return [_hit(row, row.similarity) for row in rows]
 
 
+#: 最近一次 registry 检索的降级原因（None 表示未降级）。
+#: 单线程语义足够：本服务每个请求在自己的线程里跑，读一次即消费（见调用方）。
+LAST_DEGRADED: str | None = None
+
+
+def _set_degraded(reason: str) -> None:
+    global LAST_DEGRADED
+    LAST_DEGRADED = reason
+
+
+def take_degraded_reason() -> str | None:
+    """取走并清空降级原因——"取走"而非"读取"，避免上一次请求的降级泄漏到
+    下一次成功的请求里。"""
+    global LAST_DEGRADED
+    reason, LAST_DEGRADED = LAST_DEGRADED, None
+    return reason
+
+
 def search_registry(
     query: str, limit: int = 20, session: Session | None = None,
 ) -> list[dict]:
@@ -165,8 +183,14 @@ def search_registry(
     similarity desc (``read_via`` per design D2; ``null`` when the source has
     no domain read channel). ``verified`` is evaluated live via the JOIN —
     never a snapshot from embed time. When ``session`` is omitted, one is
-    opened against the configured database. Fail-soft: missing tables or an
-    unreadable corpus return ``[]``.
+    opened against the configured database.
+
+    **Fail-soft with a signal**: a missing corpus or an unreadable one returns
+    ``[]`` *and* sets the module-level ``LAST_DEGRADED`` reason. The caller
+    merges local hits and attaches that reason to the response, so "registry
+    contributed nothing" is distinguishable from "registry was unreachable"
+    (mcp-error-semantics: 声明的降级可辨认). Returning a bare ``[]`` would
+    make a partial outage look like a complete answer.
     """
     if session is None:
         from fd_open_data_mcp import db as dbmod
@@ -179,6 +203,7 @@ def search_registry(
             logger.debug(
                 "registry corpus tables not present; registry hits skipped",
             )
+            _set_degraded("registry_corpus_absent")
             return []
 
         backend = _backend()
@@ -200,6 +225,7 @@ def search_registry(
         return _search_json(session, query, limit)
     except (OperationalError, ProgrammingError) as exc:
         logger.info("registry corpus unreadable (%s); registry hits skipped", exc)
+        _set_degraded(f"registry_corpus_unreadable: {type(exc).__name__}")
         return []
     finally:
         if own_session:

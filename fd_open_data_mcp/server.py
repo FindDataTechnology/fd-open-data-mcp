@@ -940,6 +940,7 @@ def semantic_search(
     from fd_open_data_mcp.semantic.registry_search import (
         merge_registry_hits,
         search_registry,
+        take_degraded_reason,
     )
 
     resolved, error = _resolve_scope_for_search(scope)
@@ -953,13 +954,20 @@ def semantic_search(
         # semantic_code collisions. Same binding-aware key as the concept
         # search — registry entries carry no bindings.
         registry_hits = search_registry(query, limit)
+        degraded = take_degraded_reason()
 
         def _rank(c):
             sim = c.get("similarity", 0.0)
             return (round(sim / 0.05), 1 if c.get("has_binding") else 0, sim)
 
         merged = merge_registry_hits(results, registry_hits, limit=limit, key=_rank)
-        return {"count": len(merged), "results": merged}
+        out = {"count": len(merged), "results": merged}
+        if degraded:
+            # 本地结果仍然有效，故不整单失败；但"registry 没贡献"与"registry
+            # 取不到"必须可区分——前者是完整答案，后者是部分答案。
+            out["degraded"] = True
+            out["degraded_reason"] = degraded
+        return out
 
     out = cached_search(
         "semantic_search",
@@ -1023,6 +1031,7 @@ def semantic_search_unified(
     from fd_open_data_mcp.semantic.registry_search import (
         merge_registry_hits,
         search_registry,
+        take_degraded_reason,
     )
 
     resolved, error = _resolve_scope_for_search(scope)
@@ -1091,6 +1100,7 @@ def ai_search(
     from fd_open_data_mcp.semantic.registry_search import (
         merge_registry_hits,
         search_registry,
+        take_degraded_reason,
     )
 
     resolved, error = _resolve_scope_for_search(scope)
