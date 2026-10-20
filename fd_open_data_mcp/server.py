@@ -1287,6 +1287,27 @@ def scope_stats(scope_name: str, days: int = 30) -> dict:
         s.close()
 
 
+def _local_concept_for_key(session, key):
+    """Return the non-deprecated Concept whose ``code`` matches ``key``.
+
+    Used only when a registry entry's source_db has no federated read channel,
+    so the entry can still be served from the local dictionary instead of
+    failing with ``no_read_channel`` (spec wire-indicator-catalog: verified
+    entries are advertised as 可直读). Returns None when nothing matches.
+    """
+    from fd_open_data_mcp.models import Concept
+
+    key_str = str(key).strip()
+    if not key_str:
+        return None
+    return (
+        session.query(Concept)
+        .filter(Concept.code == key_str, Concept.deprecated.is_(False))
+        .order_by(Concept.id)
+        .first()
+    )
+
+
 # ─── Concept-fetch ──────────────────────────────────────────────────────────
 @mcp.tool(annotations=annotations_for("read"))
 def read(concept_id: int | str, entity_type: str | None = None,
@@ -1348,6 +1369,22 @@ def read(concept_id: int | str, entity_type: str | None = None,
 
         entry = federation.resolve_registry_entry(s, concept_id)
         if entry is not None:
+            # A registry entry whose source_db owns a federated channel keeps
+            # routing to it exactly as before. Only a channel-less source_db
+            # may fall back to a local concept of the same code: those entries
+            # are advertised as 可直读 yet have no way to serve values, which
+            # the mirror-adapter source (fd_open_data) hits for every concept
+            # it registers (change industry-vertical-supply).
+            local = None
+            if entry.get("source_db") not in federation.SOURCE_DB_CHANNELS:
+                local = _local_concept_for_key(s, concept_id)
+            if local is not None:
+                rows = _read(s, local.id, entity_type, entity_id, dates,
+                             source=source, all_sources=all_sources)
+                if resolved:
+                    scoping.record_hit(s, resolved["name"],
+                                       sum(1 for r in rows if not r.get("error")))
+                return rows
             # Registry-only indicator — route by source_db (design D1).
             violation = scoping.check_read_scope(
                 resolved, code=entry.get("semantic_code"),
@@ -1433,20 +1470,31 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         if concept is None:
             entry = federation.resolve_registry_entry(s, concept_id)
             if entry is not None:
-                violation = scoping.check_read_scope(
-                    resolved, code=entry.get("semantic_code"),
-                    category=entry.get("domain"), source_db=entry.get("source_db"),
-                    native_code=entry.get("native_code"),
-                ) if resolved else None
-                if violation:
-                    return violation
-                out = federation.federated_read_series(
-                    s, concept_id, start, end, entity=entity,
-                )
-                if resolved:
-                    scoping.record_hit(s, resolved["name"], out.get("count", 0))
-                return out
-            cid = concept_id  # neither local nor registry: local error behavior
+                # Same fallback as `read`: only a source_db with no federated
+                # channel may be served from the local concept dictionary.
+                # Sources that DO own a channel are untouched.
+                if entry.get("source_db") not in federation.SOURCE_DB_CHANNELS:
+                    local = _local_concept_for_key(s, concept_id)
+                    if local is not None:
+                        concept = local
+                        cid = local.id
+                if concept is None:
+                    violation = scoping.check_read_scope(
+                        resolved, code=entry.get("semantic_code"),
+                        category=entry.get("domain"),
+                        source_db=entry.get("source_db"),
+                        native_code=entry.get("native_code"),
+                    ) if resolved else None
+                    if violation:
+                        return violation
+                    out = federation.federated_read_series(
+                        s, concept_id, start, end, entity=entity,
+                    )
+                    if resolved:
+                        scoping.record_hit(s, resolved["name"], out.get("count", 0))
+                    return out
+            if concept is None:
+                cid = concept_id  # neither local nor registry: local error behavior
 
         check_applicability(s, cid, entity_type)
         violation = scoping.check_read_scope(
