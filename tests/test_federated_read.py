@@ -25,6 +25,7 @@ CREATE TABLE registry_entries (
   unit VARCHAR(64),
   frequency VARCHAR(32),
   domain VARCHAR(64),
+  provenance TEXT,
   verified INTEGER DEFAULT 0
 )
 """
@@ -36,7 +37,8 @@ def _seed_registry(session, **kw):
         "source_column": "value", "native_code": "10401",
         "semantic_code": "yb.total_population", "name_zh": "年末总人口",
         "name_en": "Year-end total population", "unit": "万人",
-        "frequency": "yearly", "domain": "人口", "verified": 1,
+        "frequency": "yearly", "domain": "人口",
+        "provenance": '{"province_codes": ["sx"]}', "verified": 1,
     }
     row.update(kw)
     cols = ", ".join(row)
@@ -56,11 +58,13 @@ def registry_session(session):
 @pytest.fixture(autouse=True)
 def _flag_and_endpoint(monkeypatch):
     """Every test starts from an explicit flag/endpoint state (flag default
-    is off — production starts there too)."""
+    is off — production starts there too). Strict yearbook region handling is
+    on unless a test opts out."""
     federation.reset_cooldown()
     monkeypatch.delenv(federation.FLAG_ENV, raising=False)
     monkeypatch.delenv(federation.ENDPOINT_ENV, raising=False)
     monkeypatch.setenv(federation.ENDPOINT_ENV, "http://business-mcp.test/mcp")
+    monkeypatch.setenv(federation.YEARBOOK_STRICT_ENV, "1")
     yield
     federation.reset_cooldown()
 
@@ -74,6 +78,28 @@ YEARBOOK_PAYLOAD = {
 }
 
 
+def _fake_yearbook(payload=None, regions=None, calls=None):
+    """Tool-aware fake: yearbook_regions + yearbook_read."""
+    payload = payload or YEARBOOK_PAYLOAD
+    if regions is None:
+        regions = [{"province": None, "region": "全国", "row_count": 2}]
+
+    def fake(tool, args):
+        if calls is not None:
+            calls.append((tool, dict(args)))
+        if tool == "yearbook_regions":
+            return {"results": list(regions), "count": len(regions),
+                    "truncated": False}
+        return dict(payload)
+
+    return fake
+
+
+def _yearbook_payload(rows, truncated=False, next_offset=None):
+    return {"results": rows, "count": len(rows),
+            "truncated": truncated, "next_offset": next_offset}
+
+
 # ─── 1.1 透明读取: yearbook success path ────────────────────────────────────
 
 def test_registry_only_yearbook_read_succeeds_transparently(registry_session, monkeypatch):
@@ -83,7 +109,10 @@ def test_registry_only_yearbook_read_succeeds_transparently(registry_session, mo
     seen = {}
 
     def fake_call(tool, args):
-        seen["tool"], seen["args"] = tool, args
+        seen.setdefault(tool, []).append(dict(args))
+        if tool == "yearbook_regions":
+            return {"results": [{"province": None, "region": "全国", "row_count": 2}],
+                    "count": 1, "truncated": False}
         return dict(YEARBOOK_PAYLOAD)
 
     monkeypatch.setattr(federation, "_call_domain_tool", fake_call)
@@ -91,13 +120,15 @@ def test_registry_only_yearbook_read_succeeds_transparently(registry_session, mo
 
     rows = federation.federated_read(
         registry_session, "yb.total_population", ["2015", "2016"])
-    assert seen["tool"] == "yearbook_read"
-    assert seen["args"]["indicator_id"] == 10401
+    assert seen["yearbook_read"][0]["indicator_id"] == 10401
+    assert seen["yearbook_read"][0]["limit"] == federation.YEARBOOK_PAGE_LIMIT
+    assert seen["yearbook_read"][0]["offset"] == 0
+    assert seen["yearbook_read"][0]["region"] == "全国"
     assert rows == [
         {"date": "2015", "value": 137462.0, "unit": "万人",
-         "source_used": "yearbook_catalog"},
+         "source_used": "yearbook_catalog", "region": "全国"},
         {"date": "2016", "value": 138271.0, "unit": "万人",
-         "source_used": "yearbook_catalog"},
+         "source_used": "yearbook_catalog", "region": "全国"},
     ]
 
 
@@ -107,8 +138,7 @@ def test_read_tool_routes_semantic_code_via_server(registry_session, monkeypatch
     from fd_open_data_mcp import server
 
     _seed_registry(registry_session)
-    monkeypatch.setattr(federation, "_call_domain_tool",
-                        lambda tool, args: dict(YEARBOOK_PAYLOAD))
+    monkeypatch.setattr(federation, "_call_domain_tool", _fake_yearbook())
     monkeypatch.setenv(federation.FLAG_ENV, "1")
 
     rows = server.read("yb.total_population", dates=["2015"])
@@ -119,8 +149,7 @@ def test_read_tool_routes_semantic_code_via_server(registry_session, monkeypatch
 
 def test_read_series_registry_path(registry_session, monkeypatch):
     _seed_registry(registry_session)
-    monkeypatch.setattr(federation, "_call_domain_tool",
-                        lambda tool, args: dict(YEARBOOK_PAYLOAD))
+    monkeypatch.setattr(federation, "_call_domain_tool", _fake_yearbook())
     monkeypatch.setenv(federation.FLAG_ENV, "1")
 
     from fd_open_data_mcp import server
@@ -133,8 +162,7 @@ def test_read_series_registry_path(registry_session, monkeypatch):
 
 def test_resolve_by_native_code(registry_session, monkeypatch):
     _seed_registry(registry_session)
-    monkeypatch.setattr(federation, "_call_domain_tool",
-                        lambda tool, args: dict(YEARBOOK_PAYLOAD))
+    monkeypatch.setattr(federation, "_call_domain_tool", _fake_yearbook())
     monkeypatch.setenv(federation.FLAG_ENV, "1")
     rows = federation.federated_read(registry_session, "10401", ["2015"])
     assert rows[0]["value"] == 137462.0
@@ -278,3 +306,136 @@ def test_world_bank_read_requires_entity(registry_session, monkeypatch):
     rows = federation.federated_read(
         registry_session, "wb.population_total", ["2015"], entity="CHN")
     assert rows[0]["value"] == 137462.0
+
+
+# ─── yearbook multi-region correctness ──────────────────────────────────────
+
+MULTI_REGIONS = [
+    {"province": "山西", "region": "A县", "row_count": 2},
+    {"province": "山西", "region": "B县", "row_count": 2},
+]
+
+MULTI_REGION_PAYLOAD = _yearbook_payload([
+    {"year": 2015, "region": "A县", "value": 100.0, "unit": "person"},
+    {"year": 2015, "region": "B县", "value": 200.0, "unit": "person"},
+    {"year": 2016, "region": "A县", "value": 110.0, "unit": "person"},
+    {"year": 2016, "region": "B县", "value": 210.0, "unit": "person"},
+])
+
+
+def test_multi_region_without_entity_is_entity_required(registry_session, monkeypatch):
+    _seed_registry(registry_session)
+    calls = []
+    monkeypatch.setattr(federation, "_call_domain_tool",
+                        _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS, calls))
+    monkeypatch.setenv(federation.FLAG_ENV, "1")
+
+    rows = federation.federated_read(registry_session, "yb.total_population", ["2015"])
+    assert rows[0]["error"] == "entity_required"
+    assert rows[0]["province_codes"] == ["sx"]
+    assert rows[0]["region_count"] == 2
+    assert [c[0] for c in calls] == ["yearbook_regions"]  # no read attempted
+
+
+def test_entity_required_series(registry_session, monkeypatch):
+    _seed_registry(registry_session)
+    monkeypatch.setattr(federation, "_call_domain_tool",
+                        _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS))
+    monkeypatch.setenv(federation.FLAG_ENV, "1")
+
+    out = federation.federated_read_series(
+        registry_session, "yb.total_population", "2015", "2016")
+    assert out["error"] == "entity_required"
+    assert out["province_codes"] == ["sx"]
+    assert out["region_count"] == 2
+
+
+def test_province_entity_routes_to_province_and_returns_multi_region_points(
+        registry_session, monkeypatch):
+    _seed_registry(registry_session)
+    calls = []
+    monkeypatch.setattr(federation, "_call_domain_tool",
+                        _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS, calls))
+    monkeypatch.setenv(federation.FLAG_ENV, "1")
+
+    rows = federation.federated_read(
+        registry_session, "yb.total_population", ["2015", "2016"], entity="山西")
+    read_args = [a for tool, a in calls if tool == "yearbook_read"][0]
+    assert read_args["province"] == "山西"
+    assert "region" not in read_args
+    assert {(r["date"], r["region"]) for r in rows} == {
+        ("2015", "A县"), ("2015", "B县"), ("2016", "A县"), ("2016", "B县")}
+    assert all(r["source_used"] == "yearbook_catalog" for r in rows)
+
+
+def test_county_entity_routes_to_region(registry_session, monkeypatch):
+    _seed_registry(registry_session)
+    calls = []
+    payload = _yearbook_payload([
+        {"year": 2015, "region": "A县", "value": 100.0, "unit": "person"}])
+    monkeypatch.setattr(
+        federation, "_call_domain_tool",
+        _fake_yearbook(payload, [{"province": "山西", "region": "A县", "row_count": 1}], calls))
+    monkeypatch.setenv(federation.FLAG_ENV, "1")
+
+    rows = federation.federated_read(
+        registry_session, "yb.total_population", ["2015"], entity="A县")
+    read_args = [a for tool, a in calls if tool == "yearbook_read"][0]
+    assert read_args["region"] == "A县"
+    assert "province" not in read_args
+    assert rows == [{"date": "2015", "value": 100.0, "unit": "person",
+                     "source_used": "yearbook_catalog", "region": "A县"}]
+
+
+def test_pagination_fetches_all_pages(registry_session, monkeypatch):
+    _seed_registry(registry_session)
+    offsets = []
+
+    def fake(tool, args):
+        if tool == "yearbook_regions":
+            return {"results": MULTI_REGIONS, "count": 2, "truncated": False}
+        offsets.append(args["offset"])
+        if args["offset"] == 0:
+            return _yearbook_payload(
+                [{"year": 2015, "region": "A县", "value": 100.0, "unit": "person"}],
+                truncated=True, next_offset=2)
+        return _yearbook_payload(
+            [{"year": 2015, "region": "B县", "value": 200.0, "unit": "person"}])
+
+    monkeypatch.setattr(federation, "_call_domain_tool", fake)
+    monkeypatch.setenv(federation.FLAG_ENV, "1")
+
+    rows = federation.federated_read(
+        registry_session, "yb.total_population", ["2015"], entity="山西")
+    assert offsets == [0, 2]
+    assert {r["region"] for r in rows} == {"A县", "B县"}
+    assert len(rows) == 2
+
+
+def test_strict_flag_off_restores_legacy_behavior(registry_session, monkeypatch):
+    _seed_registry(registry_session)
+    calls = []
+    monkeypatch.setattr(federation, "_call_domain_tool",
+                        _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS, calls))
+    monkeypatch.setenv(federation.FLAG_ENV, "1")
+    monkeypatch.setenv(federation.YEARBOOK_STRICT_ENV, "0")
+
+    rows = federation.federated_read(registry_session, "yb.total_population", ["2015"])
+    assert [c[0] for c in calls] == ["yearbook_read"]  # no region discovery
+    read_args = calls[0][1]
+    assert "limit" not in read_args and "offset" not in read_args
+    assert len(rows) == 1  # legacy per-year collapse
+    assert "region" not in rows[0]
+
+
+def test_repeated_reads_are_identical(registry_session, monkeypatch):
+    _seed_registry(registry_session)
+    monkeypatch.setattr(federation, "_call_domain_tool",
+                        _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS))
+    monkeypatch.setenv(federation.FLAG_ENV, "1")
+
+    first = federation.federated_read(
+        registry_session, "yb.total_population", ["2015", "2016"], entity="山西")
+    second = federation.federated_read(
+        registry_session, "yb.total_population", ["2015", "2016"], entity="山西")
+    assert first == second

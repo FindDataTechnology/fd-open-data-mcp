@@ -33,6 +33,7 @@ CREATE TABLE registry_entries (
   unit VARCHAR(64),
   frequency VARCHAR(32),
   domain VARCHAR(64),
+  provenance TEXT,
   verified INTEGER DEFAULT 0
 )
 """
@@ -115,7 +116,8 @@ def test_local_concept_does_not_hijack_a_source_that_owns_a_channel(
     monkeypatch.setattr(federation, "_call_domain_tool", fake_call)
 
     rows = server.read("yb.total_population", "country", 1, ["2015-12-31"])
-    assert calls == ["yearbook_read"], "must still use the federated channel"
+    assert calls[0] == "yearbook_regions", "region discovery precedes the read"
+    assert calls[-1] == "yearbook_read", "must still use the federated channel"
 
 
 def test_unresolvable_entry_keeps_no_read_channel(registry_session):
