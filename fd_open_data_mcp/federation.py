@@ -270,20 +270,41 @@ def _payload_failure(payload: dict) -> Optional[dict]:
     return None
 
 
-def _yearbook_regions(entry: dict) -> tuple[list[dict], Optional[dict]]:
-    """Fetch the bounded (province, region) list; (regions, error)."""
+def _yearbook_regions(entry: dict) -> tuple[list[dict], list[dict], Optional[dict]]:
+    """Fetch the bounded (province, region) list and province dictionary.
+
+    Returns ``(regions, provinces, error)``. ``provinces`` is the dictionary
+    slice covering the indicator (two-letter code, name, aliases), used to
+    normalise a caller's entity before pushing the filter down.
+    """
     try:
         payload = _call_domain_tool(
             "yearbook_regions",
             {"indicator_id": int(entry["native_code"]), "limit": 500},
         )
     except FederationUnavailable as exc:
-        return [], _error("federation_unavailable", str(exc),
-                          source_db=entry.get("source_db"))
+        return [], [], _error("federation_unavailable", str(exc),
+                              source_db=entry.get("source_db"))
     failure = _payload_failure(payload)
     if failure is not None:
-        return [], failure
-    return [r for r in payload.get("results") or [] if isinstance(r, dict)], None
+        return [], [], failure
+    regions = [r for r in payload.get("results") or [] if isinstance(r, dict)]
+    provinces = [p for p in payload.get("provinces") or [] if isinstance(p, dict)]
+    return regions, provinces, None
+
+
+def _province_lookup(provinces: list[dict]) -> dict[str, str]:
+    """Map every accepted province label (code, name, alias) to its code."""
+    lookup: dict[str, str] = {}
+    for prov in provinces:
+        code = prov.get("code")
+        if not isinstance(code, str) or not code:
+            continue
+        labels = [code, prov.get("name"), *(prov.get("aliases") or [])]
+        for label in labels:
+            if isinstance(label, str) and label.strip():
+                lookup[label.strip().lower()] = code
+    return lookup
 
 
 def _yearbook_args(
@@ -293,7 +314,9 @@ def _yearbook_args(
 
     Multi-region indicators without an entity return an ``entity_required``
     error (fail loud) instead of an arbitrary region. Single-region
-    indicators keep the legacy no-entity behaviour.
+    indicators keep the legacy no-entity behaviour. An entity matching a
+    province (by code, name or alias) is pushed down as the ``province``
+    filter; anything else is pushed down as ``region``.
     """
     native = int(entry["native_code"])
     base = {"indicator_id": native, "start_year": start_year, "end_year": end_year}
@@ -302,18 +325,20 @@ def _yearbook_args(
             base["region"] = entity
         return base, None
 
-    regions, failure = _yearbook_regions(entry)
+    regions, provinces, failure = _yearbook_regions(entry)
     if failure is not None:
         return {}, failure
     region_names = {r.get("region") for r in regions if r.get("region")}
-    province_names = {r.get("province") for r in regions if r.get("province")}
+    province_lookup = _province_lookup(provinces)
 
     if entity:
-        if entity in province_names:
-            base["province"] = entity
+        key = entity.strip()
+        code = province_lookup.get(key.lower())
+        if code:
+            base["province"] = code
         else:
             # County/city name (or an unknown value — let the domain decide).
-            base["region"] = entity
+            base["region"] = key
         return base, None
 
     if len(region_names) <= 1:
@@ -323,13 +348,18 @@ def _yearbook_args(
         return base, None
 
     prov = _entry_provenance(entry)
+    province_codes = prov.get("province_codes") or []
+    if not province_codes:
+        province_codes = sorted({p.get("code") for p in provinces if p.get("code")})
     return {}, _error(
         "entity_required",
         "this yearbook indicator stores values for multiple regions; pass entity "
         "(a province or a county/city name) to select one",
         source_db=entry.get("source_db"),
         concept_id=entry.get("semantic_code") or entry.get("native_code"),
-        province_codes=prov.get("province_codes") or [],
+        province_codes=province_codes,
+        provinces=[{"code": p.get("code"), "name": p.get("name")}
+                   for p in provinces[:50]],
         regions=[{"province": r.get("province"), "region": r.get("region")}
                  for r in regions[:50]],
         region_count=len(region_names),

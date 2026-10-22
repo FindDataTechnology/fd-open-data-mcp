@@ -78,7 +78,7 @@ YEARBOOK_PAYLOAD = {
 }
 
 
-def _fake_yearbook(payload=None, regions=None, calls=None):
+def _fake_yearbook(payload=None, regions=None, calls=None, provinces=None):
     """Tool-aware fake: yearbook_regions + yearbook_read."""
     payload = payload or YEARBOOK_PAYLOAD
     if regions is None:
@@ -88,8 +88,8 @@ def _fake_yearbook(payload=None, regions=None, calls=None):
         if calls is not None:
             calls.append((tool, dict(args)))
         if tool == "yearbook_regions":
-            return {"results": list(regions), "count": len(regions),
-                    "truncated": False}
+            return {"results": list(regions), "provinces": list(provinces or []),
+                    "count": len(regions), "truncated": False}
         return dict(payload)
 
     return fake
@@ -311,8 +311,12 @@ def test_world_bank_read_requires_entity(registry_session, monkeypatch):
 # ─── yearbook multi-region correctness ──────────────────────────────────────
 
 MULTI_REGIONS = [
-    {"province": "山西", "region": "A县", "row_count": 2},
-    {"province": "山西", "region": "B县", "row_count": 2},
+    {"province": "山西", "province_code": "sx", "region": "A县", "row_count": 2},
+    {"province": "山西", "province_code": "sx", "region": "B县", "row_count": 2},
+]
+
+MULTI_PROVINCES = [
+    {"code": "sx", "name": "山西", "aliases": ["山西省"]},
 ]
 
 MULTI_REGION_PAYLOAD = _yearbook_payload([
@@ -355,17 +359,51 @@ def test_province_entity_routes_to_province_and_returns_multi_region_points(
     _seed_registry(registry_session)
     calls = []
     monkeypatch.setattr(federation, "_call_domain_tool",
-                        _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS, calls))
+                        _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS, calls,
+                                       MULTI_PROVINCES))
     monkeypatch.setenv(federation.FLAG_ENV, "1")
 
     rows = federation.federated_read(
         registry_session, "yb.total_population", ["2015", "2016"], entity="山西")
     read_args = [a for tool, a in calls if tool == "yearbook_read"][0]
-    assert read_args["province"] == "山西"
+    assert read_args["province"] == "sx"  # normalised to the dictionary code
     assert "region" not in read_args
     assert {(r["date"], r["region"]) for r in rows} == {
         ("2015", "A县"), ("2015", "B县"), ("2016", "A县"), ("2016", "B县")}
     assert all(r["source_used"] == "yearbook_catalog" for r in rows)
+
+
+def test_province_code_and_alias_entities_normalise_to_the_same_filter(
+        registry_session, monkeypatch):
+    """The province filter accepts name, code and alias alike — the domain
+    receives the stable two-letter code in every case."""
+    _seed_registry(registry_session)
+    for entity in ("山西", "sx", "SX", "山西省"):
+        calls = []
+        monkeypatch.setattr(federation, "_call_domain_tool",
+                            _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS, calls,
+                                           MULTI_PROVINCES))
+        monkeypatch.setenv(federation.FLAG_ENV, "1")
+        federation.federated_read(
+            registry_session, "yb.total_population", ["2015"], entity=entity)
+        read_args = [a for tool, a in calls if tool == "yearbook_read"][0]
+        assert read_args["province"] == "sx", entity
+        assert "region" not in read_args
+
+
+def test_entity_required_reports_dictionary_provinces(registry_session, monkeypatch):
+    """province_codes come from the registry provenance; the dictionary slice
+    rides along so a caller can normalise the name before retrying."""
+    _seed_registry(registry_session, provenance="{}")
+    monkeypatch.setattr(federation, "_call_domain_tool",
+                        _fake_yearbook(MULTI_REGION_PAYLOAD, MULTI_REGIONS,
+                                       provinces=MULTI_PROVINCES))
+    monkeypatch.setenv(federation.FLAG_ENV, "1")
+
+    rows = federation.federated_read(registry_session, "yb.total_population", ["2015"])
+    assert rows[0]["error"] == "entity_required"
+    assert rows[0]["province_codes"] == ["sx"]  # falls back to the dictionary
+    assert rows[0]["provinces"] == [{"code": "sx", "name": "山西"}]
 
 
 def test_county_entity_routes_to_region(registry_session, monkeypatch):
@@ -375,7 +413,9 @@ def test_county_entity_routes_to_region(registry_session, monkeypatch):
         {"year": 2015, "region": "A县", "value": 100.0, "unit": "person"}])
     monkeypatch.setattr(
         federation, "_call_domain_tool",
-        _fake_yearbook(payload, [{"province": "山西", "region": "A县", "row_count": 1}], calls))
+        _fake_yearbook(payload, [{"province": "山西", "province_code": "sx",
+                                  "region": "A县", "row_count": 1}], calls,
+                       MULTI_PROVINCES))
     monkeypatch.setenv(federation.FLAG_ENV, "1")
 
     rows = federation.federated_read(
