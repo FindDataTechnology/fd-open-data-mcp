@@ -1849,6 +1849,77 @@ def _http_asgi():
     return composite
 
 
+# ── cross-border merchant connector (内圈授权闸，add-crossborder-vertical-line 3.2) ──
+
+CROSSBORDER_PLATFORMS: dict[str, dict[str, str]] = {
+    "tiktok_shop": {"label": "TikTok Shop", "note": "first channel (2026-11 ruling)"},
+    "amazon": {"label": "Amazon SP-API", "note": "second channel, deferred"},
+    "temu": {"label": "Temu", "note": "catalog entity only"},
+    "shein": {"label": "SHEIN", "note": "catalog entity only"},
+}
+
+
+def _merchant_auth_registry() -> dict[str, dict]:
+    """Merchant grants from env; unset/invalid means nothing authorized yet."""
+    import json as _json
+    import os
+
+    raw = os.environ.get("FD_CROSSBORDER_MERCHANT_AUTH_JSON", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = _json.loads(raw)
+    except ValueError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+@mcp.tool(annotations=annotations_for("crossborder_merchant_status"))
+def crossborder_merchant_status(platform: str = "tiktok_shop") -> dict:
+    """Report merchant-authorization status for a cross-border platform connector.
+
+    The inner-ring data channel (store operations, platform bestsellers,
+    after-sales reviews) is merchant-authorization-gated BY DESIGN: the
+    connector reads platform OFFICIAL APIs only, with the merchant's explicit
+    store authorization; scraping is out of contract (triage discipline:
+    never reverse-engineer). Until a merchant completes authorization the
+    tool answers with a structured ``unavailable (unauthorized)`` response —
+    never an error object and never a silent empty list, so agents can report
+    「不可得（未授权）」 verbatim.
+
+    Authorized deployments register merchant grants via the
+    ``FD_CROSSBORDER_MERCHANT_AUTH_JSON`` env ({"<platform>": {"authorized":
+    true, "merchant_id": "...", "scopes": [...]}}); the same response shape
+    then flips to ``authorized`` with the granted scopes.
+    """
+    key = (platform or "").strip().lower()
+    meta = CROSSBORDER_PLATFORMS.get(key)
+    if meta is None:
+        return {
+            "status": "unknown_platform",
+            "platform": platform,
+            "known_platforms": sorted(CROSSBORDER_PLATFORMS),
+        }
+    grant = _merchant_auth_registry().get(key) or {}
+    if grant.get("authorized") is True:
+        return {
+            "status": "authorized",
+            "platform": key,
+            "label": meta["label"],
+            "merchant_id": grant.get("merchant_id"),
+            "scopes": grant.get("scopes") or [],
+        }
+    return {
+        "status": "unavailable",
+        "reason": "unauthorized",
+        "platform": key,
+        "label": meta["label"],
+        "detail": "商家店铺授权前置（平台官方 API 通道，未授权不采集）——内圈数据不可得（未授权）",
+        "first_channel": key == "tiktok_shop",
+        "how_to_authorize": "店铺官方 API 授权凭据由部署方经 FD_CROSSBORDER_MERCHANT_AUTH_JSON 登记",
+    }
+
+
 def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8300) -> None:
     """Run the FastMCP server.
 

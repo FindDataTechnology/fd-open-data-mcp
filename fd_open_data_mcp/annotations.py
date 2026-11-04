@@ -153,6 +153,9 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     # converge once the row is fresh. Registry-only reads go through the
     # business-mcp federation channel, a live external service.
     "read": dict(WRITE_OPEN_WORLD_IDEMPOTENT),
+    # ── cross-border connector (server.py) ────────────────────────────────
+    # 授权闸状态查询：只读、无副作用；未授权返回结构化「不可得（未授权）」。
+    "crossborder_merchant_status": dict(READ_ONLY),
     # read_series serves stored cache only, but fill_gaps=True fetches and
     # inserts the missing intervals (insert-only), and registry reads federate.
     "read_series": dict(WRITE_OPEN_WORLD_IDEMPOTENT),

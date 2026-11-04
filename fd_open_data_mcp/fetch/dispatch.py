@@ -240,14 +240,35 @@ def dispatch_one(
 
     if candidates_seen == 0:
         return {"date": date, "value": None, "error": "no eligible source",
-                "detail": "no confirmed binding for this concept (bind it, or run propose_bindings/confirm_binding)"}
+                "detail": "no confirmed binding for this concept (bind it, or run propose_bindings/confirm_binding)",
+                "series_state": _series_state(session, concept_id, entity_id)}
     if identifiers_resolved == 0:
         return {"date": date, "value": None, "error": "no source could resolve an identifier for this entity",
-                "detail": "entity has no per-source identifier for any candidate source (see entity_source_identifiers)"}
+                "detail": "entity has no per-source identifier for any candidate source (see entity_source_identifiers)",
+                "series_state": _series_state(session, concept_id, entity_id)}
     if attempts == 0:
         return {"date": date, "value": None, "error": "no dispatchable binding",
-                "detail": "candidate sources resolved identifiers but hold no verified binding for this concept"}
+                "detail": "candidate sources resolved identifiers but hold no verified binding for this concept",
+                "series_state": _series_state(session, concept_id, entity_id)}
     return None
+
+
+def _series_state(session: Session, concept_id: int, entity_id: int) -> str:
+    """Error-row 归因：never_held=确认没有（该 concept+entity 从未有任何源持有过值）；
+    gap_in_series=未取得（源在产、其他日期有值，本日期是缺口）。
+
+    跨境查询面四类归因的查询端（add-crossborder-vertical-line 2.6）：采集端
+    归因（配额/上游/防护/待人工）由 spider 层 `_error_category` 携带，查询端
+    只区分「未取得」与「确认没有」——两者在报数面上必须可区分。
+    """
+    from sqlalchemy import text
+
+    row = session.execute(
+        text("select 1 from semantic_observations "
+             "where concept_id = :c and entity_id = :e limit 1"),
+        {"c": concept_id, "e": entity_id},
+    ).first()
+    return "gap_in_series" if row else "never_held"
 
 
 def read(
@@ -284,13 +305,19 @@ def read(
                                 "unit": r.unit, "source_used": r.source_used,
                                 "from_cache": True})
             if not rows:
-                results.append({"date": d, "value": None, "error": "no source holds a value"})
+                results.append({"date": d, "value": None,
+                                "error": "no source holds a value",
+                                "series_state": _series_state(session, concept_id, entity_id)})
         return results
     results = []
     for d in dates:
         r = dispatch_one(session, concept_id, entity_type, entity_id, d, requested_date,
                          source=source)
-        results.append(r or {"date": d, "value": None, "error": "no source succeeded"})
+        if r is None:
+            results.append({"date": d, "value": None, "error": "no source succeeded",
+                            "series_state": _series_state(session, concept_id, entity_id)})
+        else:
+            results.append(r)
     return results
 
 
