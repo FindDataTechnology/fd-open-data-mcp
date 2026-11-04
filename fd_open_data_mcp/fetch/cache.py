@@ -337,7 +337,7 @@ def _dedupe_range(rows: list, concept_id: int, session: Session) -> list:
 
 def _read_base(
     session: Session, concept_id: int, entity_type: str, entity_id: int, date: str,
-    source: Optional[str] = None,
+    source: Optional[str] = None, granularity: Optional[str] = None,
 ) -> Optional[SemanticObservation]:
     """Base-table lookup — used by the WRITE path to find the upsert target.
 
@@ -348,6 +348,11 @@ def _read_base(
     q = session.query(SemanticObservation).filter_by(
         concept_id=concept_id, entity_type=entity_type, entity_id=entity_id, date=date,
     )
+    # granularity scopes the upsert target (write path): a day row and a
+    # month row of the same date are DISTINCT points (uq_sem_obs). Reads
+    # leave it None to match across cadences.
+    if granularity is not None:
+        q = q.filter(SemanticObservation.granularity == granularity)
     if source is not None:
         q = q.filter(SemanticObservation.source_used == source)
     return q.first()
@@ -381,6 +386,7 @@ def _read_base_period(
 def _read_base_range(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     start: str, end: str, source: Optional[str] = None,
+    granularity: Optional[str] = None,
 ) -> list[SemanticObservation]:
     q = (
         session.query(SemanticObservation)
@@ -392,6 +398,8 @@ def _read_base_range(
             SemanticObservation.date <= end,
         )
     )
+    if granularity is not None:
+        q = q.filter(SemanticObservation.granularity == granularity)
     if source is not None:
         q = q.filter(SemanticObservation.source_used == source)
     return q.order_by(SemanticObservation.date).all()
@@ -400,6 +408,7 @@ def _read_base_range(
 def write_cache(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     date: str, value: Optional[str], unit: Optional[str], source_used: str,
+    granularity: str = "day",
 ) -> SemanticObservation:
     """Upsert one observation for ``source_used``.
 
@@ -408,12 +417,14 @@ def write_cache(
     added for this source instead. Re-fetch overwrites this row's value and
     bumps ``fetched_at``. Values from different sources are never merged.
     """
-    obs = _read_base(session, concept_id, entity_type, entity_id, date, source=source_used)
+    obs = _read_base(session, concept_id, entity_type, entity_id, date,
+                     source=source_used, granularity=granularity)
     now = datetime.now(timezone.utc)
     if obs is None:
         obs = SemanticObservation(
             concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
-            date=date, value=value, unit=unit, source_used=source_used, fetched_at=now,
+            date=date, granularity=granularity, value=value, unit=unit,
+            source_used=source_used, fetched_at=now,
             obs_month=obs_month_of(date),
         )
         session.add(obs)
@@ -425,7 +436,7 @@ def write_cache(
         obs.obs_month = obs_month_of(date)
         inserted, touched = [], [date]
     bump_rollups(session, concept_id, entity_type, entity_id, source_used,
-                 inserted, touched, now)
+                 inserted, touched, now, granularity=granularity)
     session.commit()
     return obs
 
@@ -433,6 +444,7 @@ def write_cache(
 def write_cache_range_new_only(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     rows: dict[str, object], unit: Optional[str], source_used: str,
+    granularity: str = "day",
 ) -> int:
     """Insert-only variant of :func:`write_cache_range` — never overwrites.
 
@@ -456,9 +468,8 @@ def write_cache_range_new_only(
         obs.date
         for obs in _read_base_range(
             session, concept_id, entity_type, entity_id, min(rows), max(rows),
-            source=source_used,
+            source=source_used, granularity=granularity,
         )
-        if obs.source_used == source_used
     }
     now = datetime.now(timezone.utc)
     inserted, touched = [], []
@@ -467,7 +478,8 @@ def write_cache_range_new_only(
             continue
         session.add(SemanticObservation(
             concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
-            date=d, value=str(value), unit=unit, source_used=source_used,
+            date=d, granularity=granularity, value=str(value), unit=unit,
+            source_used=source_used,
             fetched_at=now, obs_month=obs_month_of(d),
         ))
         inserted.append(d)
@@ -481,7 +493,7 @@ def write_cache_range_new_only(
         session.rollback()
         return 0
     bump_rollups(session, concept_id, entity_type, entity_id, source_used,
-                 inserted, touched, now)
+                 inserted, touched, now, granularity=granularity)
     session.commit()
     return len(inserted)
 
@@ -489,6 +501,7 @@ def write_cache_range_new_only(
 def write_cache_range(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     rows: dict[str, object], unit: Optional[str], source_used: str,
+    granularity: str = "day",
 ) -> int:
     """Bulk-upsert observations for ``{date: value}`` in one commit.
 
@@ -507,9 +520,8 @@ def write_cache_range(
         obs.date: obs
         for obs in _read_base_range(
             session, concept_id, entity_type, entity_id, min(rows), max(rows),
-            source=source_used,
+            source=source_used, granularity=granularity,
         )
-        if obs.source_used == source_used
     }
     now = datetime.now(timezone.utc)
     inserted, touched = [], []
@@ -518,7 +530,8 @@ def write_cache_range(
         if obs is None:
             session.add(SemanticObservation(
                 concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
-                date=d, value=str(value), unit=unit, source_used=source_used,
+                date=d, granularity=granularity, value=str(value), unit=unit,
+                source_used=source_used,
                 fetched_at=now, obs_month=obs_month_of(d),
             ))
             inserted.append(d)
@@ -529,6 +542,6 @@ def write_cache_range(
             obs.obs_month = obs_month_of(d)
         touched.append(d)
     bump_rollups(session, concept_id, entity_type, entity_id, source_used,
-                 inserted, touched, now)
+                 inserted, touched, now, granularity=granularity)
     session.commit()
     return len(rows)

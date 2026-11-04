@@ -44,6 +44,7 @@ def bump_rollups(
     inserted_dates: list[str],
     touched_dates: list[str],
     now: datetime,
+    granularity: str = "day",
 ) -> None:
     """Incremental rollup maintenance, called INSIDE the observation-write
     transaction (add-data-stream-engine task 2.3 — replaces the hourly
@@ -97,6 +98,10 @@ def bump_rollups(
                 SemanticObservation.entity_type == entity_type,
                 SemanticObservation.entity_id == entity_id,
                 SemanticObservation.date.in_(inserted_dates),
+                # point identity includes granularity: a quarter row and a day
+                # row of the same date are DISTINCT points (uq_sem_obs), so
+                # coexistence is only same-granularity overlap.
+                SemanticObservation.granularity == granularity,
                 SemanticObservation.source_used != source_used,
             )
         ).scalars()
