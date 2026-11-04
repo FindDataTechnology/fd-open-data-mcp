@@ -1811,21 +1811,11 @@ def _http_asgi():
 
     async def composite(scope, receive, send):
         if scope["type"] == "lifespan":
-            # A mounted sub-app's lifespan never fires, so the panel's
-            # coverage-cache refresh loop (panel-data-coverage-cache D2) is
-            # started here, on the composite's top-level lifespan, then the
-            # scope is forwarded to the MCP app's own lifespan handling.
-            task = None
-            try:
-                import asyncio as _asyncio
-
-                from fd_open_data_mcp.panel.app import _coverage_refresh_loop
-
-                task = _asyncio.get_running_loop().create_task(
-                    _coverage_refresh_loop())
-            except Exception:  # noqa: BLE001 - the server must still start
-                logging.getLogger(__name__).exception(
-                    "coverage refresh loop failed to start")
+            # A mounted sub-app's lifespan never fires, so this is the
+            # composite's top-level lifespan; the scope is forwarded to the
+            # MCP app's own lifespan handling. The panel's coverage-cache
+            # refresh loop is RETIRED here (add-data-stream-engine task 2.5):
+            # concept_coverage is maintained incrementally by the write hook.
             try:
                 await mcp_asgi(scope, receive, send)
             finally:

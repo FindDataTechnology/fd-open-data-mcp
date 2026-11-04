@@ -92,6 +92,24 @@ def cluster_list_cmd():
         s.close()
 
 
+@cli.command("rebuild-rollups")
+@click.option("--concept-id", type=int, default=None,
+              help="rebuild one concept's rollups only (default: all concepts)")
+def rebuild_rollups_cmd(concept_id):
+    """Rebuild concept_source_stats + concept_coverage from row-level
+    observations (add-data-stream-engine task 2.4). The ground-truth
+    recompute the incremental write hook is verified against; also the
+    backfill for observations written before the hook existed. Safe on a
+    live system: plain SELECTs plus upserts of derived rows."""
+    from fd_open_data_mcp.visibility.coverage import rebuild_concept_rollups
+    db = get_database()
+    s = db.get_session()
+    try:
+        _echo(rebuild_concept_rollups(s, concept_id=concept_id))
+    finally:
+        s.close()
+
+
 @cli.command("migrate-astock-daily")
 @click.option("--symbol", "symbols", multiple=True,
               help="Restrict to one or more 6-digit symbols (default: all astock_daily).")

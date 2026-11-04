@@ -37,6 +37,8 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import SemanticObservation
+from fd_open_data_mcp.semantic.dates import obs_month_of
+from fd_open_data_mcp.visibility.coverage import bump_rollups
 
 # TTL by frequency: how long a cached observation is considered fresh.
 _TTL: dict[str, timedelta] = {
@@ -412,12 +414,18 @@ def write_cache(
         obs = SemanticObservation(
             concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
             date=date, value=value, unit=unit, source_used=source_used, fetched_at=now,
+            obs_month=obs_month_of(date),
         )
         session.add(obs)
+        inserted, touched = [date], [date]
     else:
         obs.value = value
         obs.unit = unit
         obs.fetched_at = now
+        obs.obs_month = obs_month_of(date)
+        inserted, touched = [], [date]
+    bump_rollups(session, concept_id, entity_type, entity_id, source_used,
+                 inserted, touched, now)
     session.commit()
     return obs
 
@@ -453,25 +461,29 @@ def write_cache_range_new_only(
         if obs.source_used == source_used
     }
     now = datetime.now(timezone.utc)
-    inserted = 0
+    inserted, touched = [], []
     for d, value in sorted(rows.items()):
         if d in existing:
             continue
         session.add(SemanticObservation(
             concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
             date=d, value=str(value), unit=unit, source_used=source_used,
-            fetched_at=now,
+            fetched_at=now, obs_month=obs_month_of(d),
         ))
-        try:
-            session.flush()
-        except IntegrityError:
-            # A concurrent writer, or the same date under a granularity row we
-            # did not see: adopt the existing row and move on.
-            session.rollback()
-            continue
-        inserted += 1
+        inserted.append(d)
+        touched.append(d)
+    try:
+        session.flush()
+    except IntegrityError:
+        # A concurrent writer, or the same date under a granularity row we
+        # did not see: adopt nothing, roll the batch back and report zero —
+        # the rollup hook never sees rows that did not land.
+        session.rollback()
+        return 0
+    bump_rollups(session, concept_id, entity_type, entity_id, source_used,
+                 inserted, touched, now)
     session.commit()
-    return inserted
+    return len(inserted)
 
 
 def write_cache_range(
@@ -500,17 +512,23 @@ def write_cache_range(
         if obs.source_used == source_used
     }
     now = datetime.now(timezone.utc)
+    inserted, touched = [], []
     for d, value in rows.items():
         obs = existing.get(d)
         if obs is None:
             session.add(SemanticObservation(
                 concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
                 date=d, value=str(value), unit=unit, source_used=source_used,
-                fetched_at=now,
+                fetched_at=now, obs_month=obs_month_of(d),
             ))
+            inserted.append(d)
         else:
             obs.value = str(value)
             obs.unit = unit
             obs.fetched_at = now
+            obs.obs_month = obs_month_of(d)
+        touched.append(d)
+    bump_rollups(session, concept_id, entity_type, entity_id, source_used,
+                 inserted, touched, now)
     session.commit()
     return len(rows)

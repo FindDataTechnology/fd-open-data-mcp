@@ -93,7 +93,8 @@ CENSUS_STALE_HOURS = 24
 # (panel-data-coverage-cache design D7: hourly refresh × 6 consecutive
 # misses before the badge fires — anomaly signal, not noise)
 COVERAGE_STALE_HOURS = 6
-# off-round minute for the hourly coverage-cache refresh (scheduler convention)
+# RETIRED with the hourly refresh loop (task 2.5) — kept only so any stray
+# reference resolves; no scheduler reads it anymore.
 COVERAGE_REFRESH_MINUTE = 23
 
 # panel-ops-console 6.x: frequency-template proposals. The cron proposals and
@@ -516,33 +517,16 @@ def _policy_from_form(form) -> dict:
 
 
 async def _coverage_refresh_loop() -> None:
-    """Hourly concept-coverage cache refresh (panel-data-coverage-cache D2).
-
-    One kick ~30 s after boot so a fresh deploy populates the cache without
-    waiting up to an hour; the advisory lock inside refresh_concept_coverage
-    dedups when several instances share one database. DB work runs in a
-    worker thread — the aggregate takes seconds and must not block the loop.
-    """
-    from fd_open_data_mcp.visibility.coverage import refresh_concept_coverage
-
-    await asyncio.sleep(30)
-    while True:
-        try:
-            def _run() -> dict:
-                s = _session()
-                try:
-                    return refresh_concept_coverage(s)
-                finally:
-                    s.close()
-            logger.info("coverage refresh: %s", await asyncio.to_thread(_run))
-        except Exception:
-            logger.exception("coverage refresh failed")
-        now = dt.datetime.utcnow()
-        nxt = now.replace(minute=COVERAGE_REFRESH_MINUTE, second=0,
-                          microsecond=0)
-        if nxt <= now:
-            nxt += dt.timedelta(hours=1)
-        await asyncio.sleep((nxt - now).total_seconds())
+    """RETIRED (add-data-stream-engine task 2.5): the hourly full-table
+    coverage refresh is replaced by the in-transaction write hook
+    (visibility.coverage.bump_rollups) — concept_coverage is maintained
+    incrementally at every observation write, so a periodic re-aggregation
+    over 6M+ rows (measured ~102 s at that size, scaling linearly) has
+    nothing left to do. Kept as a log-and-exit stub so old references stay
+    importable; the operator "refresh now" action maps to the exact rebuild
+    instead. Staleness badge: COVERAGE_STALE_HOURS now fires only if the
+    write hook stops running (anomaly signal)."""
+    logger.info("coverage refresh loop retired (incremental rollup hook active)")
 
 
 async def _prearm_loop() -> None:
@@ -1038,11 +1022,11 @@ def create_app() -> FastAPI:
 
     @app.post("/panel/data/coverage/refresh")
     def data_coverage_refresh(request: Request):
-        from fd_open_data_mcp.visibility.coverage import refresh_concept_coverage
+        from fd_open_data_mcp.visibility.coverage import rebuild_concept_rollups
 
         s = _session()
         try:
-            out = refresh_concept_coverage(s)
+            out = rebuild_concept_rollups(s)
         finally:
             s.close()
         logger.info("manual coverage refresh: %s", out)

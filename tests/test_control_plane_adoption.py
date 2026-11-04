@@ -76,7 +76,11 @@ def mig():
 
 def test_chain_head_and_wiring():
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0012_price_active_pool"
+    # add-data-stream-engine: 0013 obs_month governance + 0014 concept rollups
+    assert script.get_current_head() == "0014_concept_rollups"
+    assert script.get_revision("0013_obs_month_governance").down_revision == (
+        "0012_price_active_pool"
+    )
     assert script.get_revision("0006_control_plane_adoption").down_revision == (
         "0005_concept_coverage"
     )

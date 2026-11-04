@@ -138,10 +138,12 @@ def migrate_astock_daily(session, symbols: list[str] | None = None) -> dict:
     for col, (code, unit) in ASTOCK_CONCEPT_MAP.items():
         cid = code_to_id[code]
         # astock_daily is daily OHLCV -> granularity 'day' (fix-observation-time-granularity)
+        # obs_month: derived partition bucket (0013) — trade_date is canonical
+        # YYYY-MM-DD so the bucket is simply its first 7 chars.
         sql = f"""
             INSERT INTO semantic_observations
-                (concept_id, entity_type, entity_id, date, granularity, value, unit, source_used, fetched_at)
-            SELECT :cid, :et, e.id, a.trade_date::text, 'day', a.{col}::text, :unit, :src, now()
+                (concept_id, entity_type, entity_id, date, granularity, value, unit, source_used, fetched_at, obs_month)
+            SELECT :cid, :et, e.id, a.trade_date::text, 'day', a.{col}::text, :unit, :src, now(), substr(a.trade_date::text, 1, 7)
             FROM astock_daily a
             JOIN entities e ON e.entity_type = :et AND e.code = a.symbol
             WHERE a.{col} IS NOT NULL

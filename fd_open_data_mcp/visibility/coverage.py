@@ -14,13 +14,243 @@ from datetime import datetime, timezone
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from fd_open_data_mcp.models import Concept, ConceptCoverage, SemanticObservation
+from fd_open_data_mcp.models import (
+    Concept, ConceptCoverage, ConceptSourceStats, SemanticObservation,
+)
 
 # Single-flight key for the coverage-cache refresh across application
 # instances sharing one database (panel-data-coverage-cache design D3).
 # Transaction-scoped: held from acquisition until the refresh transaction
 # commits. Dedicated to this refresh — do not reuse for other locks.
 COVERAGE_REFRESH_LOCK_KEY = 8_844_332_211
+
+
+def _naive_utc(dt: datetime | None) -> datetime | None:
+    """Normalize to naive UTC — SQLite DateTime columns return naive values
+    while write sites pass timezone-aware ``now``; mixing them in a Python
+    max() raises. Storage convention for last_fetch stays naive UTC."""
+    if dt is not None and dt.tzinfo is not None:
+        return dt.astimezone(timezone.utc).replace(tzinfo=None)
+    return dt
+
+
+def bump_rollups(
+    session: Session,
+    concept_id: int,
+    entity_type: str,
+    entity_id: int,
+    source_used: str,
+    inserted_dates: list[str],
+    touched_dates: list[str],
+    now: datetime,
+) -> None:
+    """Incremental rollup maintenance, called INSIDE the observation-write
+    transaction (add-data-stream-engine task 2.3 — replaces the hourly
+    full-table refresh; cost O(batch), never O(table)).
+
+    ``inserted_dates``: points newly INSERTED for this (concept, source) —
+    each raises the pair's row count and may move latest_date.
+    ``touched_dates``: points INSERTED *or* UPDATED (value refreshed) —
+    any of them may move latest_date; updated rows also bump last_fetch.
+
+    Coexistence caliber: a point covered by MORE THAN ONE source counts as
+    ONE point in ``concept_coverage.rows`` (add-multi-source-observations).
+    Maintained exactly, not approximated: for every inserted point we check
+    whether the same point exists under a DIFFERENT source (one indexed
+    lookup per call site batch — the call sites pass the whole batch so the
+    check is one query, not one per point) and keep a running
+    ``coexisting_points`` counter on the coverage row; rows = sum(stats.rows)
+    - coexisting_points stays exact even if cross-source coexistence appears
+    (census 2026-11-04: zero today).
+    """
+    stats = (
+        session.query(ConceptSourceStats)
+        .filter_by(concept_id=concept_id, source_used=source_used)
+        .with_for_update()
+        .one_or_none()
+    )
+    if stats is None:
+        stats = ConceptSourceStats(
+            concept_id=concept_id, source_used=source_used, rows=0,
+        )
+        session.add(stats)
+    stats.rows += len(inserted_dates)
+    candidates = [d for d in (*inserted_dates, *touched_dates) if d]
+    if candidates:
+        top = max(candidates)  # canonical YYYY-MM-DD: lexicographic == chronological
+        if stats.latest_date is None or top > stats.latest_date:
+            stats.latest_date = top
+    now_n = _naive_utc(now)
+    if stats.last_fetch is None or now_n > stats.last_fetch:
+        stats.last_fetch = now_n
+
+    # Coexistence probe FIRST (one indexed query per call-site batch): every
+    # inserted point already held under a DIFFERENT source. Runs before the
+    # coverage row is materialized so autoflush never sees a half-built row.
+    coexisting_delta = 0
+    if inserted_dates:
+        others = session.execute(
+            select(SemanticObservation.date)
+            .where(
+                SemanticObservation.concept_id == concept_id,
+                SemanticObservation.entity_type == entity_type,
+                SemanticObservation.entity_id == entity_id,
+                SemanticObservation.date.in_(inserted_dates),
+                SemanticObservation.source_used != source_used,
+            )
+        ).scalars()
+        coexisting_delta = len(set(others))
+
+    cov = (
+        session.query(ConceptCoverage)
+        .filter_by(concept_id=concept_id)
+        .with_for_update()
+        .one_or_none()
+    )
+    if cov is None:
+        cov = ConceptCoverage(concept_id=concept_id, rows=0, sources=0,
+                              coexisting_points=coexisting_delta)
+        session.add(cov)
+    else:
+        cov.coexisting_points = (cov.coexisting_points or 0) + coexisting_delta
+    _project_coverage(session, concept_id, cov=cov)
+
+
+def _project_coverage(session: Session, concept_id: int,
+                      cov: ConceptCoverage | None = None) -> None:
+    """Recompute one concept's ``concept_coverage`` row FROM
+    ``concept_source_stats`` (a handful of rows) — the projection that makes
+    coverage reads never touch ``semantic_observations``. ``cov`` passes the
+    already-located row through (a pending new row would be invisible to the
+    query, so the caller that just created it must hand it over)."""
+    # Stats query FIRST: it autoflushes, and a pending coverage row whose
+    # fields are not set yet would violate its NOT NULLs — so locate/create
+    # cov only AFTER the last query that can autoflush it, with explicit
+    # safe defaults at construction.
+    stats = (
+        session.query(ConceptSourceStats)
+        .filter_by(concept_id=concept_id)
+        .all()
+    )
+    if cov is None:
+        cov = session.query(ConceptCoverage).filter_by(concept_id=concept_id).one_or_none()
+    if cov is None:
+        cov = ConceptCoverage(concept_id=concept_id, rows=0, sources=0,
+                              coexisting_points=0)
+        session.add(cov)
+    cov.rows = sum(s.rows for s in stats) - (cov.coexisting_points or 0)
+    cov.latest_date = max((s.latest_date for s in stats if s.latest_date),
+                          default=None)
+    cov.last_fetch = max((_naive_utc(s.last_fetch) for s in stats
+                          if s.last_fetch), default=None)
+    cov.sources = sum(1 for s in stats if s.rows > 0)
+    cov.computed_at = datetime.now(timezone.utc)
+
+
+def rebuild_concept_rollups(session: Session, concept_id: int | None = None) -> dict:
+    """Rebuild the rollup tables from row-level observations (task 2.4).
+
+    Full recompute of ``concept_source_stats`` (optionally one concept) and,
+    from it, every touched concept's ``concept_coverage`` projection —
+    including a fresh coexisting_points count (exact GROUP BY, the same
+    machinery as ``coverage_by_concept``, ~8 s at 6.3M rows). The rebuild is
+    the ground truth the incremental hook is verified against; safe to run
+    on a live system (plain SELECTs + upserts of derived rows).
+    """
+    filters = []
+    if concept_id is not None:
+        filters.append(SemanticObservation.concept_id == concept_id)
+
+    per_source = (
+        session.query(
+            SemanticObservation.concept_id.label("concept_id"),
+            SemanticObservation.source_used.label("source_used"),
+            func.count().label("rows"),
+            func.max(SemanticObservation.date).label("latest_date"),
+            func.max(SemanticObservation.fetched_at).label("last_fetch"),
+        )
+        .where(*filters)
+        .group_by(SemanticObservation.concept_id, SemanticObservation.source_used)
+        .all()
+    )
+    touched = {r.concept_id for r in per_source}
+    if concept_id is not None:
+        touched.add(concept_id)
+
+    cached = {
+        (s.concept_id, s.source_used): s
+        for s in session.query(ConceptSourceStats)
+        .filter(*([ConceptSourceStats.concept_id == concept_id]
+                  if concept_id is not None else []))
+        .all()
+    }
+    for r in per_source:
+        s = cached.pop((r.concept_id, r.source_used), None)
+        if s is None:
+            s = ConceptSourceStats(concept_id=r.concept_id,
+                                   source_used=r.source_used)
+            session.add(s)
+        s.rows = int(r.rows)
+        s.latest_date = r.latest_date
+        s.last_fetch = _naive_utc(r.last_fetch)
+    for stale in cached.values():  # pair vanished (row-level delete) → drop
+        session.delete(stale)
+    session.flush()
+
+    # Exact coexistence count per touched concept (five-column GROUP BY —
+    # the ~8 s point machinery, scoped to touched concepts only).
+    coexisting: dict[int, int] = {}
+    if touched:
+        points = (
+            select(
+                SemanticObservation.concept_id.label("concept_id"),
+                SemanticObservation.entity_type,
+                SemanticObservation.entity_id,
+                SemanticObservation.date,
+                SemanticObservation.granularity,
+                func.count().label("srcs"),
+            )
+            .where(SemanticObservation.concept_id.in_(touched))
+            .group_by(
+                SemanticObservation.concept_id,
+                SemanticObservation.entity_type,
+                SemanticObservation.entity_id,
+                SemanticObservation.date,
+                SemanticObservation.granularity,
+            )
+            .subquery()
+        )
+        for cid, n in session.execute(
+            select(points.c.concept_id, func.coalesce(func.sum(points.c.srcs - 1), 0))
+            .where(points.c.srcs > 1)
+            .group_by(points.c.concept_id)
+        ):
+            coexisting[cid] = int(n)
+
+    now = datetime.now(timezone.utc)
+    covs = {c.concept_id: c for c in
+            session.query(ConceptCoverage)
+            .filter(ConceptCoverage.concept_id.in_(touched)).all()
+            } if touched else {}
+    for cid in touched:
+        cov = covs.get(cid)
+        if cov is None:
+            cov = ConceptCoverage(concept_id=cid, rows=0, sources=0,
+                                  coexisting_points=coexisting.get(cid, 0))
+            session.add(cov)
+        else:
+            cov.coexisting_points = coexisting.get(cid, 0)
+        _project_coverage(session, cid, cov=cov)
+        cov.computed_at = now
+    # Concepts whose observations vanished entirely: coverage rows go away
+    # (matches the retired refresh's cleanup semantics) when rebuilding all.
+    if concept_id is None:
+        for c in session.query(ConceptCoverage).all():
+            if c.concept_id not in touched:
+                session.delete(c)
+    session.commit()
+    return {"status": "rebuilt", "concepts": len(touched),
+            "pairs": len(per_source)}
 
 
 def coverage_by_concept(
@@ -109,44 +339,21 @@ def coverage_by_concept(
 
 
 def refresh_concept_coverage(session: Session) -> dict:
-    """Recompute and upsert the ``concept_coverage`` cache from the live
-    aggregate; removes rows for concepts that no longer have observations.
-
-    Single-flight: on PostgreSQL the whole refresh runs inside one
-    transaction holding ``pg_try_advisory_xact_lock`` on
-    ``COVERAGE_REFRESH_LOCK_KEY``; an instance that cannot take the lock
-    skips the cycle (another instance is mid-refresh). Non-PostgreSQL
-    backends (unit tests) run unlocked.
-    """
-    if session.bind is not None and session.bind.dialect.name == "postgresql":
-        locked = session.execute(
-            select(func.pg_try_advisory_xact_lock(COVERAGE_REFRESH_LOCK_KEY))
-        ).scalar()
-        if not locked:
-            return {"status": "skipped", "reason": "lock-held"}
-
-    rows = coverage_by_concept(session)
-    now = datetime.now(timezone.utc)
-    keep = {r["concept_id"] for r in rows}
-    cached = {c.concept_id: c
-              for c in session.query(ConceptCoverage).all()}
-    for cid, c in cached.items():
-        if cid not in keep:
-            session.delete(c)
-    for r in rows:
-        c = cached.get(r["concept_id"])
-        if c is None:
-            c = ConceptCoverage(concept_id=r["concept_id"])
-            session.add(c)
-        c.rows = r["rows"]
-        c.latest_date = r["latest_date"]
-        c.last_fetch = (datetime.fromisoformat(r["last_fetch"])
-                        if r["last_fetch"] else None)
-        c.sources = r["sources"]
-        c.computed_at = now
-    session.commit()
-    return {"status": "refreshed", "concepts": len(rows),
-            "rows_total": sum(r["rows"] for r in rows)}
+    """RETIRED periodic full-table refresh (add-data-stream-engine task 2.5)
+    — kept as a thin alias to the exact rebuild for any stale caller, with
+    a compatible return shape. Production paths now use: the in-transaction
+    write hook (:func:`bump_rollups`) for steady state, and the explicit
+    rebuild (:func:`rebuild_concept_rollups`, exposed as
+    ``fd-open-data-mcp rebuild-rollups`` and the panel refresh action) as
+    the ground truth."""
+    out = rebuild_concept_rollups(session)
+    # rows_total: sum over the rebuilt coverage rows (the retired refresh's
+    # caliber — covered points per concept, summed).
+    rows_total = 0
+    if out["concepts"]:
+        rows_total = sum(int(c.rows or 0) for c in session.query(ConceptCoverage).all())
+    return {"status": "refreshed", "concepts": out["concepts"],
+            "rows_total": rows_total}
 
 
 def cached_concept_coverage(session: Session) -> dict:

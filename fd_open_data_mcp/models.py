@@ -411,6 +411,12 @@ class SemanticObservation(Base):
     unit = Column(String(64), nullable=True)
     source_used = Column(String(64), nullable=False)
     fetched_at = Column(DateTime, nullable=False, default=_now)
+    # Derived partition bucket 'YYYY-MM' (add-data-stream-engine task 2.2):
+    # computed from date by fd_open_data_mcp.semantic.dates.obs_month_of at
+    # every write site — NEVER hand-maintained. NULL = unmappable (sentinels)
+    # → the default partition once monthly RANGE partitions exist (task 2.6).
+    # SQLite keeps the column but does not partition on it.
+    obs_month = Column(String(7), nullable=True)
 
     def toDict(self) -> dict:
         return {
@@ -627,10 +633,12 @@ class ConceptCoverage(Base):
     ``data_stats`` unfiltered detail read these rows instead of aggregating
     6M+ ``semantic_observations`` live (~102 s as previously formulated).
     ``rows`` counts covered observation POINTS (five-column tuple, coexisting
-    sources deduped to one), matching ``coverage_by_concept``. Refreshed
-    hourly by the panel background task (single-flight across instances via
-    advisory lock) and by an explicit panel action; pages compute live only
-    while this cache is empty (first-boot bounded fallback).
+    sources deduped to one), matching ``coverage_by_concept``. Maintained
+    INCREMENTALLY by the write hook (visibility.coverage.bump_rollups,
+    add-data-stream-engine task 2.3) as the projection of
+    concept_source_stats; the hourly full-table refresh is retired. The
+    exact rebuild (fd-open-data-mcp rebuild-rollups / panel refresh action)
+    recomputes from row level and is the ground truth.
     """
     __tablename__ = "concept_coverage"
 
@@ -640,6 +648,13 @@ class ConceptCoverage(Base):
     latest_date = Column(String(64), nullable=True)  # canonical YYYY-MM-DD
     last_fetch = Column(DateTime, nullable=True)
     sources = Column(Integer, nullable=False, default=0)
+    # Cross-source duplicate-point counter (add-data-stream-engine task 2.3):
+    # points covered by MORE THAN ONE source, so points = sum(stats.rows) -
+    # coexisting_points keeps the "coexisting sources count as ONE point"
+    # caliber under INCREMENTAL maintenance (census 2026-11-04: zero
+    # coexistence today, but the counter keeps the semantics exact if it
+    # appears). Maintained by the write hook alongside the stats table.
+    coexisting_points = Column(Integer, nullable=False, default=0)
     computed_at = Column(DateTime, nullable=False, default=_now)
 
 
@@ -956,6 +971,44 @@ class ConceptEmbedding(Base):
 PLATFORM_PENDING_STATUSES = ("pending", "claimed", "done", "failed", "cancelled")
 # crawl_runs.status values (runners write these; cancel_requested is a flag)
 PLATFORM_RUN_STATUSES = ("running", "success", "failed", "cancelled", "skipped")
+
+
+class ConceptSourceStats(Base):
+    """Per-(concept, source) observation rollup (add-data-stream-engine 2.3).
+
+    The write-path rollup: one row per (concept_id, source_used) with the
+    row count, latest observation date and most recent fetch for that pair.
+    ``concept_coverage`` is its materialized per-concept projection — the
+    write hook (visibility.coverage.bump_rollups) updates this table inside
+    the same transaction as the observation insert, then recomputes the
+    touched concept's coverage row FROM this table (a handful of rows), so
+    coverage reads never touch ``semantic_observations`` and the hourly
+    full-table refresh retires (census 2026-11-04: the refresh measured
+    ~102 s at 6.3M rows and scales linearly with the table).
+
+    ``rows`` per source equals the source's covered points by construction:
+    uq_sem_obs makes (point, source) unique.
+    """
+
+    __tablename__ = "concept_source_stats"
+    __table_args__ = (
+        UniqueConstraint("concept_id", "source_used", name="uq_concept_source"),
+    )
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    concept_id = Column(Integer, ForeignKey("concepts.id", ondelete="CASCADE"),
+                        nullable=False, index=True)
+    source_used = Column(String(64), nullable=False)
+    rows = Column(Integer, nullable=False, default=0)
+    latest_date = Column(String(64), nullable=True)
+    last_fetch = Column(DateTime, nullable=True)
+
+    def toDict(self) -> dict:
+        return {
+            "concept_id": self.concept_id, "source_used": self.source_used,
+            "rows": self.rows, "latest_date": self.latest_date,
+            "last_fetch": self.last_fetch.isoformat() if self.last_fetch else None,
+        }
 
 
 class CrawlSite(Base):

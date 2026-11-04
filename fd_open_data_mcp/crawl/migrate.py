@@ -80,9 +80,9 @@ def _migrate_wide(
             params["limit"] = limit
         sql = text(f"""
             INSERT INTO semantic_observations
-                (concept_id, entity_type, entity_id, date, granularity, value, unit, source_used, fetched_at)
+                (concept_id, entity_type, entity_id, date, granularity, value, unit, source_used, fetched_at, obs_month)
             SELECT :concept_id, :et, esi.entity_id, d.{date_col}::text,
-                   :granularity, d.{col}::text, :unit, :source, now()
+                   :granularity, d.{col}::text, :unit, :source, now(), substr(d.{date_col}::text, 1, 7)
             FROM {table} d
             JOIN entity_source_identifiers esi
               ON esi.source = :source AND esi.entity_type = :et
