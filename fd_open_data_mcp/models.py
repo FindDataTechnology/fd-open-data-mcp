@@ -526,6 +526,12 @@ class CrawlPolicy(Base):
     source_filter = Column(JSONB, nullable=True)           # NULL = all ranked sources
     force = Column(Boolean, nullable=False, default=False)  # override POLICY_MAX_FETCHES guardrail
     executor = Column(String(16), nullable=False, default="scrapy")  # scrapy | direct
+    # Execution model (add-data-stream-engine task 4.1): auto|job|leasing.
+    # auto (the default) and job both take the existing per-plan Job/scrapyd
+    # path — so existing policies are byte-for-byte unchanged; leasing routes
+    # the plan through the work-item split + lease queue (the scale path).
+    launcher = Column(String(16), nullable=False, default="auto",
+                      server_default="auto")  # auto | job | leasing
     script = Column(String(255), nullable=True)   # direct: module name to run (e.g. bulk_ingest_financials_aggregate)
     script_args = Column(JSONB, nullable=True)    # direct: CLI args for the script
     cron_expr = Column(String(128), nullable=False)
@@ -542,7 +548,7 @@ class CrawlPolicy(Base):
             "entity_ids": self.entity_ids, "date_policy": self.date_policy,
             "frequency": self.frequency, "mode": self.mode,
             "source_filter": self.source_filter, "force": self.force,
-            "executor": self.executor, "script": self.script,
+            "executor": self.executor, "launcher": self.launcher, "script": self.script,
             "script_args": self.script_args,
             "cron_expr": self.cron_expr, "timezone": self.timezone,
             "last_run_at": self.last_run_at.isoformat() if self.last_run_at else None,

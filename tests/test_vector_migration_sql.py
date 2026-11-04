@@ -66,7 +66,7 @@ def test_revision_is_new_head_of_shipped_chain():
     """The shipped head is 0012 (price active pool); each revision keeps its
     own down_revision wiring (their contract tests live above)."""
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0015_obs_month_dist"
+    assert script.get_current_head() == "0016_policy_launcher"
     rev12 = script.get_revision("0012_price_active_pool")
     assert rev12.down_revision == "0011_federated_runner_tag"
     rev11 = script.get_revision("0011_federated_runner_tag")
@@ -91,6 +91,7 @@ def test_chain_is_linear_head_to_baseline():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     revisions = [r.revision for r in script.walk_revisions()]
     assert revisions == [
+        "0016_policy_launcher",
         "0015_obs_month_dist",
         "0014_concept_rollups",
         "0013_obs_month_governance",
@@ -396,7 +397,7 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
             }
     finally:
         engine.dispose()
-    assert version == "0015_obs_month_dist"
+    assert version == "0016_policy_launcher"
     # 0001-0009 stay PG-guarded no-ops on sqlite; 0010 and 0012 are portable DDL
     # (the audit table and the price pool must exist on sqlite test databases)
     # and are the app tables the chain builds there.

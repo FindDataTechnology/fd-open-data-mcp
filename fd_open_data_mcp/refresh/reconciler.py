@@ -40,6 +40,8 @@ from fd_open_data_mcp.crawl.plan import CrawlPlan, DateRange, EntityScope
 from fd_open_data_mcp.crawl.planner import plan_crawl
 from fd_open_data_mcp.models import Cluster, CrawlPolicy, EntitySourceIdentifier, PolicyRun, Proxy
 from fd_open_data_mcp.refresh.platform_mirror import mirror_run_close
+from fd_open_data_mcp.crawl.split import split_plan
+from fd_open_data_mcp.stream.lease import WorkItem, lease_queue_for
 
 logger = logging.getLogger(__name__)
 
@@ -1053,6 +1055,14 @@ def launch_policy(
         source_filter=policy.source_filter, mode=policy.mode or "per_date",
     )
 
+    # leasing execution model (add-data-stream-engine task 4.1/4.3): a policy
+    # that opts into leasing splits the plan into work items and enqueues them
+    # to a per-run lease queue instead of launching one Job. The guardrail
+    # becomes the per-item shard size (force still overrides it). auto/job
+    # fall through to the existing Job path — existing behavior unchanged.
+    if getattr(policy, "launcher", "auto") == "leasing":
+        return _launch_leasing(session, policy, plan, now)
+
     # guardrail: plan-size estimate vs POLICY_MAX_FETCHES (spec crawl-control-center)
     estimate = estimate_fetches(session, plan)
     if estimate > POLICY_MAX_FETCHES and not policy.force:
@@ -1140,6 +1150,51 @@ def _frozen_window(policy: CrawlPolicy, local_today: dt.date) -> str | None:
     return None
 
 
+def _launch_leasing(session: Session, policy: CrawlPolicy, plan: CrawlPlan,
+                    now: dt.datetime) -> dict:
+    """Split the plan into work items, create ONE parent run, enqueue (4.1/4.3).
+
+    The parent policy_run carries the full plan + total cells; the work items
+    live in the run's lease queue. The completion probe closes the parent once
+    the queue drains (available==0 and leased==0). Yield aggregation happens in
+    the worker as it acks each item (the run's rows_* counters accumulate).
+    """
+    shard_cap = POLICY_MAX_FETCHES
+    items = split_plan(session, plan, max_cells_per_item=shard_cap)
+    if not items:
+        # nothing fetchable (empty scope) — record a no-op close, not a failure
+        session.add(PolicyRun(policy_id=policy.id, status="success",
+                              plan_json=plan.model_dump(mode="json"),
+                              started_at=now, finished_at=now,
+                              detail="leasing: empty scope, nothing to enqueue"))
+        policy.last_run_at = now
+        session.commit()
+        return {"policy": policy.name, "status": "launched", "items": 0,
+                "note": "empty scope"}
+
+    # parent run first so items can carry its id; job_ref marks it a lease run
+    run = PolicyRun(policy_id=policy.id, status=_OPEN,
+                    plan_json=plan.model_dump(mode="json"),
+                    plan_cells=getattr(plan, "plan_cells", None),
+                    job_ref=f"lease:{policy.id}", started_at=now)
+    session.add(run)
+    session.flush()  # assign run.id
+    queue = lease_queue_for(run.id)
+    work_items = [
+        WorkItem(item_id=f"{run.id}:{i}", run_id=run.id, policy_id=policy.id,
+                 plan_json=it.model_dump_json())
+        for i, it in enumerate(items)
+    ]
+    queue.enqueue(work_items)
+    policy.last_run_at = now
+    session.commit()
+    logger.info("policy %s leasing: enqueued %d work items (run %d)",
+                policy.name, len(work_items), run.id)
+    return {"policy": policy.name, "status": "launched", "job_ref": run.job_ref,
+            "run_id": run.id, "items": len(work_items),
+            "estimate": estimate_fetches(session, plan)}
+
+
 def reconcile_once(
     session: Session,
     launcher: Launcher,
@@ -1159,6 +1214,18 @@ def reconcile_once(
     closed: list[PolicyRun] = []
     for run in session.query(PolicyRun).filter_by(status=_OPEN).all():
         if not run.job_ref:
+            continue
+        if run.job_ref.startswith("lease:"):
+            # leasing run: close when the per-run queue has nothing in flight
+            q = lease_queue_for(run.id)
+            st = q.stats()
+            if st["available"] == 0 and st["leased"] == 0:
+                run.status = classify_yield(run)
+                run.finished_at = now
+                summary["probed_closed"] += 1
+                closed.append(run)
+                logger.info("lease run %d closed as %s (queue drained)",
+                            run.id, run.status)
             continue
         state = launcher.poll(run.job_ref)
         if state in ("success", "failed"):
