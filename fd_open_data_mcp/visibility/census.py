@@ -53,6 +53,32 @@ def _shard_servers(conn) -> list[str]:
     return [r[0] for r in conn.execute(text("SELECT srvname FROM pg_foreign_server")).fetchall()]
 
 
+def _obs_month_distribution(conn) -> dict | None:
+    """Bucket distribution over the derived ``obs_month`` column (task 2.7).
+
+    One GROUP BY scan, run ONLY inside the census refresh action (never a
+    page path) — the same cadence that already pays for a full count(*).
+    NULL-bucket rows (sentinels/garbage that obs_month_of maps to None) are
+    reported under the ``_unmappable`` key: the future default-partition
+    territory. Returns None when the column is absent (pre-0013 databases,
+    SQLite without the column) so a refresh never hard-fails on schema drift.
+    """
+    try:
+        rows = conn.execute(text(
+            "SELECT obs_month, count(*) FROM semantic_observations "
+            "GROUP BY obs_month"
+        )).fetchall()
+    except Exception:  # noqa: BLE001 - column missing on an old schema
+        return None
+    dist: dict[str, int] = {}
+    for bucket, n in rows:
+        if bucket is None:
+            dist["_unmappable"] = int(n)
+        else:
+            dist[bucket] = int(n)
+    return dist
+
+
 def _upsert(session: Session, store: str, kind: str, **fields) -> None:
     row = session.query(DataCensus).filter_by(store=store).first()
     if row is None:
@@ -79,16 +105,18 @@ def refresh_census(session: Session, *, probe=None) -> dict:
     # local master: exact count + catalog size (a refresh action, not a page)
     local_error = None
     approx_rows = size_bytes = None
+    obs_month_dist = None
     try:
         approx_rows = conn.execute(text("SELECT count(*) FROM semantic_observations")).scalar()
         size_bytes = conn.execute(
             text("SELECT pg_total_relation_size('semantic_observations')")
         ).scalar()
+        obs_month_dist = _obs_month_distribution(conn)
     except Exception as e:  # noqa: BLE001
         local_error = str(e)
     _upsert(session, LOCAL_STORE, "local", approx_rows=approx_rows, exact=True,
             total_size_bytes=size_bytes, chunks=None, time_range_end=None,
-            error=local_error)
+            obs_month_dist=obs_month_dist, error=local_error)
 
     servers: list[str] = []
     try:

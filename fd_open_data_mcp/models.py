@@ -614,6 +614,12 @@ class DataCensus(Base):
     chunks = Column(Integer, nullable=True)            # Timescale chunks (shards)
     time_range_end = Column(String(64), nullable=True) # chunk-catalog max(range_end)
     error = Column(String, nullable=True)              # probe failure (e.g. no dblink)
+    # obs_month bucket distribution for the LOCAL store (add-data-stream-engine
+    # task 2.7): {"YYYY-MM": rows, ..., "_unmappable": n} — computed once per
+    # census refresh (one GROUP BY scan), cached here so the watermark page
+    # never re-scans. The _unmappable count is the future default-partition
+    # territory (sentinels/garbage that obs_month_of maps to NULL).
+    obs_month_dist = Column(JSONB, nullable=True)
     sampled_at = Column(DateTime, nullable=False, default=_now)
 
     def toDict(self) -> dict:

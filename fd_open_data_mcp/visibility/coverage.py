@@ -15,8 +15,9 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import (
-    Concept, ConceptCoverage, ConceptSourceStats, SemanticObservation,
+    Concept, ConceptCoverage, ConceptSourceStats, DataCensus, SemanticObservation,
 )
+from fd_open_data_mcp.visibility.census import LOCAL_STORE
 
 # Single-flight key for the coverage-cache refresh across application
 # instances sharing one database (panel-data-coverage-cache design D3).
@@ -354,6 +355,75 @@ def refresh_concept_coverage(session: Session) -> dict:
         rows_total = sum(int(c.rows or 0) for c in session.query(ConceptCoverage).all())
     return {"status": "refreshed", "concepts": out["concepts"],
             "rows_total": rows_total}
+
+
+def storage_watermark(session: Session) -> dict:
+    """Storage watermark panel data (add-data-stream-engine task 2.7).
+
+    Page-safe by construction: every figure comes from a SMALL table —
+    concept_coverage (one row per covered concept), concept_source_stats
+    (one row per concept×source pair), and the cached data_census row (the
+    heavy obs_month distribution was computed once by the census refresh
+    action, never here). No semantic_observations scan appears on this path;
+    that is the whole point of the rollup tiering.
+
+    Returns:
+      rollup: freshness (max computed_at + age_hours), coverage concept
+        count, total covered points, coexisting-point total
+      drift: concepts whose stats/coverage rows disagree — the incremental
+        hook is the ONLY writer of both, so any disagreement means the hook
+        stopped running (rebuild is the fix). Also flags impossible-state
+        rows (negative point counts).
+      store: cached census figures for the local store (rows, size,
+        obs_month distribution incl. the _unmappable default-partition
+        count) — NULL until a census refresh has run.
+    """
+    cov = session.query(ConceptCoverage).all()
+    stats = session.query(ConceptSourceStats).all()
+
+    now = datetime.now(timezone.utc)
+    computed_ats = [c.computed_at for c in cov if c.computed_at is not None]
+    age_hours = None
+    if computed_ats:
+        t = max(computed_ats)
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+        age_hours = round((now - t).total_seconds() / 3600, 1)
+
+    stats_concepts = {s.concept_id for s in stats if s.rows > 0}
+    cov_concepts = {c.concept_id for c in cov}
+    drift = {
+        "stats_without_coverage": sorted(stats_concepts - cov_concepts),
+        "coverage_without_stats": sorted(cov_concepts - stats_concepts),
+        "negative_point_rows": sorted(
+            c.concept_id for c in cov if (c.rows or 0) < 0),
+    }
+    drift["hook_healthy"] = not any(
+        drift[k] for k in ("stats_without_coverage", "coverage_without_stats",
+                           "negative_point_rows"))
+
+    census = session.query(DataCensus).filter_by(store=LOCAL_STORE).first()
+    store = None
+    if census is not None:
+        store = {
+            "rows": census.approx_rows,
+            "size_bytes": census.total_size_bytes,
+            "obs_month_dist": census.obs_month_dist,
+            "sampled_at": census.sampled_at.isoformat() if census.sampled_at else None,
+            "error": census.error,
+        }
+
+    return {
+        "rollup": {
+            "concepts_covered": len(cov_concepts),
+            "points_total": sum(max(c.rows or 0, 0) for c in cov),
+            "coexisting_points_total": sum(c.coexisting_points or 0 for c in cov),
+            "computed_at": max(computed_ats).isoformat() if computed_ats else None,
+            "age_hours": age_hours,
+        },
+        "drift": drift,
+        "store": store,
+    }
 
 
 def cached_concept_coverage(session: Session) -> dict:
