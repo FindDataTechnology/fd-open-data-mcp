@@ -50,6 +50,7 @@
         <a class="nav-link {{ 'active' if path.startswith('/panel/proxy') }}" href="/panel/proxy"><svg><use href="#i-proxy"/></svg>{{ t('代理') }}</a>
         {%- endif %}
         <a class="nav-link {{ 'active' if path.startswith('/panel/data') }}" href="/panel/data"><svg><use href="#i-data"/></svg>{{ t('数据') }}</a>
+        <a class="nav-link {{ 'active' if path.startswith('/panel/stream') }}" href="/panel/stream"><svg><use href="#i-data"/></svg>{{ t('流面板') }}</a>
         <a class="nav-link {{ 'active' if path.startswith('/panel/indicators') }}" href="/panel/indicators"><svg><use href="#i-indicators"/></svg>{{ t('指标') }}</a>
       </nav>
       <div class="sidenav-foot">

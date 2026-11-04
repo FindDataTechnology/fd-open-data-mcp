@@ -1020,6 +1020,47 @@ def create_app() -> FastAPI:
         finally:
             s.close()
 
+    @app.get("/panel/stream", response_class=HTMLResponse)
+    def stream_board(request: Request):
+        """Stream-plane observability (add-data-stream-engine task 5.3): three
+        metric groups, all read-only — stream health (3.6), storage watermark
+        (2.7), and the execution-model distribution (leasing vs job runs)."""
+        import os as _os
+        from sqlalchemy import func as _func
+        from fd_open_data_mcp.visibility.coverage import storage_watermark
+        from fd_open_data_mcp.models import PolicyRun as _PR
+
+        # stream health: only when a Redis stream is configured (degrade to a
+        # notice otherwise — the board still shows watermark + distribution)
+        health = None
+        if _os.environ.get("REDIS_URL"):
+            try:
+                import redis as _redis
+                from fd_open_data_mcp.stream.redis_streams import RedisStreamsSink
+                from fd_open_data_mcp.stream.health import stream_health
+                _r = _redis.Redis.from_url(_os.environ["REDIS_URL"],
+                                           decode_responses=True)
+                sink = RedisStreamsSink(_r)
+                group = _os.environ.get("FD_ODM_INGEST_GROUP", "ingest")
+                health = stream_health(sink, group)
+            except Exception as e:  # noqa: BLE001 - health is best-effort chrome
+                health = {"error": str(e)}
+
+        s = _session()
+        try:
+            watermark = storage_watermark(s)
+            # execution distribution: lease: runs vs job runs among recent runs
+            recent = s.query(_PR).order_by(_PR.id.desc()).limit(200).all()
+            leasing = sum(1 for r in recent if (r.job_ref or "").startswith("lease:"))
+            jobs = len(recent) - leasing
+            return templates.TemplateResponse(
+                request, "stream.html",
+                {"health": health, "watermark": watermark,
+                 "leasing_runs": leasing, "job_runs": jobs,
+                 "recent_total": len(recent)})
+        finally:
+            s.close()
+
     @app.post("/panel/data/coverage/refresh")
     def data_coverage_refresh(request: Request):
         from fd_open_data_mcp.visibility.coverage import rebuild_concept_rollups

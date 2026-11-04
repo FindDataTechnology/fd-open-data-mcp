@@ -1,0 +1,63 @@
+{% extends "base.html" %}
+{% from "_macros.html" import th %}
+{% block title %}{{ t('流面板 Stream board · 柏讯寻新') }}{% endblock %}
+{% block content %}
+<h2>{{ t('流面板') }}</h2>
+<p class="muted">{{ t('数据流获取与处理的运行健康（只读）read-only runtime health of the stream plane') }}</p>
+
+{# ── 1. stream health (3.6) ───────────────────────────── #}
+<h3>{{ t('流面健康度') }}</h3>
+{% if health is none %}
+  <p class="muted">{{ t('未配置 Redis 流面，无健康度数据（仅展示存储水位与执行分布）') }}</p>
+{% elif health.error %}
+  <p><span class="badge failed">{{ t('流面不可达') }}</span> <span class="muted">{{ health.error }}</span></p>
+{% else %}
+  <div class="table-wrap">
+  <table>
+    <thead><tr>{{ th(t('积压')) }}{{ th(t('未确认')) }}{{ th(t('最老滞后')) }}{{ th(t('消费者')) }}{{ th(t('告警')) }}</tr></thead>
+    <tbody><tr>
+      <td>{{ "{:,}".format(health.length) }}</td>
+      <td>{{ "{:,}".format(health.pending) }}</td>
+      <td>{% if health.oldest_pending_idle_ms is not none %}{{ (health.oldest_pending_idle_ms / 1000) | round(1) }}s{% else %}—{% endif %}</td>
+      <td>{{ health.consumers }}</td>
+      <td>{% if health.alert %}<span class="badge refused">{{ t('告警') }}</span> <span class="muted">{{ health.alert_reasons | join('; ') }}</span>{% else %}<span class="badge ok">{{ t('正常') }}</span>{% endif %}</td>
+    </tr></tbody>
+  </table>
+  </div>
+{% endif %}
+
+{# ── 2. storage watermark (2.7) ───────────────────────── #}
+<h3>{{ t('存储水位') }}</h3>
+{% set wm = watermark.rollup %}
+<div class="table-wrap">
+<table>
+  <thead><tr>{{ th(t('覆盖概念')) }}{{ th(t('覆盖点')) }}{{ th(t('跨源共存')) }}{{ th(t('rollup 新鲜度')) }}{{ th(t('hook 健康')) }}</tr></thead>
+  <tbody><tr>
+    <td>{{ "{:,}".format(wm.concepts_covered) }}</td>
+    <td>{{ "{:,}".format(wm.points_total) }}</td>
+    <td>{{ "{:,}".format(wm.coexisting_points_total) }}</td>
+    <td>{% if wm.age_hours is not none %}{{ wm.age_hours }}h{% else %}—{% endif %}</td>
+    <td>{% if watermark.drift.hook_healthy %}<span class="badge ok">{{ t('健康') }}</span>{% else %}<span class="badge refused">{{ t('漂移') }}</span> <span class="muted">{{ watermark.drift }}</span>{% endif %}</td>
+  </tr></tbody>
+</table>
+</div>
+{% if watermark.store %}
+  <p class="muted">{{ t('本地存量') }} {{ "{:,}".format(watermark.store.rows or 0) }} {{ t('行') }} ·
+     {% if watermark.store.obs_month_dist %}{{ t('obs_month 桶') }}: {{ (watermark.store.obs_month_dist | length) - 1 }} {{ t('个月') }}{% if '_unmappable' in watermark.store.obs_month_dist %} · {{ t('default 分区收容') }} {{ watermark.store.obs_month_dist['_unmappable'] }}{% endif %}{% else %}{{ t('obs_month 分布未采样') }}{% endif %}</p>
+{% else %}
+  <p class="muted">{{ t('census 尚未采样（存储存量与 obs_month 分布待刷新）') }}</p>
+{% endif %}
+
+{# ── 3. execution distribution ────────────────────────── #}
+<h3>{{ t('执行模型分布') }}</h3>
+<p class="muted">{{ t('近') }} {{ recent_total }} {{ t('次运行') }}</p>
+<div class="table-wrap">
+<table>
+  <thead><tr>{{ th(t('租约式 leasing')) }}{{ th(t('作业式 job')) }}</tr></thead>
+  <tbody><tr>
+    <td>{{ leasing_runs }}</td>
+    <td>{{ job_runs }}</td>
+  </tr></tbody>
+</table>
+</div>
+{% endblock %}
