@@ -7,6 +7,24 @@ on:
     branches: [main]
 
 jobs:
+  # add-data-stream-engine 6.4: the OSS sanitization gate. In THIS private repo
+  # the internal-host class is expected (deploy scripts legitimately reference
+  # the fleet), so the job reports rather than blocks. It becomes the blocking
+  # gate on the PUBLIC repo snapshot at 6.5, where the scrubbed tree must pass
+  # clean. CREDENTIAL hits must be fixed regardless of repo: treat anything that
+  # reached a commit as leaked and rotate it (SECURITY.md).
+  oss-sanitize:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Run sanitization gate (report mode in private repo)
+        run: python scripts/oss_sanitize.py .
+
   build:
     runs-on: ubuntu-latest
     steps:

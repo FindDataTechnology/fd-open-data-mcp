@@ -23,7 +23,28 @@ def _find_finddata_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
+def finddata_root_or_none() -> Path | None:
+    """The workspace root if it actually exists, else None.
+
+    The decoupling primitive (add-data-stream-engine task 6.1): the engine's
+    core must run WITHOUT the finddata workspace — the in-code seed providers
+    (cn-report/edgar/wbgapi) and any entry-point-discovered datasource work
+    standalone; the path-based legacy providers (akshare/yfinance/world/cn-gov)
+    are an ENHANCEMENT that only loads when their files are present. Callers
+    that need a real path (import, taxonomy) branch on this.
+    """
+    env = os.environ.get("FINDDATA_ROOT")
+    if env:
+        p = Path(env)
+        return p if p.exists() else None
+    found = _find_finddata_root()
+    return found if (found / "fd-akshare").exists() or found.exists() else None
+
+
 def finddata_root() -> Path:
+    """Backward-compatible: resolves the env/path even when absent (callers
+    that only run inside the workspace). New code should prefer
+    finddata_root_or_none()."""
     return Path(os.environ.get("FINDDATA_ROOT", str(_find_finddata_root())))
 
 
@@ -99,6 +120,39 @@ PROVIDERS: dict[str, dict] = {
         "source_url": "https://data.worldbank.org/",
     },
 }
+
+
+def provider_available(name: str) -> tuple[bool, str]:
+    """(available, reason) for provider ``name``.
+
+    In-code seed providers (reader "dict" with a dict_module in this package)
+    are always available. Path-based readers ("db"/"dict_path"/"manifest"/
+    adapters) need the finddata workspace (or an explicit override env) — when
+    the resolved file is absent the provider is NOT available and import degrades
+    to a skip rather than a crash (task 6.1: core runs without the host repo).
+    """
+    cfg = PROVIDERS.get(name)
+    if cfg is None:
+        return False, f"unknown provider {name}"
+    reader = cfg.get("reader")
+    # in-code seeds: dict_module points into this package
+    if reader == "dict" and str(cfg.get("dict_module", "")).startswith("fd_open_data_mcp"):
+        return True, "in-code seed"
+    # path-based: resolve the registry path, check existence
+    try:
+        if reader == "db":
+            path = Path(cfg["registry_db"]())
+        elif reader == "dict_path":
+            path = Path(cfg["dict_path"]())
+        elif reader == "manifest":
+            path = Path(cfg["registry_db"]())
+        else:
+            return True, "adapter (runtime-resolved)"
+    except Exception as e:  # noqa: BLE001 - a missing workspace makes the lambda throw
+        return False, f"path unresolvable: {e}"
+    if path.exists():
+        return True, str(path)
+    return False, f"{path} not present (finddata workspace not installed)"
 
 
 def provider_names() -> list[str]:

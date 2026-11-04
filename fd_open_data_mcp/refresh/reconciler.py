@@ -246,7 +246,7 @@ class K8sJobLauncher:
     ):
         self.namespace = namespace or os.environ.get("SCRAW_K8S_NAMESPACE", "scraw")
         self.image = image or os.environ.get(
-            "SCRAW_K8S_IMAGE", "harbor.local/lawcraw_business/scraw-fd-open-data-mcp:latest")
+            "SCRAW_K8S_IMAGE", "scraw-fd-open-data-mcp:latest")
         self.database_url = database_url or os.environ.get(
             "SCRAW_K8S_DATABASE_URL",
             "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres")

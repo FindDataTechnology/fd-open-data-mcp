@@ -17,7 +17,7 @@ from fd_open_data_mcp.scope_rest import app as scope_rest_app
 
 client = TestClient(scope_rest_app)
 
-TOKEN = "test-scope-api-token"
+TOKEN = "dummy-test-scope-token"
 
 REGISTRY_DDL = """
 CREATE TABLE registry_entries (

@@ -26,6 +26,7 @@ Layered schema:
 """
 from __future__ import annotations
 
+import os
 from datetime import datetime, timezone
 
 from sqlalchemy import (
@@ -735,8 +736,13 @@ class Cluster(Base):
     name = Column(String(64), unique=True, nullable=False, index=True)
     api_server = Column(String(255), nullable=False)        # https://<host>:6443
     namespace = Column(String(64), nullable=False, default="scraw")
+    # Worker image for Jobs launched on this cluster. The default is env-driven
+    # (SCRAW_K8S_IMAGE) with a NEUTRAL public fallback — the OSS core must not
+    # hardcode an internal registry host (add-data-stream-engine task 6.1);
+    # deployments point it at their registry via the env var.
     image = Column(String(255), nullable=False,
-                   default="harbor.local/lawcraw_business/scraw-fd-open-data-mcp:latest")
+                   default=lambda: os.environ.get(
+                       "SCRAW_K8S_IMAGE", "scraw-fd-open-data-mcp:latest"))
     tags = Column(JSONB, nullable=True)                     # real_sources this cluster can fetch, e.g. ["eastmoney","sina"]
     capacity = Column(Integer, nullable=False, default=4)   # max concurrent open runs
     kubeconfig_secret = Column(String(128), nullable=True)  # k8s Secret name holding this cluster's kubeconfig

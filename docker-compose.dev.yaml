@@ -1,0 +1,75 @@
+# fd-open-data-mcp — one-command development stack (add-data-stream-engine 6.3)
+#
+# Brings up PostgreSQL + Redis + the engine (MCP server + /panel on :8300),
+# initializes the ontology, and loads the in-code example catalog so the panel
+# shows a populated catalog with NO internal credentials and NO finddata
+# workspace. The World Bank (wbgapi) provider is key-free, so a real fetch can
+# be run against it to see live observation data.
+#
+#   docker compose -f docker-compose.dev.yaml up
+#   # panel: http://localhost:8300/panel   (ships-dark: no auth in dev)
+#   # MCP:   http://localhost:8300/mcp
+#
+# Rebuild after code changes:
+#   docker compose -f docker-compose.dev.yaml up --build
+# Tear down (volumes included) so a re-up re-initializes cleanly:
+#   docker compose -f docker-compose.dev.yaml down -v
+
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: fd
+      POSTGRES_PASSWORD: FD_DEV_PASSWORD        # dev-only; override in prod
+      POSTGRES_DB: fd_open_data
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fd -d fd_open_data"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  redis:
+    image: redis:7
+    command: ["redis-server", "--save", "", "--appendonly", "no"]
+    ports:
+      - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 3s
+      timeout: 3s
+      retries: 20
+
+  # one-shot init: migrate the schema, then import the in-code example catalog.
+  # Idempotent — safe to re-run; `down -v` resets the DB so it re-initializes.
+  # The image ENTRYPOINT is the serve command, so it must be overridden here.
+  init:
+    build: .
+    depends_on:
+      postgres: { condition: service_healthy }
+    environment:
+      FD_OPEN_DATA_MCP_DATABASE_URL: postgresql://fd:FD_DEV_PASSWORD@postgres:5432/fd_open_data
+    entrypoint: ["sh", "-c"]
+    command: "fd-open-data-mcp migrate && fd-open-data-mcp import-catalog"
+
+  # the engine: MCP server + mounted /panel. Stream plane + rollup are active
+  # (REDIS_URL set → the worker-exit publish path lands via the stream plane).
+  # Runs the image's default ENTRYPOINT (serve --transport http :8300).
+  engine:
+    build: .
+    depends_on:
+      init: { condition: service_completed_successfully }
+      redis: { condition: service_healthy }
+    environment:
+      FD_OPEN_DATA_MCP_DATABASE_URL: postgresql://fd:FD_DEV_PASSWORD@postgres:5432/fd_open_data
+      REDIS_URL: redis://redis:6379/0
+      # ships-dark: no PANEL_TOKEN/LOGTO → panel open for local dev only.
+      # DO NOT expose this container publicly without setting auth.
+    ports:
+      - "8300:8300"
+
+volumes:
+  pgdata:

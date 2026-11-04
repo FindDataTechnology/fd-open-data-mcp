@@ -11,7 +11,9 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.catalog.enrich import derive_frequency, derive_meaning
-from fd_open_data_mcp.catalog.providers import PROVIDERS, provider_names
+from fd_open_data_mcp.catalog.providers import (
+    PROVIDERS, provider_available, provider_names,
+)
 from fd_open_data_mcp.catalog.readers import read_provider
 from fd_open_data_mcp.catalog.upstream import introspect_upstream
 from fd_open_data_mcp.models import Function, FunctionColumn, Source
@@ -160,7 +162,17 @@ def import_all(session: Optional[Session] = None) -> list[dict]:
         from fd_open_data_mcp.db import get_database
         session = get_database().get_session()
     try:
-        reports = [import_provider(name, session) for name in provider_names()]
+        reports = []
+        for name in provider_names():
+            ok, reason = provider_available(name)
+            if not ok:
+                # task 6.1: the core runs without the finddata workspace — a
+                # path-based provider whose files are absent is SKIPPED with a
+                # reason, never a crash. In-code seed providers always load.
+                reports.append({"provider": name, "status": "skipped",
+                                "reason": reason})
+                continue
+            reports.append(import_provider(name, session))
         # auto-discover manifests from entry points + datasources/ dir
         from fd_open_data_mcp.catalog.register import discover_datasources
         discovered = discover_datasources(session)

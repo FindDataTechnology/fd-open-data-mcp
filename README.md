@@ -89,6 +89,23 @@ via `FD_OPEN_DATA_MCP_DATABASE_URL`. `FINDDATA_ROOT` (default: the parent
 
 ## Quick start
 
+**Zero-setup option** — bring up Postgres + Redis + the engine (MCP server and
+the `/panel` console on `http://localhost:8300/panel`) with one command. The
+`init` service runs `migrate` + `import-catalog` automatically, loading the
+in-code example catalog (World Bank `wbgapi` is key-free, so `fetch` works out
+of the box; providers that need a local workspace or API keys are skipped with
+a reason, never a crash):
+
+```bash
+docker compose -f docker-compose.dev.yaml up --build
+# teardown + reset data:  docker compose -f docker-compose.dev.yaml down -v
+```
+
+Note: the panel ships **dark** (no auth) in this dev stack — never expose it
+publicly without setting `PANEL_TOKEN` or `LOGTO_*` (see SECURITY.md).
+
+Or run the CLI directly against your own Postgres:
+
 ```bash
 # 1. Create the ontology tables
 fd-open-data-mcp migrate

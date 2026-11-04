@@ -130,7 +130,7 @@ def test_auth_partial_identity_matrix_grouped_by_source(session):
     i1 = _ident("rmfyalk", "acc-a", "active", automation="auto",
                 last_login_at=BASE + dt.timedelta(days=1),
                 last_success_at=BASE + dt.timedelta(days=1),
-                lease_owner="dispatch-1", lease_token="tok-1234567890",
+                lease_owner="dispatch-1", lease_token="dummy-lease-token",
                 lease_expires_at=NOW + dt.timedelta(hours=1))
     _ident("rmfyalk", "acc-b", "login_required", failure_count=3)
     _ident("law", "acc-x", "banned", consecutive_zero_runs=5)

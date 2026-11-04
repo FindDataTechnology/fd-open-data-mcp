@@ -5,6 +5,7 @@ Mirrors the MCP tools for shell use. Run ``fd-open-data-mcp --help``.
 from __future__ import annotations
 
 import json
+import os
 
 import click
 
@@ -43,7 +44,7 @@ def cluster_grp():
 @click.option("--name", required=True, help="Unique cluster name, e.g. vultr-tokyo")
 @click.option("--api-server", required=True, help="https://<host>:6443")
 @click.option("--namespace", default="scraw", help="namespace crawl Jobs run in")
-@click.option("--image", default="harbor.local/lawcraw_business/scraw-fd-open-data-mcp:latest")
+@click.option("--image", default=os.environ.get("SCRAW_K8S_IMAGE", "scraw-fd-open-data-mcp:latest"))
 @click.option("--tag", "tags", multiple=True,
               help="real_source this cluster can fetch (e.g. eastmoney). Repeatable. Empty = wildcard.")
 @click.option("--capacity", type=int, default=4, help="max concurrent open runs")
