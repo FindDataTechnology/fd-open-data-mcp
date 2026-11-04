@@ -94,6 +94,14 @@ def split_plan(session: Session, plan: CrawlPlan, *, max_cells_per_item: int
     ids = resolve_entity_ids(session, plan)
     if not ids:
         return []
+    # An empty concept set is also "nothing to do" — a since_last window that
+    # resolves to no fetchable concepts (e.g. yearly concepts whose next
+    # annual observation period has not opened yet) leaves wanted_concepts
+    # empty while entities resolve fine; the per-entity estimate would max()
+    # an empty generator and crash the leasing launch instead of no-op'ing
+    # (live finding, sha-88c588e rollout, policy wbgapi-wdi-probe).
+    if not plan.wanted_concepts:
+        return []
     per_entity = _estimate_per_entity(plan)
     chunk = max(1, max_cells_per_item // per_entity)
     items: list[CrawlPlan] = []

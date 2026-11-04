@@ -103,3 +103,20 @@ def test_series_mode_split(session):
     assert verify_partition(list(range(1, 11)), items)
     for it in items:
         assert it.plan_cells == len(it.entity_scope.entity_ids)  # series: 1 per entity
+
+
+def test_split_plan_empty_concepts_returns_empty(session):
+    """A since_last window that resolves to zero wanted concepts (e.g. yearly
+    concepts whose next annual period has not opened) must yield an empty
+    item list — no crash, the leasing launch records a no-op close."""
+    from fd_open_data_mcp.crawl.plan import CrawlPlan, DateRange, EntityScope
+    from fd_open_data_mcp.crawl.split import split_plan
+
+    plan = CrawlPlan(
+        entity_scope=EntityScope(entity_type="country", entity_ids=[1, 2, 3]),
+        date_range=DateRange(start="2025-01-01", end="2026-11-04",
+                             frequency="yearly"),
+        wanted_concepts=[],  # empty: nothing fetchable in the window
+        unroutable=[{"concept_id": 1446, "reason": "window empty"}],
+    )
+    assert split_plan(session, plan, max_cells_per_item=5000) == []
