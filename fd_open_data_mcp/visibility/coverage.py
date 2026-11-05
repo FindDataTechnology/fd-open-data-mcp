@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import (
@@ -93,26 +93,33 @@ def bump_rollups(
     # Coexistence probe FIRST (one indexed query per call-site batch): every
     # inserted point already held under a DIFFERENT source. Runs before the
     # coverage row is materialized so autoflush never sees a half-built row.
-    # Bucket caliber (obs_month, not exact date): monthly observations across
-    # sources land on neighboring days (ecb-exr 2026-09-30 vs un-comtrade
-    # 2026-10-01 style), so an exact-date probe misses every real coexistence
-    # (probe=0 by date vs 8,794 groups by month bucket, 2026-11-05 audit).
-    # obs_month is the same bucket the partitioning and the rebuild GROUP BY
-    # use, keeping the incremental hook reconciled with the ground truth.
-    # NULL obs_month (sentinels) never matches an IN probe — same effective
-    # behavior as before, where NULL dates were skipped.
+    # Bucket caliber follows the point's granularity: day points bucket on
+    # the exact date (a day series' point IS the day — bucketing those on
+    # obs_month collapsed a whole month of daily rows into one point and
+    # gutted daily rows by ~91%, caught in the 2026-11-06 prod spot check),
+    # while month/quarter/year observations across sources land on
+    # neighboring days inside one period (probe=0 by date vs 8,794 groups by
+    # month bucket, 2026-11-05 audit) so they bucket on obs_month — the same
+    # bucket the partitioning and the rebuild GROUP BY use. NULL obs_month
+    # (sentinels) never matches an IN probe — same effective behavior as
+    # before, where NULL dates were skipped.
     coexisting_delta = 0
-    inserted_months = {m for m in
-                       (obs_month_of(d) for d in inserted_dates if d)
-                       if m}
-    if inserted_months:
+    if granularity == "day":
+        coexisting_dates = {d for d in inserted_dates if d}
+        bucket_col = SemanticObservation.date
+    else:
+        coexisting_dates = {m for m in
+                            (obs_month_of(d) for d in inserted_dates if d)
+                            if m}
+        bucket_col = SemanticObservation.obs_month
+    if coexisting_dates:
         others = session.execute(
-            select(SemanticObservation.obs_month)
+            select(bucket_col)
             .where(
                 SemanticObservation.concept_id == concept_id,
                 SemanticObservation.entity_type == entity_type,
                 SemanticObservation.entity_id == entity_id,
-                SemanticObservation.obs_month.in_(inserted_months),
+                bucket_col.in_(coexisting_dates),
                 # point identity includes granularity: a quarter row and a day
                 # row of the same date are DISTINCT points (uq_sem_obs), so
                 # coexistence is only same-granularity overlap.
@@ -229,18 +236,23 @@ def rebuild_concept_rollups(session: Session, concept_id: int | None = None) -> 
     # probe — accepted drift, documented at bump_rollups.
     coexisting: dict[int, int] = {}
     if touched:
-        # COALESCE guards against rows whose obs_month was never populated
-        # (side-door writers, test fixtures): NULL groups as one bucket in
-        # Postgres, which would collapse distinct points into one. Falling
-        # back to the raw date keeps each such row its own point.
-        month = func.coalesce(SemanticObservation.obs_month,
-                              SemanticObservation.date)
+        # Bucket per point granularity: day → exact date (a day series'
+        # point IS the day), other granularities → obs_month with a raw-date
+        # fallback for side-door rows whose obs_month was never populated
+        # (NULL groups as one bucket in Postgres, which would collapse
+        # distinct points into one).
+        month = case(
+            (SemanticObservation.granularity == "day",
+             SemanticObservation.date),
+            else_=func.coalesce(SemanticObservation.obs_month,
+                                SemanticObservation.date),
+        ).label("month")
         points = (
             select(
                 SemanticObservation.concept_id.label("concept_id"),
                 SemanticObservation.entity_type,
                 SemanticObservation.entity_id,
-                month.label("month"),
+                month,
                 SemanticObservation.granularity,
                 func.count().label("srcs"),
             )
@@ -317,9 +329,12 @@ def coverage_by_concept(
     obs = SemanticObservation
     points = (
         select(obs.concept_id, obs.entity_type, obs.entity_id,
-               # COALESCE: side-door rows without obs_month stay their own
-               # point instead of collapsing into one NULL bucket.
-               func.coalesce(obs.obs_month, obs.date).label("month"),
+               # Bucket per point granularity (day → date, else obs_month
+               # with a raw-date fallback so side-door rows without the
+               # derived bucket stay their own point).
+               case((obs.granularity == "day", obs.date),
+                    else_=func.coalesce(obs.obs_month, obs.date)
+                    ).label("month"),
                obs.granularity)
         .where(*filters)
         .distinct()

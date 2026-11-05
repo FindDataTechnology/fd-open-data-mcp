@@ -102,6 +102,7 @@ def rebuild_rollups_cmd(concept_id):
     recompute the incremental write hook is verified against; also the
     backfill for observations written before the hook existed. Safe on a
     live system: plain SELECTs plus upserts of derived rows."""
+    from fd_open_data_mcp.db import get_database
     from fd_open_data_mcp.visibility.coverage import rebuild_concept_rollups
     db = get_database()
     s = db.get_session()

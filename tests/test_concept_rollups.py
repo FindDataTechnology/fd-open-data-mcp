@@ -114,6 +114,32 @@ def test_monthly_coexistence_buckets_on_obs_month(session, concept):
     assert cov.coexisting_points == 2
 
 
+def test_daily_points_never_bucket_on_month(session, concept):
+    """A day series' point IS the day: bucketing daily rows on obs_month
+    collapsed a whole month of daily values into one point (~91% loss on
+    the fund-aum concept, caught in the 2026-11-06 prod spot check).
+    Daily coexistence still probes the exact date."""
+    write_cache_range(session, concept.id, "country", 1,
+                      {"2026-09-01": 1, "2026-09-02": 2, "2026-10-01": 3},
+                      "CNY", "src_a", granularity="day")
+    cov = _cov(session, concept.id)
+    assert cov.rows == 3                      # three day points, not two
+    assert cov.coexisting_points == 0
+
+    # A second source on the same day: coexisting (exact-date probe).
+    write_cache(session, concept.id, "country", 1, "2026-09-01", "9", "CNY",
+                "src_b", granularity="day")
+    cov = _cov(session, concept.id)
+    assert cov.rows == 3
+    assert cov.coexisting_points == 1
+
+    # Rebuild (ground truth) agrees.
+    rebuild_concept_rollups(session, concept_id=concept.id)
+    cov = _cov(session, concept.id)
+    assert cov.rows == 3
+    assert cov.coexisting_points == 1
+
+
 def test_rebuild_matches_incremental(session, concept):
     """rebuild == incremental on the same data — the retirement proof for
     the hourly full-table refresh."""
