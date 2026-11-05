@@ -76,6 +76,44 @@ def test_second_source_new_point_extends_coverage(session, concept):
     assert cov.latest_date == "2024-12-31"
 
 
+def test_monthly_coexistence_buckets_on_obs_month(session, concept):
+    """Cross-source monthly observations landing on neighboring days inside
+    one month are ONE coexisting point — the 2026-11-05 audit found the
+    exact-date probe counted 0 coexisting points where 8,794 month-bucket
+    groups exist (sources differ by a day within the same month)."""
+    write_cache(session, concept.id, "country", 1, "2026-09-30", "1", "CNY",
+                "src_a", granularity="month")
+    write_cache(session, concept.id, "country", 1, "2026-09-29", "2", "CNY",
+                "src_b", granularity="month")
+    cov = _cov(session, concept.id)
+    assert cov.rows == 1                      # one month bucket, two sources
+    assert cov.coexisting_points == 1
+
+    # A different month bucket is a NEW point even when dates are adjacent
+    # across the month boundary (2026-09-30 | 2026-10-01).
+    write_cache(session, concept.id, "country", 1, "2026-10-01", "3", "CNY",
+                "src_a", granularity="month")
+    write_cache(session, concept.id, "country", 1, "2026-10-31", "4", "CNY",
+                "src_b", granularity="month")
+    cov = _cov(session, concept.id)
+    assert cov.rows == 2
+    assert cov.coexisting_points == 2
+
+    # Rebuild (ground truth) agrees with the incremental hook.
+    rebuild_concept_rollups(session, concept_id=concept.id)
+    cov = _cov(session, concept.id)
+    assert cov.rows == 2
+    assert cov.coexisting_points == 2
+
+    # Different granularities of the same month stay DISTINCT points
+    # (uq_sem_obs point identity includes granularity).
+    write_cache(session, concept.id, "country", 1, "2026-09-30", "5", "CNY",
+                "src_c", granularity="quarter")
+    cov = _cov(session, concept.id)
+    assert cov.rows == 3
+    assert cov.coexisting_points == 2
+
+
 def test_rebuild_matches_incremental(session, concept):
     """rebuild == incremental on the same data — the retirement proof for
     the hourly full-table refresh."""

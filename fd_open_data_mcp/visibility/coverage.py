@@ -17,6 +17,7 @@ from sqlalchemy.orm import Session
 from fd_open_data_mcp.models import (
     Concept, ConceptCoverage, ConceptSourceStats, DataCensus, SemanticObservation,
 )
+from fd_open_data_mcp.semantic.dates import obs_month_of
 from fd_open_data_mcp.visibility.census import LOCAL_STORE
 
 # Single-flight key for the coverage-cache refresh across application
@@ -58,12 +59,15 @@ def bump_rollups(
     Coexistence caliber: a point covered by MORE THAN ONE source counts as
     ONE point in ``concept_coverage.rows`` (add-multi-source-observations).
     Maintained exactly, not approximated: for every inserted point we check
-    whether the same point exists under a DIFFERENT source (one indexed
-    lookup per call site batch — the call sites pass the whole batch so the
-    check is one query, not one per point) and keep a running
-    ``coexisting_points`` counter on the coverage row; rows = sum(stats.rows)
-    - coexisting_points stays exact even if cross-source coexistence appears
-    (census 2026-11-04: zero today).
+    whether the same month bucket (obs_month) is already held under a
+    DIFFERENT source (one indexed lookup per call site batch — the call sites
+    pass the whole batch so the check is one query, not one per point) and
+    keep a running ``coexisting_points`` counter on the coverage row;
+    rows = sum(stats.rows) - coexisting_points stays exact even if
+    cross-source coexistence appears (2026-11-05: monthly observations
+    across sources land on neighboring days inside one month, so the probe
+    buckets on obs_month — by exact date the probe found 0 coexisting points
+    where 8,794 month-bucket groups exist).
     """
     stats = (
         session.query(ConceptSourceStats)
@@ -89,15 +93,26 @@ def bump_rollups(
     # Coexistence probe FIRST (one indexed query per call-site batch): every
     # inserted point already held under a DIFFERENT source. Runs before the
     # coverage row is materialized so autoflush never sees a half-built row.
+    # Bucket caliber (obs_month, not exact date): monthly observations across
+    # sources land on neighboring days (ecb-exr 2026-09-30 vs un-comtrade
+    # 2026-10-01 style), so an exact-date probe misses every real coexistence
+    # (probe=0 by date vs 8,794 groups by month bucket, 2026-11-05 audit).
+    # obs_month is the same bucket the partitioning and the rebuild GROUP BY
+    # use, keeping the incremental hook reconciled with the ground truth.
+    # NULL obs_month (sentinels) never matches an IN probe — same effective
+    # behavior as before, where NULL dates were skipped.
     coexisting_delta = 0
-    if inserted_dates:
+    inserted_months = {m for m in
+                       (obs_month_of(d) for d in inserted_dates if d)
+                       if m}
+    if inserted_months:
         others = session.execute(
-            select(SemanticObservation.date)
+            select(SemanticObservation.obs_month)
             .where(
                 SemanticObservation.concept_id == concept_id,
                 SemanticObservation.entity_type == entity_type,
                 SemanticObservation.entity_id == entity_id,
-                SemanticObservation.date.in_(inserted_dates),
+                SemanticObservation.obs_month.in_(inserted_months),
                 # point identity includes granularity: a quarter row and a day
                 # row of the same date are DISTINCT points (uq_sem_obs), so
                 # coexistence is only same-granularity overlap.
@@ -204,15 +219,28 @@ def rebuild_concept_rollups(session: Session, concept_id: int | None = None) -> 
     session.flush()
 
     # Exact coexistence count per touched concept (five-column GROUP BY —
-    # the ~8 s point machinery, scoped to touched concepts only).
+    # the ~8 s point machinery, scoped to touched concepts only). Point
+    # identity buckets on obs_month, not the raw date string: monthly
+    # observations across sources land on neighboring days, so an exact-date
+    # group-by split one logical point into two (probe=0 by date vs 8,794
+    # groups by month bucket, 2026-11-05 audit) and inflated rows. Same
+    # caliber as the incremental probe in bump_rollups; NULL obs_month rows
+    # (sentinels) group as one bucket and never match the incremental IN
+    # probe — accepted drift, documented at bump_rollups.
     coexisting: dict[int, int] = {}
     if touched:
+        # COALESCE guards against rows whose obs_month was never populated
+        # (side-door writers, test fixtures): NULL groups as one bucket in
+        # Postgres, which would collapse distinct points into one. Falling
+        # back to the raw date keeps each such row its own point.
+        month = func.coalesce(SemanticObservation.obs_month,
+                              SemanticObservation.date)
         points = (
             select(
                 SemanticObservation.concept_id.label("concept_id"),
                 SemanticObservation.entity_type,
                 SemanticObservation.entity_id,
-                SemanticObservation.date,
+                month.label("month"),
                 SemanticObservation.granularity,
                 func.count().label("srcs"),
             )
@@ -221,7 +249,7 @@ def rebuild_concept_rollups(session: Session, concept_id: int | None = None) -> 
                 SemanticObservation.concept_id,
                 SemanticObservation.entity_type,
                 SemanticObservation.entity_id,
-                SemanticObservation.date,
+                month,
                 SemanticObservation.granularity,
             )
             .subquery()
@@ -267,17 +295,18 @@ def coverage_by_concept(
     """Per-concept observation coverage: covered-point count, latest
     observation date, distinct sources used, most recent fetch.
 
-    A covered point is one (concept_id, entity_type, entity_id, date,
-    granularity) tuple: coexisting sources of the same point count as ONE
-    point (add-multi-source-observations), so the point count comes from a
-    five-column GROUP BY — never from DISTINCT over a per-row string
-    concatenation, whose aggregate machinery measured ~102 s on the 6.3M-row
-    master where the point-column group-by runs in ~8 s (identical result:
-    the current data holds zero coexisting points, and the group-by keeps
-    the dedup semantics if coexistence appears). ``latest_date`` is the
-    canonical YYYY-MM-DD string, so ``max(date)`` is both lexicographic and
-    chronological. Ordered by point count descending. Read-only: a plain
-    aggregate, no table writes.
+    A covered point is one (concept_id, entity_type, entity_id, obs_month,
+    granularity) tuple — obs_month buckets the raw date so neighboring-day
+    monthly observations across sources count as ONE point (probe=0 by date
+    vs 8,794 groups by month bucket, 2026-11-05 audit; same caliber as
+    bump_rollups and rebuild_concept_rollups): coexisting sources of the same
+    point count as ONE point (add-multi-source-observations), so the point
+    count comes from a five-column GROUP BY — never from DISTINCT over a
+    per-row string concatenation, whose aggregate machinery measured ~102 s
+    on the 6.3M-row master where the point-column group-by runs in ~8 s.
+    ``latest_date`` stays the raw max(date) (canonical YYYY-MM-DD string, so
+    max is both lexicographic and chronological). Ordered by point count
+    descending. Read-only: a plain aggregate, no table writes.
     """
     filters = []
     if concept_id is not None:
@@ -287,7 +316,10 @@ def coverage_by_concept(
 
     obs = SemanticObservation
     points = (
-        select(obs.concept_id, obs.entity_type, obs.entity_id, obs.date,
+        select(obs.concept_id, obs.entity_type, obs.entity_id,
+               # COALESCE: side-door rows without obs_month stay their own
+               # point instead of collapsing into one NULL bucket.
+               func.coalesce(obs.obs_month, obs.date).label("month"),
                obs.granularity)
         .where(*filters)
         .distinct()
@@ -297,9 +329,17 @@ def coverage_by_concept(
         select(
             points.c.concept_id.label("concept_id"),
             func.count().label("rows"),
-            func.max(points.c.date).label("latest_date"),
         )
         .group_by(points.c.concept_id)
+        .subquery()
+    )
+    latest = (
+        select(
+            obs.concept_id.label("concept_id"),
+            func.max(obs.date).label("latest_date"),
+        )
+        .where(*filters)
+        .group_by(obs.concept_id)
         .subquery()
     )
     meta = (
@@ -316,7 +356,7 @@ def coverage_by_concept(
         session.query(
             pts.c.concept_id.label("concept_id"),
             pts.c.rows.label("rows"),
-            pts.c.latest_date.label("latest_date"),
+            latest.c.latest_date.label("latest_date"),
             meta.c.last_fetch.label("last_fetch"),
             meta.c.sources.label("sources"),
             Concept.code.label("code"),
@@ -324,6 +364,7 @@ def coverage_by_concept(
             Concept.name_zh.label("name_zh"),
             Concept.category.label("category"),
         )
+        .outerjoin(latest, latest.c.concept_id == pts.c.concept_id)
         .outerjoin(meta, meta.c.concept_id == pts.c.concept_id)
         .outerjoin(Concept, Concept.id == pts.c.concept_id)
     )
