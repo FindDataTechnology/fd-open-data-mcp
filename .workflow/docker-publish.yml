@@ -1,8 +1,12 @@
 # Gitee Go pipeline — GitHub Actions 的 docker-publish.yml 的等价迁移。
 # 构建 fd-open-data-mcp 镜像并推送到 Harbor（finddata 项目）。
 #
-# Harbor 参数已写死（私有仓库可接受）。若要改用私密参数，在仓库
-# 「流水线 → 参数管理」里配置同名参数后把字段换回 ${HARBOR_HOST} 等：
+# 2026-11-05 口令轮换：原内联口令已泄入 git 历史（见净化台账），HARBOR_PASS
+# 改为流水线私密参数（流水线 → 参数管理 → 敏感参数）注入。注意：本流水线目标
+# America Harbor (23.144.68.246:30880) 与 cheap 本地 Harbor (172.16.0.186:30880)
+# 均已下线（2026-11-05 实测连接拒绝），本文件当前为休眠配置，仅保留作历史参照；
+# 现役出片线 = GitHub Actions → hkccr → cheap-3 tcr-relay → ccr（.github/workflows/image.yml）。
+# 历史参数说明：
 #   HARBOR_HOST — 云端流水线: 23.144.68.246:30880 (America Harbor，公网可达)
 #                 cheap 私有构建机: 172.16.0.186:30880 (cheap 集群本地 Harbor)
 #   HARBOR_USER — gitee-ci-push（两个 Harbor 都已建好，finddata 项目 developer）
@@ -32,7 +36,7 @@ stages:
     displayName: 构建镜像 (v<构建号>)
     repository: 23.144.68.246:30880
     username: gitee-ci-push
-    password: "GiteeCI#2026push"
+    password: "${HARBOR_PASS}"  # ROTATED 2026-11-05: set as pipeline secret, never inline
     tag: finddata/fd-open-data-mcp:v${GITEE_PIPELINE_BUILD_NUMBER}
     dockerfile: ./Dockerfile
     isCache: true
@@ -42,7 +46,7 @@ stages:
     dependsOn: build_image_versioned
     repository: 23.144.68.246:30880
     username: gitee-ci-push
-    password: "GiteeCI#2026push"
+    password: "${HARBOR_PASS}"  # ROTATED 2026-11-05: set as pipeline secret, never inline
     tag: finddata/fd-open-data-mcp:latest
     dockerfile: ./Dockerfile
     isCache: true
