@@ -140,6 +140,30 @@ def test_daily_points_never_bucket_on_month(session, concept):
     assert cov.coexisting_points == 1
 
 
+def test_hour_points_never_bucket_on_month(session, concept):
+    """Same caliber as day, second prod catch: 385 hour stamps of one grid
+    series collapsed to rows=1 / coexisting=384 under the obs_month bucket
+    (concept 2278, 2026-11-06). Hour points are their own timestamp."""
+    write_cache_range(session, concept.id, "country", 1,
+                      {"2026-10-06T02": 1, "2026-10-06T03": 2,
+                       "2026-10-06T04": 3}, "MWh", "src_a",
+                      granularity="hour")
+    cov = _cov(session, concept.id)
+    assert cov.rows == 3
+    assert cov.coexisting_points == 0
+
+    write_cache(session, concept.id, "country", 1, "2026-10-06T02", "9",
+                "MWh", "src_b", granularity="hour")
+    cov = _cov(session, concept.id)
+    assert cov.rows == 3
+    assert cov.coexisting_points == 1
+
+    rebuild_concept_rollups(session, concept_id=concept.id)
+    cov = _cov(session, concept.id)
+    assert cov.rows == 3
+    assert cov.coexisting_points == 1
+
+
 def test_rebuild_matches_incremental(session, concept):
     """rebuild == incremental on the same data — the retirement proof for
     the hourly full-table refresh."""
