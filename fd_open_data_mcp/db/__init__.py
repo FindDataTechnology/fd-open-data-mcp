@@ -46,6 +46,24 @@ from sqlalchemy.orm import Session, sessionmaker
 
 logger = logging.getLogger(__name__)
 
+
+def _redact_dsn(url: str) -> str:
+    """DSN with the password replaced by ``***``.
+
+    The startup line used to print the full DSN, so every pod log carried the
+    master database password in clear text (found 2026-11-08 in the reconciler
+    tick logs: ``postgresql+psycopg2://fd:<pw>@…``). Logs travel much further
+    than the secret they leak — kubectl logs, GHA artefacts, pasted transcripts.
+    """
+    try:
+        from sqlalchemy.engine import make_url
+        u = make_url(url)
+        # a literal "***" is percent-encoded by render_as_string; REDACTED is not
+        return u.set(password="REDACTED").render_as_string(hide_password=False)
+    except Exception:  # noqa: BLE001 - never let redaction break startup
+        return "<unparseable database url>"
+
+
 _DEFAULT_DB_DIR = Path(__file__).resolve().parent / "metadata"
 _DEFAULT_DB_PATH = _DEFAULT_DB_DIR / "daas.db"
 
@@ -290,7 +308,7 @@ class Database:
 
         self._session_factory = sessionmaker(bind=self._engine)
         _enforce_schema_gate(self._engine, self._database_url)
-        logger.info("Database initialized: %s", self._database_url)
+        logger.info("Database initialized: %s", _redact_dsn(self._database_url))
 
     def dispose(self) -> None:
         if self._engine is not None:

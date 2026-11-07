@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.46] - 2026-11-08
+- **fix(db)**: 启动日志把数据库口令打成明文——`Database initialized: postgresql+psycopg2://fd:<口令>@…`
+  每一轮 reconciler tick 都会写进 pod 日志，而 pod 日志的传播面（kubectl logs/GHA 产物/粘贴记录）
+  远大于 Secret 本身。现统一走 `_redact_dsn()`（`make_url(...).set(password="REDACTED")`），
+  带回归单测；无口令的 DSN（sqlite）原样输出。
+
 ## [0.5.45] - 2026-11-08
 - **fix(fix-census-refresh)**: 0.5.44 的 SAVEPOINT 修复是**假绿**（结构对、语义没生效）。
   0.5.44 在 `refresh_census` 开头取一次 `conn = session.connection()`，之后才进

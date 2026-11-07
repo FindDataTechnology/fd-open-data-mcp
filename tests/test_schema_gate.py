@@ -256,3 +256,16 @@ class TestSchemaGateOnPostgreSQL:
         # Bypass is pass-through only: still no schema mutation.
         assert _public_tables(pg_database_url) == set()
         db.dispose()
+
+
+def test_db_url_log_line_is_redacted():
+    """The startup log must never carry the password (found leaked 2026-11-08).
+
+    Every reconciler tick printed ``postgresql+psycopg2://fd:<pw>@…``; pod logs
+    are copied, pasted and archived far more widely than the Secret itself."""
+    from fd_open_data_mcp.db import _redact_dsn
+
+    assert _redact_dsn("postgresql+psycopg2://fd:hunter2@10.0.0.1:5432/db") == \
+        "postgresql+psycopg2://fd:REDACTED@10.0.0.1:5432/db"
+    # no password to hide: unchanged
+    assert _redact_dsn("sqlite:///tmp/x.db") == "sqlite:///tmp/x.db"
