@@ -155,11 +155,17 @@ def _name_key(name: str) -> str:
 
 
 def _sibling_entities(session, row: dict) -> list[dict]:
-    """同基础代码的兄弟实体（``603043#8227`` 一类），归一名字必须一致。
+    """同基础代码的兄弟实体（``603043#8227`` 一类）。
 
-    没有这一步，``restaurant_company_financials`` 会对 4 家 A股餐饮公司报
+    没有这一步，``restaurant_company_financials`` 会对部分 A股餐饮公司报
     "源侧未覆盖" —— 库里明明有 20 项概念、到 2026-09-30，只是落在别名实体上。
     把"库里有"误报成"源侧没有"比空数组更坏，故读路径必须合并。
+
+    判据：**同 6 位基础代码 + 同 ``entity_type``**。A股/港股的一只股票代码只对应
+    一家上市公司，改名（如 ``603007`` → 顺景科技）后爬虫会以新名字另建实体，
+    此时归一名字**也对不上**——若坚持名字相等，改过名的公司永远读不到。
+    故名字只作披露信号（``name_matches``），不作准入闸；不同基础代码的实体
+    一律不认（绝不跨公司借数）。
     """
     base = str(row.get("code") or "").split("#", 1)[0].strip()
     if not base:
@@ -177,11 +183,18 @@ def _sibling_entities(session, row: dict) -> list[dict]:
         {"pat": f"{base}#%"},
     ).all()
     want = _name_key(row.get("name_zh") or "")
-    return [
-        {"entity_id": int(r[0]), "code": str(r[1]), "name_zh": r[2]}
-        for r in rows
-        if _name_key(r[2] or "") == want and int(r[0]) != int(row["id"])
-    ]
+    out: list[dict] = []
+    for r in rows:
+        if int(r[0]) == int(row["id"]):
+            continue
+        alias_name = r[2] or ""
+        out.append({
+            "entity_id": int(r[0]),
+            "code": str(r[1]),
+            "name_zh": alias_name,
+            "name_matches": _name_key(alias_name) == want,
+        })
+    return out
 
 
 def _entity_brief(row: dict) -> dict:
@@ -248,6 +261,7 @@ def _financial_counts(session) -> dict[int, dict[str, int]]:
             WHERE c.code IN ('financials.revenue',
                              'financials.operating_profit',
                              'financials.net_income')
+              AND e.entity_type = 'stock'
               AND split_part(e.code, '#', 1) IN (
                   SELECT code FROM entities
                   WHERE metadata_json->>'list' = 'restaurant-universe'
@@ -289,12 +303,36 @@ def _alias_map(session) -> dict[int, int]:
         )
     ).all()
     mapping: dict[int, int] = {}
-    for eid, code, name_zh in rows:
+    for eid, code, _name_zh in rows:
         base = str(code or "").split("#", 1)[0]
         target = universe.get(base)
-        if target and _name_key(name_zh or "") == _name_key(target.get("name_zh") or ""):
+        if target:  # 同码即同一上市公司；名字差不作排除（改名公司）
             mapping[int(eid)] = int(target["id"])
     return mapping
+
+
+def _cninfo_operating_counts(session) -> dict[str, int]:
+    """``cninfo-operating`` 车道按 sec_code 数的成功条目。
+
+    这条车道供的是「交易所月度经营数据公告」（产销快报/销售简报/发电量/
+    主要运营数据/经营简报）。判它通不通只能看**爬取条目**：``financials.*``
+    那批观测的 ``source_used`` 是 ``akshare``，与 cninfo 无关，拿它顶账会把
+    「经营公告 0 命中」误报成「有数据」。
+    """
+    rows = session.execute(
+        text(
+            """
+            SELECT split_part(coalesce(ci.payload->>'sec_code', ''), '#', 1) AS code,
+                   count(*) AS n
+            FROM crawl_items ci
+            JOIN crawl_runs r ON r.id = ci.run_id
+            WHERE r.source = 'cninfo-operating'
+              AND r.status = 'success'
+            GROUP BY 1
+            """
+        )
+    ).all()
+    return {str(code): int(n) for code, n in rows if code}
 
 
 def _monthly_revenue_counts(session) -> dict[int, int]:
@@ -325,7 +363,8 @@ def _monthly_revenue_counts(session) -> dict[int, int]:
 
 def _lane_status_for(row: dict, events_by_code: dict[str, list[str]],
                      fins: dict[int, dict[str, int]],
-                     monthly: dict[int, int] | None = None) -> list[dict]:
+                     monthly: dict[int, int] | None = None,
+                     cninfo: dict[str, int] | None = None) -> list[dict]:
     """Per-lane availability with explicit unavailable reasons.
 
     ``status`` is one of ``data`` (rows present), ``partial`` (some rows but a
@@ -374,17 +413,33 @@ def _lane_status_for(row: dict, events_by_code: dict[str, list[str]],
             else:
                 lanes.append({"lane": lane, "status": "no_data", "events": 0,
                               "detail": f"该实体在库内无事件与财务观测（{R_SHORT_WINDOW}）"})
-        elif lane in ("cninfo-operating", "fd-cn-report"):
+        elif lane == "cninfo-operating":
+            # 这条车道的真身是「交易所月度经营数据公告」，判据必须是爬取条目，
+            # 不能拿 financials.* 顶上——那批观测的 source_used 是 akshare（东财转载），
+            # 跟 cninfo 一点关系没有。用财务点数冒充，会把「经营公告 0 命中」
+            # 报成「有数据」，读者再也没法判断这条车道到底通不通。
+            n = int((cninfo or {}).get(str(ticker).split(".")[0], 0))
+            if n:
+                lanes.append({"lane": lane, "status": "data", "events": n})
+            else:
+                lanes.append({
+                    "lane": lane, "status": "no_data", "events": 0,
+                    "detail": "源侧无此类：餐饮 A股不发布月度经营数据公告"
+                              "（披露节奏是季报/半年报/年报），不是抓取失败",
+                })
+        elif lane == "fd-cn-report":
             counts = fins.get(eid, {})
             if counts:
-                lanes.append({"lane": lane, "status": "data",
-                              "financial_points": sum(counts.values())})
+                lanes.append({
+                    "lane": lane, "status": "data",
+                    "financial_points": sum(counts.values()),
+                    "caveat": "实际供源是 akshare（东方财富财务数据转载），"
+                              "不是 cnreport——该 6 家在 cnreport 下 0 条",
+                })
             else:
                 lanes.append({
                     "lane": lane, "status": "no_data", "financial_points": 0,
-                    "detail": "源侧未覆盖该实体营收/营业利润/净利概念"
-                    + ("（A股餐饮公司不发布月度经营数据公告）"
-                       if lane == "cninfo-operating" else ""),
+                    "detail": "源侧未覆盖该实体营收/营业利润/净利概念",
                 })
         elif lane == "twse-monthly-revenue":
             n = int((monthly or {}).get(eid, 0))
@@ -435,25 +490,38 @@ def _points_query(session, entity_id: int, codes: tuple[str, ...] | list[str]):
 
 
 def _points_with_siblings(session, row: dict, codes: list[str]) -> tuple[int, list[dict], dict | None]:
-    """取该公司的概念观测：先裸码实体，再同基础代码的兄弟实体。
+    """取该公司的概念观测：在裸码实体与同基础代码兄弟实体之间挑**最新**的一份。
 
-    返回 ``(选中的 entity_id, 行, 兄弟实体描述或 None)``。规则与看板一致：
-    **裸码实体有数据就用它；否则挑数据最全的那一个兄弟实体**——同一概念绝不
-    跨实体拼接，避免"半家 A + 半家 B"混出一条假序列。
+    返回 ``(选中的 entity_id, 行, 兄弟实体描述或 None)``。三条硬约束：
+
+    * **同一概念只取一个实体**，绝不跨实体拼接（否则会拼出"半家 A + 半家 B"的假序列）；
+    * **按最新观测日挑，不按"裸码优先"**：实测 `603043` 裸码实体只有到 2025-12-31 的
+      应付/应收/负债率（37 条、无营收），别名实体 `603043#8227` 才有到 2026-09-30 的
+      831 条全套报表。裸码优先会稳定地返回**更旧**的数据，而且看不出它旧；
+    * 平票（同一最新日）再比条数，最后才用裸码实体兜底——保证结果可复现。
     """
     canonical = int(row["id"])
     own = _points_query(session, canonical, codes)
-    if own:
-        return canonical, own, None
     siblings = _sibling_entities(session, row)
-    best: tuple[int, list[dict], dict] | None = None
+    candidates: list[tuple[int, list[dict], dict | None]] = []
+    if own:
+        candidates.append((canonical, own, None))
     for sib in siblings:
         got = _points_query(session, sib["entity_id"], codes)
-        if got and (best is None or len(got) > len(best[1])):
-            best = (sib["entity_id"], got, sib)
-    if best is not None:
-        return best[0], best[1], best[2]
-    return canonical, own, None
+        if got:
+            candidates.append((sib["entity_id"], got, sib))
+    if not candidates:
+        return canonical, own, None
+    if len(candidates) == 1:
+        return candidates[0]
+
+    def _rank(cand: tuple[int, list[dict], dict | None]):
+        eid, got, _sib = cand
+        latest = max((r["date"] for r in got), default=None)
+        # 日期降序 → 条数降序 → 裸码实体优先（eid == canonical 排前）
+        return (latest or "", len(got), eid == canonical)
+
+    return max(candidates, key=_rank)
 
 
 def _fmt_point(row: dict) -> dict:
@@ -505,6 +573,7 @@ def register_restaurant_tools(mcp: FastMCP) -> None:
             by_code = _events_by_code(payloads)
             fins = _financial_counts(s)
             monthly = _monthly_revenue_counts(s)
+            cninfo = _cninfo_operating_counts(s)
             out_entities: list[dict] = []
             for r in rows:
                 meta = r.get("metadata_json") or {}
@@ -512,7 +581,7 @@ def register_restaurant_tools(mcp: FastMCP) -> None:
                     continue
                 if segment and str(meta.get("segment") or "") != segment.strip():
                     continue
-                lanes = _lane_status_for(r, by_code, fins, monthly)
+                lanes = _lane_status_for(r, by_code, fins, monthly, cninfo)
                 has_data = any(l["status"] in ("data", "partial") for l in lanes)
                 out_entities.append(
                     {**_entity_brief(r), "lanes": lanes,
@@ -764,13 +833,21 @@ def register_restaurant_tools(mcp: FastMCP) -> None:
                 out["observations_from"] = {
                     "entity_id": obs_eid,
                     "code": alias,
+                    "name_zh": (sibling or {}).get("name_zh"),
+                    "name_matches": (sibling or {}).get("name_matches", True),
                     "entity_id_requested": eid,
                     "reason": "同码别名实体：公司改名/风险警示后爬虫另建实体，财务观测落在其上",
                 }
                 out["notes"].append(
-                    f"观测取自同基础代码别名实体 {alias}（归一中文名一致）；"
+                    f"观测取自同基础代码别名实体 {alias}"
+                    f"（{out['observations_from']['name_zh'] or '名称未知'}）；"
                     "同一概念只取一个实体，未跨公司借数、未跨实体拼接"
                 )
+                if not out["observations_from"]["name_matches"]:
+                    out["notes"].append(
+                        f"别名实体名称与宇宙登记名不同（{brief.get('name_zh')} → "
+                        f"{out['observations_from']['name_zh']}），按同交易所基础代码认定为同一上市公司（改名）"
+                    )
             return out
         except Exception as exc:  # noqa: BLE001
             return _session_failure(exc)

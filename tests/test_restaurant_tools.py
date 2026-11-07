@@ -45,7 +45,7 @@ class _Session:
     def __init__(self, *, universe=None, events=None, fins=None, monthly=None,
                  points=None, concept=None, entity=None, samr=None, cpi_sources=None,
                  series=None, siblings=None, alias_rows=None,
-                 points_by_entity=None, fail=False):
+                 points_by_entity=None, cninfo=None, fail=False):
         self.universe = universe if universe is not None else []
         self.events = events or {}          # source -> list[payload]
         self.fins = fins or {}              # entity_id -> {concept: n}
@@ -59,6 +59,7 @@ class _Session:
         self.series = series or []          # restaurant_series 的按 concept_id 取点
         self.siblings = siblings or {}      # base_code -> [(id, code, name_zh)]
         self.alias_rows = alias_rows or []  # [(id, code, name_zh)] 全库 # 形实体
+        self.cninfo = cninfo or {}          # sec_code -> cninfo-operating 条目数
         self.fail = fail
         self.closed = False
         self.issued = []
@@ -105,6 +106,8 @@ class _Session:
             return _Result(list(self.siblings.get(base, [])))
         if "AND code LIKE '%#%'" in sql:
             return _Result(list(self.alias_rows))
+        if "cninfo-operating" in sql and "GROUP BY 1" in sql:
+            return _Result(list(self.cninfo.items()))
         if "FROM concepts WHERE code = :code" in sql:
             return _Result([self.concept] if self.concept else [])
         if "SELECT code, name_zh, name_en FROM entities WHERE id = :eid" in sql:
@@ -335,11 +338,30 @@ def test_financials_reads_same_code_alias_instead_of_reporting_source_gap():
     ), "读到了就不能再报「源侧未覆盖」"
 
 
-def test_financials_never_borrows_from_a_differently_named_alias():
-    """同码不同名 = 不同公司（或数据脏）。宁可回「零行」，也不跨公司借数。"""
+def test_financials_uses_renamed_alias_but_flags_the_name_mismatch():
+    """改名公司（603007 → 顺景科技）也必须读得到，但必须交代名字不符。
+
+    A股/港股的基础代码唯一对应一家上市公司；改名后爬虫以新名字另建实体，
+    此时归一名字也对不上。若坚持名字相等，改过名的公司永远读不到。
+    """
     s = _Session(
         universe=[CN],
         siblings={"603043": [(9000, "603043#9000", "某某科技")]},
+        points_by_entity={9000: {"financials.revenue": [_CN_POINT]}},
+    )
+    out = _tools(s).tools["restaurant_company_financials"](ticker="603043")
+    assert out["concepts"][0]["count"] == 1, "同码改名实体的数据必须读得到"
+    assert out["observations_from"]["name_matches"] is False
+    notes = " ".join(out["notes"])
+    assert "名称与宇宙登记名不同" in notes, "名字不符必须显式写到 notes，不能悄悄借数"
+
+
+def test_financials_never_borrows_from_a_different_base_code():
+    """不同基础代码 = 不同公司。兄弟查询按 `base#%` 圈定，别家实体进不来。"""
+    s = _Session(
+        universe=[CN],
+        siblings={"603043": []},           # 无同码实体
+        points={"financials.revenue": []},
         points_by_entity={9000: {"financials.revenue": [_CN_POINT]}},
     )
     out = _tools(s).tools["restaurant_company_financials"](ticker="603043")
@@ -348,16 +370,36 @@ def test_financials_never_borrows_from_a_differently_named_alias():
     assert {u["reason"] for u in out["unavailable"]} == {"该实体在库内无此概念观测"}
 
 
-def test_financials_prefers_the_canonical_entity_when_it_has_rows():
+def test_financials_prefers_the_fresher_entity_not_blindly_the_canonical():
+    """裸码实体有数据也要看新旧：603043 裸码只到 2025-12-31，别名到 2026-09-30。
+
+    「裸码优先」会稳定返回更旧的数据，而且读者看不出来它旧——故按最新观测日挑。
+    """
+    stale = {**_CN_POINT, "date": "2025-12-31"}
+    fresh = {**_CN_POINT, "date": "2026-09-30"}
     s = _Session(
         universe=[CN],
         siblings={"603043": [(8227, "603043#8227", "广州酒家")]},
-        points={"financials.revenue": [_CN_POINT]},
-        points_by_entity={8227: {"financials.revenue": [_CN_POINT, _CN_POINT]}},
+        points={"financials.revenue": [stale]},
+        points_by_entity={8227: {"financials.revenue": [fresh]}},
     )
     out = _tools(s).tools["restaurant_company_financials"](ticker="603043")
-    assert out["concepts"][0]["count"] == 1
-    assert "observations_from" not in out, "裸码实体有数据就用它，不跳别名"
+    assert out["concepts"][0]["points"][0]["date"] == "2026-09-30"
+    assert out["observations_from"]["code"] == "603043#8227"
+
+
+def test_financials_keeps_the_canonical_when_it_is_at_least_as_fresh():
+    fresh = {**_CN_POINT, "date": "2026-09-30"}
+    older = {**_CN_POINT, "date": "2026-06-30"}
+    s = _Session(
+        universe=[CN],
+        siblings={"603043": [(8227, "603043#8227", "广州酒家")]},
+        points={"financials.revenue": [fresh]},
+        points_by_entity={8227: {"financials.revenue": [older, older]}},
+    )
+    out = _tools(s).tools["restaurant_company_financials"](ticker="603043")
+    assert out["concepts"][0]["points"][0]["date"] == "2026-09-30"
+    assert "observations_from" not in out, "裸码实体不旧就该用它"
 
 
 def test_financial_counts_scopes_aliases_by_base_code():
@@ -374,33 +416,65 @@ def test_financial_counts_scopes_aliases_by_base_code():
     assert "split_part(e.code, '#', 1)" in counts_sql[0], (
         "计数必须按基础代码圈定，否则同码别名实体的行会被 SQL 过滤掉"
     )
+    assert "e.entity_type = 'stock'" in counts_sql[0], (
+        "必须同时限定 entity_type：000721 这类 6 位码在库里还挂着 fund 实体"
+        "（兴业货币A），一旦它有财务行就会静默算进西安饮食"
+    )
 
 
-def test_universe_lane_marks_alias_entity_rows_as_data():
-    """宇宙清单的车道状态同样不能漏：计数并入裸码实体，状态才是 data。"""
+def test_universe_lane_labels_the_real_source_not_a_borrowed_one():
+    """车道归因必须对得上真身：财务来自 akshare，经营公告来自 cninfo 条目。
+
+    实测（2026-11-08）：6 家 A股 的 `financials.*` 全是 `source_used=akshare`；
+    `cninfo-operating` 全量 224 条成功条目里命中这 6 家 **0** 条。把财务点数
+    挂到 cninfo-operating 上，会让读者以为「经营公告车道通了」。
+    """
     s = _Session(
         universe=[CN],
         fins={8227: {"financials.revenue": 4,
                      "financials.operating_profit": 4,
                      "financials.net_income": 4}},
         alias_rows=[(8227, "603043#8227", "广州酒家")],
+        cninfo={},                      # 该家 0 条经营公告
     )
     out = _tools(s).tools["restaurant_universe"](region="CN")
     lanes = {l["lane"]: l for l in out["entities"][0]["lanes"]}
+    assert lanes["fd-cn-report"]["status"] == "data"
+    assert lanes["fd-cn-report"]["financial_points"] == 12
+    assert "akshare" in lanes["fd-cn-report"]["caveat"], "必须点名真实供源"
+    assert lanes["cninfo-operating"]["status"] == "no_data", (
+        "cninfo 条目为 0 就不能报 data——财务点数不属于这条车道"
+    )
+    assert "不发布月度经营数据公告" in lanes["cninfo-operating"]["detail"]
+
+
+def test_universe_lane_marks_cninfo_data_only_from_crawl_items():
+    s = _Session(universe=[CN], cninfo={"603043": 7})
+    lanes = {l["lane"]: l
+             for l in _tools(s).tools["restaurant_universe"](region="CN")["entities"][0]["lanes"]}
     assert lanes["cninfo-operating"]["status"] == "data"
-    assert lanes["cninfo-operating"]["financial_points"] == 12
-    assert "源侧未覆盖" not in (lanes["fd-cn-report"].get("detail") or "")
+    assert lanes["cninfo-operating"]["events"] == 7
 
 
-def test_alias_map_ignores_a_differently_named_alias():
-    s = _Session(
+def test_alias_map_counts_renamed_alias_but_not_a_foreign_code():
+    """改名同码 → 计数并入；不同基础代码 → 一律不认。"""
+    renamed = _Session(
         universe=[CN],
         fins={9000: {"financials.revenue": 9}},
         alias_rows=[(9000, "603043#9000", "某某科技")],
     )
-    out = _tools(s).tools["restaurant_universe"](region="CN")
-    lanes = {l["lane"]: l for l in out["entities"][0]["lanes"]}
-    assert lanes["cninfo-operating"]["status"] == "no_data"
+    lanes = {l["lane"]: l
+             for l in _tools(renamed).tools["restaurant_universe"](region="CN")["entities"][0]["lanes"]}
+    assert lanes["fd-cn-report"]["status"] == "data", "同码改名实体的行必须并入"
+
+    foreign = _Session(
+        universe=[CN],
+        fins={9100: {"financials.revenue": 9}},
+        alias_rows=[(9100, "603099#9100", "别家公司")],
+    )
+    lanes = {l["lane"]: l
+             for l in _tools(foreign).tools["restaurant_universe"](region="CN")["entities"][0]["lanes"]}
+    assert lanes["fd-cn-report"]["status"] == "no_data", "不同基础代码绝不能借数"
 
 
 # ─── 5. series：未注册 / 零行 / CPI 对照对 / 截断 ──────────────────────────def test_series_unknown_concept_is_unavailable_not_empty():
