@@ -77,15 +77,6 @@ from fd_open_data_mcp.restaurant_tools import register_restaurant_tools
 register_restaurant_tools(mcp)
 register_hotel_tools(mcp)
 
-# Attach the flower-vertical read tools (add-flower-vertical 5.6):
-# universe / Dounan daily prices / AIPH planted area / company financials /
-# HS6 trade tiers. Read-only; unavailable lanes (KIFA WAF block, JP EDINET key,
-# US segment XBRL extraction, trade tiers not scheduled) return an explicit
-# reason instead of an empty series.
-from fd_open_data_mcp.flower_tools import register_flower_tools
-
-register_flower_tools(mcp)
-
 
 def _session():
     return get_database().get_session()
