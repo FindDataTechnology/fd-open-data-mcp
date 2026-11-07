@@ -2,6 +2,16 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.41] - 2026-11-08
+- **add-crawl-job-deadline**: 爬虫 Job 加 `activeDeadlineSeconds` 硬上限（缺省 10800s，
+  可经 `SCRAW_JOB_ACTIVE_DEADLINE_SECONDS` 覆盖）。`ttlSecondsAfterFinished` 只在 Job
+  进入终态后计时，卡在 `Running` 的 Job 永不回收——2026-11-07 fd-deploy 事故即 16 个
+  一次性 Job 卡 4h48m 把宿主压进 swap、拖垮 tailnet 与 `auth.finddatatech.cloud`。
+  `poll()` 新增 `deadline_exceeded` 终态（按 `conditions.reason` 判定；真 K8s 写的是
+  `type=FailureTarget`），收口 `policy_runs.detail` 记 `deadline exceeded after <N>s`
+  并附 pod 证据，使「进程卡死」与「源站慢」在台账上可分。cheap 实跑探针 61s 转
+  `deadline_exceeded` 验证。
+
 ## [0.5.38] - 2026-10-06
 - **scope-rest-api**: 新增 REST JSON 面（`/scopes` CRUD + `/indicators/publish|unpublish`），
   包装既有 scoping 服务；Bearer `SCOPE_API_TOKEN` 鉴权（未配置 503 诚实禁用）；
