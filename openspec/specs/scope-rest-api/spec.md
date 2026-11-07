@@ -1,7 +1,10 @@
 # scope-rest-api Specification
 
 ## Purpose
-TBD - created by archiving change scope-rest-api. Update Purpose after archive.
+The REST surface that tells a caller what this deployment actually
+covers: the scope and metric-publication endpoints, their authentication, the
+rule that a disabled capability answers honestly instead of failing open, and
+the error-shape contract every response follows.
 
 ## Requirements
 

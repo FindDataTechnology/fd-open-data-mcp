@@ -1,7 +1,11 @@
 # price-active-pool Specification
 
 ## Purpose
-TBD - created by archiving change astock-price-on-demand. Update Purpose after archive.
+Which entities the price line keeps warm, and how that warm set is
+maintained: an active pool of entities worth pre-fetching, the prewarm action
+that fills it ahead of demand, the rule that prewarming never sits on the
+request path, and the counters that make pool size and fetch frequency
+observable.
 
 ## Requirements
 

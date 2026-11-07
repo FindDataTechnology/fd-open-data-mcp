@@ -1,7 +1,12 @@
 # price-on-demand-fill Specification
 
 ## Purpose
-TBD - created by archiving change astock-price-on-demand. Update Purpose after archive.
+What happens when a caller asks for a price series the store does not
+fully have: how coverage is judged and the gap computed, how the backfill
+writes (insert-only, never rewriting existing rows), how a failed backfill is
+labelled as degraded instead of silently returning a short series, and how a
+sequence fingerprint plus remembered empty ranges keep the same gap from being
+re-probed.
 
 ## Requirements
 
