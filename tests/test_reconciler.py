@@ -628,3 +628,46 @@ def test_deadline_exceeded_closes_run_with_detail(session):
     assert "deadline exceeded" in run.detail
     assert "10800s" in run.detail
     assert "DeadlineExceeded" in run.detail      # pod evidence appended
+
+
+def test_k8s_launcher_poll_deadline_without_failed_counter(monkeypatch):
+    """Regression (found live 2026-11-08): a Job killed by activeDeadlineSeconds
+    BEFORE any pod was created has no status.failed counter — only conditions.
+    Reading "unknown" left its policy_runs row dangling in `running` forever."""
+    from types import SimpleNamespace
+
+    from fd_open_data_mcp.refresh.reconciler import (
+        ClusterK8sClient, K8sJobLauncher,
+    )
+
+    starved = {"conditions": [
+        {"type": "FailureTarget", "status": "True", "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"},
+        {"type": "Failed", "status": "True", "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"},
+    ], "ready": 0, "startTime": "2026-11-07T17:55:51Z"}
+
+    launcher = K8sJobLauncher()
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
+                        lambda self, m, p, b=None: {"status": starved})
+    assert launcher.poll("crawl-policy-1-x") == "deadline_exceeded"
+
+    # a plain Failed=True condition with no counter is still terminal
+    plain = {"conditions": [{"type": "Failed", "status": "True",
+                             "reason": "BackoffLimitExceeded"}]}
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
+                        lambda self, m, p, b=None: {"status": plain})
+    assert launcher.poll("crawl-policy-1-x") == "failed"
+
+    # active Job stays running even though it may later be deadline-killed
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
+                        lambda self, m, p, b=None: {"status": {"active": 1}})
+    assert launcher.poll("crawl-policy-1-x") == "running"
+
+    # multi-cluster path (ClusterK8sClient) carries the same rule
+    client = ClusterK8sClient(SimpleNamespace(
+        name="cheap", api_server="https://x:6443", namespace="scraw"))
+    monkeypatch.setattr(ClusterK8sClient, "_api",
+                        lambda self, m, p, b=None: {"status": starved})
+    assert client.job_status("crawl-policy-1-x") == "deadline_exceeded"

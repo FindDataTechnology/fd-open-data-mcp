@@ -109,6 +109,20 @@ def _deadline_exceeded(status: dict) -> bool:
     return False
 
 
+def _failed_condition(status: dict) -> bool:
+    """True when a Job carries a Failed=True condition.
+
+    Some terminal Jobs never populate ``status.failed`` — notably one killed by
+    ``activeDeadlineSeconds`` before any pod could be created (quota-starved),
+    whose only evidence is the condition. Without this the probe reads
+    "unknown" forever and the run row dangles in ``running``."""
+    for cond in status.get("conditions") or []:
+        if (isinstance(cond, dict) and cond.get("type") == "Failed"
+                and str(cond.get("status")).lower() == "true"):
+            return True
+    return False
+
+
 def _deadline_detail(launcher, job_ref: str) -> str:
     """policy_runs.detail for a Job killed by its activeDeadlineSeconds.
 
@@ -452,8 +466,12 @@ class K8sJobLauncher:
                 return "unknown"
             if st.get("succeeded"):
                 return "success"
+            if _deadline_exceeded(st):
+                return "deadline_exceeded"
             if st.get("failed"):
-                return "deadline_exceeded" if _deadline_exceeded(st) else "failed"
+                return "failed"
+            if _failed_condition(st):
+                return "failed"
             if st.get("active"):
                 return "running"
             return "unknown"
@@ -462,7 +480,8 @@ class K8sJobLauncher:
                 "get", "job", job_ref, "-n", self.namespace,
                 "-o", "jsonpath={.status.active} {.status.succeeded} "
                       "{.status.failed} "
-                      "{.status.conditions[?(@.reason==\"DeadlineExceeded\")].reason}")
+                      "{.status.conditions[?(@.reason==\"DeadlineExceeded\")].reason} "
+                      "{.status.conditions[?(@.type==\"Failed\")].status}")
         except Exception:  # noqa: BLE001 - api unreachable / job gone
             return "unknown"
         tokens = out.split()
@@ -470,12 +489,15 @@ class K8sJobLauncher:
         succeeded = tokens[1] if len(tokens) > 1 else ""
         failed = tokens[2] if len(tokens) > 2 else ""
         deadline = any(t == "DeadlineExceeded" for t in tokens[3:])
+        # Failed=True condition covers Jobs that carry no failed counter
+        # (deadline-killed before any pod was created — see job_status).
+        failed_cond = any(t == "True" for t in tokens[3:])
         if succeeded and succeeded != "0":
             return "success"
-        if failed and failed != "0":
-            return "deadline_exceeded" if deadline else "failed"
         if deadline:
             return "deadline_exceeded"
+        if (failed and failed != "0") or failed_cond:
+            return "failed"
         if active and active != "0":
             return "running"
         return "unknown"
@@ -615,8 +637,16 @@ class ClusterK8sClient:
         st = self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}").get("status", {})
         if st.get("succeeded"):
             return "success"
+        # Conditions BEFORE the counters: a Job killed by activeDeadlineSeconds
+        # before any pod was created carries only conditions, no failed count
+        # (found live 2026-11-08: 3 quota-starved Jobs read "unknown" forever
+        # and their policy_runs rows dangled in running).
+        if _deadline_exceeded(st):
+            return "deadline_exceeded"
         if st.get("failed"):
-            return "deadline_exceeded" if _deadline_exceeded(st) else "failed"
+            return "failed"
+        if _failed_condition(st):
+            return "failed"
         if st.get("active"):
             return "running"
         return "unknown"

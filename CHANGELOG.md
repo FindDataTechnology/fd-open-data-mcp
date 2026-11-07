@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.42] - 2026-11-08
+- **fix(add-crawl-job-deadline)**: 无 pod 的 deadline 终止 Job 不再悬空。真集群实测发现：
+  `activeDeadlineSeconds` 在 **pod 从未创建**（配额满位）时只写 `conditions`
+  （`type=FailureTarget/Failed, status=True, reason=DeadlineExceeded`），**不写
+  `status.failed` 计数**；`job_status()` 原先只读计数 → 返回 `unknown`，三条 `policy_runs`
+  永远挂在 `running`（正是"删 Job 却留下悬空行"的同类陷阱）。现改为**先判条件后判计数**，
+  并新增 `_failed_condition()`：`Failed=True` 条件本身即终态。kubectl 分支补抓
+  `conditions[?(@.type=="Failed")].status`。
+
 ## [0.5.41] - 2026-11-08
 - **add-crawl-job-deadline**: 爬虫 Job 加 `activeDeadlineSeconds` 硬上限（缺省 10800s，
   可经 `SCRAW_JOB_ACTIVE_DEADLINE_SECONDS` 覆盖）。`ttlSecondsAfterFinished` 只在 Job
