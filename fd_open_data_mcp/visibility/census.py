@@ -53,7 +53,7 @@ def _shard_servers(conn) -> list[str]:
     return [r[0] for r in conn.execute(text("SELECT srvname FROM pg_foreign_server")).fetchall()]
 
 
-def _obs_month_distribution(conn) -> dict | None:
+def _obs_month_distribution(session: Session) -> dict | None:
     """Bucket distribution over the derived ``obs_month`` column (task 2.7).
 
     One GROUP BY scan, run ONLY inside the census refresh action (never a
@@ -62,12 +62,18 @@ def _obs_month_distribution(conn) -> dict | None:
     reported under the ``_unmappable`` key: the future default-partition
     territory. Returns None when the column is absent (pre-0013 databases,
     SQLite without the column) so a refresh never hard-fails on schema drift.
+
+    Takes the session, not a connection, and takes its own SAVEPOINT: the
+    absent-column case is swallowed on purpose, and swallowing a failed
+    statement without rolling back to a savepoint leaves PostgreSQL in
+    "current transaction is aborted" (see ``refresh_census``).
     """
     try:
-        rows = conn.execute(text(
-            "SELECT obs_month, count(*) FROM semantic_observations "
-            "GROUP BY obs_month"
-        )).fetchall()
+        with session.begin_nested():
+            rows = session.connection().execute(text(
+                "SELECT obs_month, count(*) FROM semantic_observations "
+                "GROUP BY obs_month"
+            )).fetchall()
     except Exception:  # noqa: BLE001 - column missing on an old schema
         return None
     dist: dict[str, int] = {}
@@ -100,26 +106,36 @@ def refresh_census(session: Session, *, probe=None) -> dict:
     """
     if probe is None:
         probe = _dblink_probe
-    conn = session.connection()
 
     # local master: exact count + catalog size (a refresh action, not a page).
+    #
     # Each leg runs inside its own SAVEPOINT: a failing statement aborts the
     # enclosing transaction in PostgreSQL, and swallowing the exception without
     # rolling back to a savepoint leaves every later statement (and the final
     # commit) reading "current transaction is aborted" — which is how one dead
     # shard used to discard the whole census, local row included.
+    #
+    # Order matters: ``session.connection()`` MUST be called INSIDE the
+    # ``begin_nested()`` block. Called before it, SQLAlchemy 2.0 joins the
+    # already-running transaction and ``begin_nested()`` becomes a silent
+    # no-op — no ``SAVEPOINT`` is emitted at all, so the isolation is fake and
+    # the aborted transaction still poisons everything after it (measured live
+    # 2026-11-08 on the 0.5.44 rollout).
     local_error = None
     approx_rows = size_bytes = None
     obs_month_dist = None
     try:
         with session.begin_nested():
+            conn = session.connection()
             approx_rows = conn.execute(text("SELECT count(*) FROM semantic_observations")).scalar()
             size_bytes = conn.execute(
                 text("SELECT pg_total_relation_size('semantic_observations')")
             ).scalar()
-            obs_month_dist = _obs_month_distribution(conn)
     except Exception as e:  # noqa: BLE001
         local_error = str(e)
+    # Its own leg, always attempted: a failed size query (SQLite has no
+    # pg_total_relation_size) must not also cost us the distribution.
+    obs_month_dist = _obs_month_distribution(session)
     _upsert(session, LOCAL_STORE, "local", approx_rows=approx_rows, exact=True,
             total_size_bytes=size_bytes, chunks=None, time_range_end=None,
             obs_month_dist=obs_month_dist, error=local_error)
@@ -127,7 +143,7 @@ def refresh_census(session: Session, *, probe=None) -> dict:
     servers: list[str] = []
     try:
         with session.begin_nested():
-            servers = _shard_servers(conn)
+            servers = _shard_servers(session.connection())
     except Exception as e:  # noqa: BLE001 - e.g. SQLite tests: no pg catalog
         logger.debug("no foreign servers (%s)", e)
 
@@ -137,7 +153,7 @@ def refresh_census(session: Session, *, probe=None) -> dict:
         fields: dict = {}
         try:
             with session.begin_nested():
-                fields = probe(conn, srv)
+                fields = probe(session.connection(), srv)
         except Exception as e:  # noqa: BLE001 - record, keep the other stores
             error = _hint(e)
         _upsert(session, srv, "shard",

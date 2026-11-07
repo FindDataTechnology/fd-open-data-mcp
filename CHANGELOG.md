@@ -2,8 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.45] - 2026-11-08
+- **fix(fix-census-refresh)**: 0.5.44 的 SAVEPOINT 修复是**假绿**（结构对、语义没生效）。
+  0.5.44 在 `refresh_census` 开头取一次 `conn = session.connection()`，之后才进
+  `session.begin_nested()`。SQLAlchemy 2.0 下这样写**根本不发 `SAVEPOINT` 语句**：会话已经
+  加入那条已在跑的事务，`begin_nested()` 变成静默 no-op。于是隔离看着有、实际没有——死分片
+  依旧 abort 整个事务，后续 `_upsert` 仍报 `InFailedSqlTransaction`，census 照样整轮丢弃。
+  真 PG 实测三种写法：`session.connection()` 在 nested 外 → 0 条 SAVEPOINT、事务死；
+  在 nested 内 → `SAVEPOINT` + `ROLLBACK TO SAVEPOINT` 齐全、事务存活。
+  修法：每条腿都在 `with session.begin_nested():` **内部**取连接，并把这条顺序约束写进
+  `refresh_census` 注释；`_obs_month_distribution` 改收 session、自带 SAVEPOINT 并独立成腿
+  （原先它跟在本地腿后面，本地腿一失败连分布一起跳过）。
+  回归测试升级为**断言 SQL 里真出现 SAVEPOINT**（只断言 `begin_nested()` 被调过挡不住这种
+  静默降级——这正是 0.5.44 漏网的原因）。
+  真 PG 死分片演练（生产库，给 `shard_xinru2` 注入 `UndefinedTable`）：该店记下错误文本、
+  `gz_master` 与 `shard_xinru3` 照常提交、`sampled_at` 前进，共 6 条 SAVEPOINT 语句。
+
 ## [0.5.44] - 2026-11-08
-- **fix(fix-census-refresh)**: census 刷新自 2026-11-03 起静默失败，两个缺陷叠加。
+- **fix(fix-census-refresh)** ⚠️ 本条②的 SAVEPOINT 部分**实际未生效**，见 0.5.45：
+  census 刷新自 2026-11-03 起静默失败，两个缺陷叠加。
   ① `data_census.approx_rows` / `total_size_bytes` 是 **int4**，本地库在 2026-11-08 长到
   `2,873,810,944` 字节越过 2,147,483,647 上限 → `NumericValueOutOfRange: integer out of range`；
   两列改 `BigInteger`（迁移 `0017_census_bigint`，int4→int8 不重写表）。

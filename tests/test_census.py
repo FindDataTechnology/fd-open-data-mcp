@@ -89,9 +89,39 @@ def test_each_probe_runs_in_its_own_savepoint(session, monkeypatch):
     monkeypatch.setattr(session, "begin_nested", counting_begin_nested)
     census.refresh_census(session)
 
-    # local block + server listing + one per shard probe
-    assert len(savepoints) == 4, savepoints
+    # local count/size + obs_month distribution + server listing + one per shard
+    assert len(savepoints) == 5, savepoints
     assert session.query(DataCensus).count() == 3
+
+
+def test_savepoints_are_really_emitted(session, monkeypatch):
+    """A SAVEPOINT must reach the database, not just the Session.
+
+    Measured live 2026-11-08: taking ``session.connection()`` *before*
+    ``session.begin_nested()`` makes SQLAlchemy 2.0 join the already-running
+    transaction and skip the ``SAVEPOINT`` statement entirely — the block
+    looks isolated but the aborted transaction still poisons the next
+    statement. Asserting ``begin_nested`` was called cannot catch that;
+    asserting the emitted SQL can."""
+    from sqlalchemy import event
+
+    monkeypatch.setattr(census, "_shard_servers", lambda conn: ["shard_a", "shard_b"])
+    monkeypatch.setattr(census, "_dblink_probe", _probe_ok)
+
+    seen: list[str] = []
+    engine = session.get_bind()
+
+    def record(conn, cursor, statement, params, context, executemany):
+        seen.append(statement.lstrip().upper())
+
+    event.listen(engine, "before_cursor_execute", record)
+    try:
+        census.refresh_census(session)
+    finally:
+        event.remove(engine, "before_cursor_execute", record)
+
+    savepoints = [s for s in seen if s.startswith("SAVEPOINT")]
+    assert len(savepoints) >= 4, seen
 
 
 def test_missing_dblink_hint(session, monkeypatch):
