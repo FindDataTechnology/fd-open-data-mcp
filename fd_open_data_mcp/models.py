@@ -411,7 +411,11 @@ class SemanticObservation(Base):
     value = Column(String(255), nullable=True)
     unit = Column(String(64), nullable=True)
     source_used = Column(String(64), nullable=False)
-    fetched_at = Column(DateTime, nullable=False, default=_now)
+    # index=True mirrors alembic 0013's explicit create_index(
+    # "ix_semantic_observations_fetched_at") — the panel's staleness checks scan
+    # by fetched_at. It was never declared here, so `alembic check` reported a
+    # standing remove_index drift and the Build Check schema job stayed red.
+    fetched_at = Column(DateTime, nullable=False, default=_now, index=True)
     # Derived partition bucket 'YYYY-MM' (add-data-stream-engine task 2.2):
     # computed from date by fd_open_data_mcp.semantic.dates.obs_month_of at
     # every write site — NEVER hand-maintained. NULL = unmappable (sentinels)
