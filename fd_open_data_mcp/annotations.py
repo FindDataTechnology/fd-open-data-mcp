@@ -213,6 +213,26 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "restaurant_series": dict(READ_ONLY),
     "restaurant_sampling_notices": dict(READ_ONLY),
 
+    # ── hotel vertical (hotel_tools.py) ─────────────────────────────────
+    # 全部纯读：只跑 SELECT，不写行、不暖缓存、不派发。基准侧恒不可得，
+    # 这是数据事实（STR 付费未接），不是零值。
+    "hotel_universe": dict(READ_ONLY),
+    "hotel_series": dict(READ_ONLY),
+    "hotel_kpi": dict(READ_ONLY),
+    "hotel_company_events": dict(READ_ONLY),
+    "hotel_benchmark": dict(READ_ONLY),
+
+    # ── flower vertical (flower_tools.py) ─────────────────────────────────
+    # All five are pure reads over the observation store: no cache warming, no
+    # gap fill, no dispatch, no hit counters. ``openWorldHint`` stays False even
+    # though the underlying supply chain reaches upstream APIs — these tools
+    # read this service's own versioned store, and the unavailable lanes are
+    # declared in the payload rather than fetched live.
+    "flower_universe": dict(READ_ONLY),
+    "flower_price_series": dict(READ_ONLY),
+    "flower_planted_area": dict(READ_ONLY),
+    "flower_company_financials": dict(READ_ONLY),
+    "flower_trade": dict(READ_ONLY),
 }
 
 
