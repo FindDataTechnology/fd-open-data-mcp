@@ -28,9 +28,9 @@
 - [x] 4.1 构建镜像（sha tag）并经 TCR 发布：v0.5.41 → `sha-5c91878`，v0.5.42 → `sha-76f3e23`（hkccr 推送，cheap3 cron `tcr-relay-sync.sh` 回灌 ccr）
 - [x] 4.2 滚动 `fd-master` 的 `crawl-reconciler` 与 `coverage-expander`（先 suspend → 更新镜像 → resume）；两个 CronJob 与 `clusters.image` 均已是 `sha-76f3e23`，generation 30 / 20，19:22Z 的 tick 在新镜像上正常收口（`launched: []` 无误判）
 - [x] 4.3 观察：清理那批卡死 Job 时 12 条 run 经新代码路径收口（`detail=deadline exceeded after 60s`，无一条健康 Job 被误杀）；新派发真带 `activeDeadlineSeconds=10800`（`crawl-policy-2659-20261107192140`，实读 Job spec 确认）；`astock-daily-increment` 在 0.5.42 镜像上派发成功（此前 18:10 的 `/kubeconfigs/cheap.token` ENOENT 未复现）
-- [ ] 4.4 v0.5.43（3.5 的 kubectl 假成功修复）出片并回滚两 CronJob —— 版本与镜像 sha 见 §5.1 台账
+- [x] 4.4 v0.5.43（3.5 的 kubectl 假成功修复）出片并回滚两 CronJob：`sha-f72bf16`，随后 0.5.44 `sha-7e97115` 再次滚动；两 CronJob（`suspend=false`、image jsonpath 复核）与 `clusters.image` 均已对齐，`scraw-fd-open-data-mcp/k8s/*-cronjob.yaml` 同步以免下次 apply 回退
 
 ## 5. 收尾
 
-- [ ] 5.1 台账 `paas/docs/registry-maintenance.md` 记一条（与 §15.138 续十二/续十三 呼应，含 0.5.43）
+- [x] 5.1 台账 `paas/docs/registry-maintenance.md` §15.138 **续十四** 记全链（0.5.42 无 pod 的 deadline 条件形状、0.5.43 kubectl 假成功机理、0.5.44/0.5.45 census 三缺陷、PyPI simple-index 滞后、`kubectl apply` 不换运行中容器的镜像、DiskPressure 拦截新 pod）
 - [ ] 5.2 `openspec archive add-crawl-job-deadline`
