@@ -205,6 +205,32 @@ def _job_failure_summary(job_ref: str, namespace: str, pods: list[dict],
     return out
 
 
+def _job_state(status: dict) -> str:
+    """Map a Job's ``status`` object to running/success/failed/deadline_exceeded.
+
+    The single parser for every transport (in-cluster REST, cross-cluster REST,
+    and the local kubectl branch) — the transports used to each roll their own
+    reading, and the kubectl one indexed jsonpath tokens positionally, which
+    mis-read a quota-starved deadline Job as ``success`` (jsonpath emits nothing
+    for an absent counter, so the tokens shift left; found live 2026-11-08).
+    """
+    if status.get("succeeded"):
+        return "success"
+    # Conditions BEFORE the counters: a Job killed by activeDeadlineSeconds
+    # before any pod was created carries only conditions, no failed count
+    # (found live 2026-11-08: 3 quota-starved Jobs read "unknown" forever
+    # and their policy_runs rows dangled in running).
+    if _deadline_exceeded(status):
+        return "deadline_exceeded"
+    if status.get("failed"):
+        return "failed"
+    if _failed_condition(status):
+        return "failed"
+    if status.get("active"):
+        return "running"
+    return "unknown"
+
+
 def _synthesize_failure_detail(launcher, job_ref: str) -> str:
     """Non-empty error summary for a failed run, via the launcher's diagnose.
 
@@ -464,43 +490,17 @@ class K8sJobLauncher:
                 ).get("status", {})
             except Exception:  # noqa: BLE001 - api unreachable / job gone
                 return "unknown"
-            if st.get("succeeded"):
-                return "success"
-            if _deadline_exceeded(st):
-                return "deadline_exceeded"
-            if st.get("failed"):
-                return "failed"
-            if _failed_condition(st):
-                return "failed"
-            if st.get("active"):
-                return "running"
-            return "unknown"
+            return _job_state(st)
         try:
-            out = self._kubectl(
-                "get", "job", job_ref, "-n", self.namespace,
-                "-o", "jsonpath={.status.active} {.status.succeeded} "
-                      "{.status.failed} "
-                      "{.status.conditions[?(@.reason==\"DeadlineExceeded\")].reason} "
-                      "{.status.conditions[?(@.type==\"Failed\")].status}")
+            # -o json + _job_state, NOT jsonpath: jsonpath prints nothing for an
+            # absent field, so positional token reads shift left and a starved
+            # deadline Job's conditions landed in the succeeded slot (that read
+            # came back "success" for a job that never created a pod).
+            body = json.loads(self._kubectl(
+                "get", "job", job_ref, "-n", self.namespace, "-o", "json"))
         except Exception:  # noqa: BLE001 - api unreachable / job gone
             return "unknown"
-        tokens = out.split()
-        active = tokens[0] if tokens else ""
-        succeeded = tokens[1] if len(tokens) > 1 else ""
-        failed = tokens[2] if len(tokens) > 2 else ""
-        deadline = any(t == "DeadlineExceeded" for t in tokens[3:])
-        # Failed=True condition covers Jobs that carry no failed counter
-        # (deadline-killed before any pod was created — see job_status).
-        failed_cond = any(t == "True" for t in tokens[3:])
-        if succeeded and succeeded != "0":
-            return "success"
-        if deadline:
-            return "deadline_exceeded"
-        if (failed and failed != "0") or failed_cond:
-            return "failed"
-        if active and active != "0":
-            return "running"
-        return "unknown"
+        return _job_state(body.get("status") or {})
 
     def _k8s_api_text(self, path: str) -> str:
         """Raw-text variant of _k8s_api: the pod log endpoint returns
@@ -635,21 +635,7 @@ class ClusterK8sClient:
     def job_status(self, name: str) -> str:
         ns = self.cluster.namespace
         st = self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}").get("status", {})
-        if st.get("succeeded"):
-            return "success"
-        # Conditions BEFORE the counters: a Job killed by activeDeadlineSeconds
-        # before any pod was created carries only conditions, no failed count
-        # (found live 2026-11-08: 3 quota-starved Jobs read "unknown" forever
-        # and their policy_runs rows dangled in running).
-        if _deadline_exceeded(st):
-            return "deadline_exceeded"
-        if st.get("failed"):
-            return "failed"
-        if _failed_condition(st):
-            return "failed"
-        if st.get("active"):
-            return "running"
-        return "unknown"
+        return _job_state(st)
 
     def job_deadline_seconds(self, name: str) -> int | None:
         """spec.activeDeadlineSeconds of this Job; None when unset/gone."""

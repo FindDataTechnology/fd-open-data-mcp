@@ -671,3 +671,37 @@ def test_k8s_launcher_poll_deadline_without_failed_counter(monkeypatch):
     monkeypatch.setattr(ClusterK8sClient, "_api",
                         lambda self, m, p, b=None: {"status": starved})
     assert client.job_status("crawl-policy-1-x") == "deadline_exceeded"
+
+
+def test_kubectl_poll_reads_json_not_positional_jsonpath(monkeypatch):
+    """Regression (found live 2026-11-08 against a real quota-starved Job):
+    the kubectl branch used to read ``active succeeded failed`` positionally from
+    a jsonpath string, and jsonpath emits NOTHING for an absent field — so a
+    starved deadline Job's conditions slid left into the ``succeeded`` slot and
+    poll() reported ``success`` for a Job that never created a pod. The branch
+    now takes ``-o json`` and shares ``_job_state``."""
+    import json
+
+    from fd_open_data_mcp.refresh.reconciler import K8sJobLauncher
+
+    starved = {"conditions": [
+        {"type": "FailureTarget", "status": "True", "reason": "DeadlineExceeded"},
+        {"type": "Failed", "status": "True", "reason": "DeadlineExceeded"},
+    ], "startTime": "2026-11-07T19:33:40Z"}
+    launcher = K8sJobLauncher()
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: False)
+    monkeypatch.setattr(K8sJobLauncher, "_kubectl",
+                        lambda self, *a, **kw: json.dumps({"status": starved}))
+    assert launcher.poll("crawl-policy-1-x") == "deadline_exceeded"
+
+    monkeypatch.setattr(K8sJobLauncher, "_kubectl",
+                        lambda self, *a, **kw: json.dumps(
+                            {"status": {"succeeded": 1}}))
+    assert launcher.poll("crawl-policy-1-x") == "success"
+
+    # a job that vanished (kubectl non-zero) stays 'unknown', never a verdict
+    def _boom(self, *a, **kw):
+        raise RuntimeError("Error from server (NotFound)")
+
+    monkeypatch.setattr(K8sJobLauncher, "_kubectl", _boom)
+    assert launcher.poll("crawl-policy-1-x") == "unknown"

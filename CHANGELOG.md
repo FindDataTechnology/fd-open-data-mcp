@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.43] - 2026-11-08
+- **fix(add-crawl-job-deadline)**: kubectl 分支把「配额饥饿的 deadline Job」读成**假成功**。
+  真集群实测：这种 Job 的 `status` 里 `active/succeeded/failed` 全为 null，只有
+  `FailureTarget`+`Failed` 两条条件；而 `kubectl -o jsonpath="{.status.active} {.status.succeeded} ..."`
+  对**缺失字段什么都不输出**，token 序列左移，`succeeded` 位被 `DeadlineExceeded` 占住 →
+  `poll()` 返回 `success`。0.5.42 的 REST 分支是对的，只有本地 kubectl 分支错。
+  修法：kubectl 分支改取 `-o json`，与两条 REST 分支共用同一个
+  `_job_state(status)` 解析器（解析器只留一份，三条传输不可能再各自漂移）。
+
 ## [0.5.42] - 2026-11-08
 - **fix(add-crawl-job-deadline)**: 无 pod 的 deadline 终止 Job 不再悬空。真集群实测发现：
   `activeDeadlineSeconds` 在 **pod 从未创建**（配额满位）时只写 `conditions`
