@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.44] - 2026-11-08
+- **fix(fix-census-refresh)**: census 刷新自 2026-11-03 起静默失败，两个缺陷叠加。
+  ① `data_census.approx_rows` / `total_size_bytes` 是 **int4**，本地库在 2026-11-08 长到
+  `2,873,810,944` 字节越过 2,147,483,647 上限 → `NumericValueOutOfRange: integer out of range`；
+  两列改 `BigInteger`（迁移 `0017_census_bigint`，int4→int8 不重写表）。
+  ② 修完①才露出的真因：`refresh_census` 捕获 probe 异常后**没有回到 SAVEPOINT**，而 PostgreSQL
+  里失败语句已把事务置为 aborted，于是后续 `_upsert` 与 `commit` 全部报
+  `InFailedSqlTransaction: current transaction is aborted`——**一个死分片（`shard_xinru3`）
+  把整轮 census 连刚算好的本地行一起丢掉**。现每条腿（本地统计 / 店列表 / 每个 shard probe）
+  各自 `session.begin_nested()`，单腿失败只回滚自己。
+
 ## [0.5.43] - 2026-11-08
 - **fix(add-crawl-job-deadline)**: kubectl 分支把「配额饥饿的 deadline Job」读成**假成功**。
   真集群实测：这种 Job 的 `status` 里 `active/succeeded/failed` 全为 null，只有

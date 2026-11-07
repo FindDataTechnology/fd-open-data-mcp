@@ -615,9 +615,13 @@ class DataCensus(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     store = Column(String(64), unique=True, nullable=False, index=True)
     kind = Column(String(16), nullable=False)          # local | shard
-    approx_rows = Column(Integer, nullable=True)       # exact for local, ≈ for shards
+    # 64-bit counters (widen-census-bigint): the local store crossed the int4
+    # byte ceiling on 2026-11-08 (2.87 GB) and every refresh since 2026-11-03
+    # died with "integer out of range" — swallowed as a warning, so sampled_at
+    # silently froze at the last good read.
+    approx_rows = Column(BigInteger, nullable=True)    # exact for local, ≈ for shards
     exact = Column(Boolean, nullable=False, default=False)
-    total_size_bytes = Column(Integer, nullable=True)
+    total_size_bytes = Column(BigInteger, nullable=True)
     chunks = Column(Integer, nullable=True)            # Timescale chunks (shards)
     time_range_end = Column(String(64), nullable=True) # chunk-catalog max(range_end)
     error = Column(String, nullable=True)              # probe failure (e.g. no dblink)

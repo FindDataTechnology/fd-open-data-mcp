@@ -102,16 +102,22 @@ def refresh_census(session: Session, *, probe=None) -> dict:
         probe = _dblink_probe
     conn = session.connection()
 
-    # local master: exact count + catalog size (a refresh action, not a page)
+    # local master: exact count + catalog size (a refresh action, not a page).
+    # Each leg runs inside its own SAVEPOINT: a failing statement aborts the
+    # enclosing transaction in PostgreSQL, and swallowing the exception without
+    # rolling back to a savepoint leaves every later statement (and the final
+    # commit) reading "current transaction is aborted" — which is how one dead
+    # shard used to discard the whole census, local row included.
     local_error = None
     approx_rows = size_bytes = None
     obs_month_dist = None
     try:
-        approx_rows = conn.execute(text("SELECT count(*) FROM semantic_observations")).scalar()
-        size_bytes = conn.execute(
-            text("SELECT pg_total_relation_size('semantic_observations')")
-        ).scalar()
-        obs_month_dist = _obs_month_distribution(conn)
+        with session.begin_nested():
+            approx_rows = conn.execute(text("SELECT count(*) FROM semantic_observations")).scalar()
+            size_bytes = conn.execute(
+                text("SELECT pg_total_relation_size('semantic_observations')")
+            ).scalar()
+            obs_month_dist = _obs_month_distribution(conn)
     except Exception as e:  # noqa: BLE001
         local_error = str(e)
     _upsert(session, LOCAL_STORE, "local", approx_rows=approx_rows, exact=True,
@@ -120,7 +126,8 @@ def refresh_census(session: Session, *, probe=None) -> dict:
 
     servers: list[str] = []
     try:
-        servers = _shard_servers(conn)
+        with session.begin_nested():
+            servers = _shard_servers(conn)
     except Exception as e:  # noqa: BLE001 - e.g. SQLite tests: no pg catalog
         logger.debug("no foreign servers (%s)", e)
 
@@ -129,7 +136,8 @@ def refresh_census(session: Session, *, probe=None) -> dict:
         error = None
         fields: dict = {}
         try:
-            fields = probe(conn, srv)
+            with session.begin_nested():
+                fields = probe(conn, srv)
         except Exception as e:  # noqa: BLE001 - record, keep the other stores
             error = _hint(e)
         _upsert(session, srv, "shard",

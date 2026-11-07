@@ -67,6 +67,33 @@ def test_one_shard_failing_records_error(session, monkeypatch):
     assert out["stores"]["shard_a"]["approx_rows"] == 5
 
 
+def test_each_probe_runs_in_its_own_savepoint(session, monkeypatch):
+    """A failing probe must not poison the outer transaction.
+
+    Found live 2026-11-08: the ``shard_xinru3`` dblink probe raised, the
+    exception was recorded, but PostgreSQL had already aborted the enclosing
+    transaction — so the following upsert (and the commit) died with
+    ``InFailedSqlTransaction: current transaction is aborted`` and the whole
+    census was discarded, local row included, every tick. Isolation is a
+    SAVEPOINT per leg."""
+    monkeypatch.setattr(census, "_shard_servers", lambda conn: ["shard_a", "shard_b"])
+    monkeypatch.setattr(census, "_dblink_probe", _probe_ok)
+
+    savepoints = []
+    real_begin_nested = session.begin_nested
+
+    def counting_begin_nested():
+        savepoints.append(1)
+        return real_begin_nested()
+
+    monkeypatch.setattr(session, "begin_nested", counting_begin_nested)
+    census.refresh_census(session)
+
+    # local block + server listing + one per shard probe
+    assert len(savepoints) == 4, savepoints
+    assert session.query(DataCensus).count() == 3
+
+
 def test_missing_dblink_hint(session, monkeypatch):
     monkeypatch.setattr(census, "_shard_servers", lambda conn: ["shard_a"])
 
