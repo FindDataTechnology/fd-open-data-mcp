@@ -519,3 +519,112 @@ def test_census_failure_does_not_abort_tick(session, monkeypatch):
     with patch.object(census_mod, "refresh_census", boom):
         summary = reconciler.reconcile_once(session, _FakeLauncher(), now=NOW)
     assert "launched" in summary  # tick completed normally
+
+
+# ─── job hard runtime ceiling (add-crawl-job-deadline) ───────────────────────
+def _fake_cluster(**over):
+    from types import SimpleNamespace
+    kw = dict(id=9, name="cheap", namespace="scraw",
+              image="registry/scraw-fd-open-data-mcp:sha-test",
+              runtime_hints=None)
+    kw.update(over)
+    return SimpleNamespace(**kw)
+
+
+def test_job_specs_carry_default_active_deadline(monkeypatch):
+    """Every launcher-built crawl Job carries the 3h ceiling (10800 s) — TTL
+    alone never fires for a Job wedged in Running (2026-11-07 incident)."""
+    from types import SimpleNamespace
+
+    from fd_open_data_mcp.refresh.reconciler import (
+        DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS, MultiClusterLauncher,
+    )
+
+    monkeypatch.delenv(reconciler.JOB_ACTIVE_DEADLINE_ENV, raising=False)
+    cluster = _fake_cluster()
+    scrapy = MultiClusterLauncher()._scrapy_manifests(
+        "job-a", "{}", SimpleNamespace(id=7), cluster)
+    monkeypatch.setattr(reconciler, "_read_script", lambda path: "# stub\n")
+    direct = MultiClusterLauncher()._direct_manifests(
+        "job-b", SimpleNamespace(id=8, script="adhoc", script_args=[]), cluster)
+    for docs in (scrapy, direct):
+        job = next(d for d in docs if d["kind"] == "Job")
+        assert job["spec"]["activeDeadlineSeconds"] == \
+            DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS == 10800
+        # TTL stays: deadline kills the wedged Job, TTL then reclaims the object
+        assert job["spec"]["ttlSecondsAfterFinished"] == 86400
+
+
+def test_single_cluster_launchers_refuse_direct_policies():
+    """Direct policies need the script-mounting launcher.
+
+    Triggering a direct policy through K8sJobLauncher died on
+    ``plan.model_dump`` with a NoneType AttributeError (2026-11-08), which reads
+    as a broken plan rather than the wrong launcher. The refusal must name the
+    launcher that works."""
+    from types import SimpleNamespace
+
+    from fd_open_data_mcp.refresh.reconciler import (
+        K8sJobLauncher, ScrapydLauncher,
+    )
+
+    policy = SimpleNamespace(id=8, name="fund-nav-daily-snapshot", executor="direct")
+    for launcher in (K8sJobLauncher(), ScrapydLauncher()):
+        with pytest.raises(RuntimeError, match="k8s-multi"):
+            launcher.launch(None, policy)
+
+
+def test_active_deadline_env_override_and_invalid_fallback(monkeypatch):
+    """SCRAW_JOB_ACTIVE_DEADLINE_SECONDS overrides; junk/negative falls back    to the default instead of blocking Job creation."""
+    from fd_open_data_mcp.refresh.reconciler import _active_deadline_seconds
+
+    monkeypatch.setenv(reconciler.JOB_ACTIVE_DEADLINE_ENV, "120")
+    assert _active_deadline_seconds() == 120
+    monkeypatch.setenv(reconciler.JOB_ACTIVE_DEADLINE_ENV, "abc")
+    assert _active_deadline_seconds() == 10800
+    monkeypatch.setenv(reconciler.JOB_ACTIVE_DEADLINE_ENV, "-1")
+    assert _active_deadline_seconds() == 10800
+    monkeypatch.setenv(reconciler.JOB_ACTIVE_DEADLINE_ENV, "")
+    assert _active_deadline_seconds() == 10800
+
+
+def test_k8s_launcher_poll_reports_deadline_exceeded(monkeypatch):
+    """A Failed/Failed-true Job whose condition reason is DeadlineExceeded is
+    distinguishable from an ordinary failure."""
+    from fd_open_data_mcp.refresh.reconciler import K8sJobLauncher
+
+    status = {"failed": 1, "conditions": [
+        {"type": "Failed", "status": "True", "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"}]}
+    launcher = K8sJobLauncher()
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
+                        lambda self, m, p, b=None: {"status": status,
+                                                    "spec": {"activeDeadlineSeconds": 60}})
+    assert launcher.poll("crawl-policy-7-x") == "deadline_exceeded"
+    assert launcher.deadline_seconds("crawl-policy-7-x") == 60
+
+
+def test_deadline_exceeded_closes_run_with_detail(session):
+    """Close path: deadline state -> failed run whose detail names the ceiling,
+    so 'wedged' is distinguishable from 'upstream slow' on the ledger."""
+    cid = _register(session)
+    p = _policy(session, cid, cron_expr="0 0 1 1 *")
+    run = PolicyRun(policy_id=p.id, status="running", job_ref="cheap/crawl-policy-1-x",
+                    started_at=NOW - timedelta(hours=4))
+    session.add(run)
+    session.commit()
+
+    class _DeadlineLauncher(_FakeLauncher):
+        def deadline_seconds(self, job_ref):
+            return 10800
+
+    launcher = _DeadlineLauncher(poll_state="deadline_exceeded",
+                                 diagnose_result="pod ... container=crawler "
+                                                 "reason=DeadlineExceeded")
+    summary = reconcile_once(session, launcher, now=NOW)
+    assert summary["probed_closed"] == 1
+    assert run.status == "failed"
+    assert "deadline exceeded" in run.detail
+    assert "10800s" in run.detail
+    assert "DeadlineExceeded" in run.detail      # pod evidence appended

@@ -65,6 +65,79 @@ CANCELLED = "cancelled"
 LOG_TAIL_LINES = 30        # pod log tail grabbed during failure diagnosis
 FAILURE_DETAIL_MAX_CHARS = 2000
 
+# ─── job hard runtime ceiling (add-crawl-job-deadline) ───────────────────────
+# ttlSecondsAfterFinished only starts counting once a Job reaches a terminal
+# state, so a container that stays alive without making progress keeps its Job
+# (and its pod's memory) forever — that was the 2026-11-07 fd-deploy incident:
+# 16 one-shot Jobs wedged at Running 0/1 for 4h48m until the host thrashed into
+# swap and the tailnet died. activeDeadlineSeconds turns "wedged" into Failed;
+# TTL then reclaims the object. Default = 3h, i.e. ~1.9x the longest normal run
+# observed in 30 days of policy_runs (159 min).
+DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS = 10800
+JOB_ACTIVE_DEADLINE_ENV = "SCRAW_JOB_ACTIVE_DEADLINE_SECONDS"
+
+
+def _active_deadline_seconds() -> int:
+    """The Job runtime ceiling, from ``SCRAW_JOB_ACTIVE_DEADLINE_SECONDS``.
+
+    Invalid values (non-integer, zero, negative) fall back to the default with
+    a warning — a typo in the control-plane env must never block Job creation.
+    """
+    raw = os.environ.get(JOB_ACTIVE_DEADLINE_ENV)
+    if raw is None or not raw.strip():
+        return DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS
+    try:
+        value = int(raw.strip())
+    except ValueError:
+        logger.warning("%s=%r is not an integer; using %ds",
+                       JOB_ACTIVE_DEADLINE_ENV, raw,
+                       DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS)
+        return DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS
+    if value <= 0:
+        logger.warning("%s=%d must be positive; using %ds",
+                       JOB_ACTIVE_DEADLINE_ENV, value,
+                       DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS)
+        return DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS
+    return value
+
+
+def _deadline_exceeded(status: dict) -> bool:
+    """True when a Job's status conditions report reason=DeadlineExceeded."""
+    for cond in status.get("conditions") or []:
+        if isinstance(cond, dict) and cond.get("reason") == "DeadlineExceeded":
+            return True
+    return False
+
+
+def _deadline_detail(launcher, job_ref: str) -> str:
+    """policy_runs.detail for a Job killed by its activeDeadlineSeconds.
+
+    Distinguishes "process wedged" from "upstream slow" on the ledger, and
+    carries the ceiling that fired plus whatever pod evidence still exists."""
+    seconds = None
+    getter = getattr(launcher, "deadline_seconds", None)
+    if callable(getter):
+        try:
+            seconds = getter(job_ref)
+        except Exception:  # noqa: BLE001 - detail is best-effort
+            seconds = None
+    detail = "deadline exceeded"
+    if seconds:
+        detail += f" after {seconds}s"
+    else:
+        detail += f" (activeDeadlineSeconds={_active_deadline_seconds()}s)"
+    summary = ""
+    diagnose = getattr(launcher, "diagnose", None)
+    if callable(diagnose):
+        try:
+            summary = (diagnose(job_ref) or "").strip()
+        except Exception:  # noqa: BLE001 - diagnosis must never break the close
+            logger.warning("deadline diagnosis errored for job %s",
+                           job_ref, exc_info=True)
+    if summary:
+        detail += f"; {summary}"
+    return detail[:FAILURE_DETAIL_MAX_CHARS]
+
 
 def _cap_tail(text: str, limit: int) -> str:
     """Keep the LAST ``limit`` chars — the freshest log lines hold the crash."""
@@ -151,7 +224,12 @@ class Launcher(Protocol):
         ...
 
     def poll(self, job_ref: str) -> str:
-        """Return 'running' | 'success' | 'failed' | 'unknown' for a job reference."""
+        """Return 'running' | 'success' | 'failed' | 'deadline_exceeded'
+        | 'unknown' for a job reference.
+
+        ``deadline_exceeded`` is the failed terminal state of a Job killed by
+        its ``activeDeadlineSeconds`` ceiling — distinct so the close path can
+        write a diagnosable detail instead of guessing from an empty ledger."""
         ...
 
     def delete(self, job_ref: str) -> bool:
@@ -162,6 +240,21 @@ class Launcher(Protocol):
         the caller may choose to ignore — the run row's CAS'd status stays the
         source of truth either way (design D2)."""
         ...
+
+
+def _refuse_direct(launcher, policy) -> None:
+    """Direct-script policies need a launcher that mounts the script.
+
+    Only MultiClusterLauncher builds the script ConfigMap; the single-cluster
+    launchers build a plan-only pod spec, so they used to die on
+    ``plan.model_dump`` with a NoneType AttributeError — an unreadable error
+    that looked like a broken plan instead of a wrong launcher."""
+    if getattr(policy, "executor", "scrapy") == "direct":
+        raise RuntimeError(
+            f"{type(launcher).__name__} cannot launch direct policy "
+            f"{policy.id} ({policy.name}): use MultiClusterLauncher "
+            "(RECONCILER_LAUNCHER=k8s-multi) — it is the launcher that mounts "
+            "the script ConfigMap")
 
 
 class ScrapydLauncher:
@@ -185,6 +278,7 @@ class ScrapydLauncher:
         self.spider = spider
 
     def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> tuple[str, int | None]:
+        _refuse_direct(self, policy)
         os.makedirs(self.plan_dir, exist_ok=True)
         ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         path = os.path.join(self.plan_dir, f"policy-{policy.id}-{ts}.json")
@@ -287,6 +381,7 @@ class K8sJobLauncher:
         return out.stdout
 
     def launch(self, plan: CrawlPlan, policy: CrawlPolicy) -> tuple[str, int | None]:
+        _refuse_direct(self, policy)
         ts = dt.datetime.now(dt.timezone.utc).strftime("%Y%m%d%H%M%S")
         name = f"crawl-policy-{policy.id}-{ts}"
         plan_json = json.dumps(plan.model_dump(mode="json"), ensure_ascii=False, indent=2)
@@ -303,6 +398,7 @@ class K8sJobLauncher:
                              "labels": {"app": "concept-crawl", "policy-id": str(policy.id)}},
                 "spec": {
                     "backoffLimit": 2,
+                    "activeDeadlineSeconds": _active_deadline_seconds(),
                     "ttlSecondsAfterFinished": 86400,
                     "template": {
                         "metadata": {"labels": {"app": "concept-crawl", "policy-id": str(policy.id)}},
@@ -357,21 +453,29 @@ class K8sJobLauncher:
             if st.get("succeeded"):
                 return "success"
             if st.get("failed"):
-                return "failed"
+                return "deadline_exceeded" if _deadline_exceeded(st) else "failed"
             if st.get("active"):
                 return "running"
             return "unknown"
         try:
             out = self._kubectl(
                 "get", "job", job_ref, "-n", self.namespace,
-                "-o", "jsonpath={.status.active} {.status.succeeded} {.status.failed}")
+                "-o", "jsonpath={.status.active} {.status.succeeded} "
+                      "{.status.failed} "
+                      "{.status.conditions[?(@.reason==\"DeadlineExceeded\")].reason}")
         except Exception:  # noqa: BLE001 - api unreachable / job gone
             return "unknown"
-        active, succeeded, failed = (out.split() + ["", "", ""])[:3]
+        tokens = out.split()
+        active = tokens[0] if tokens else ""
+        succeeded = tokens[1] if len(tokens) > 1 else ""
+        failed = tokens[2] if len(tokens) > 2 else ""
+        deadline = any(t == "DeadlineExceeded" for t in tokens[3:])
         if succeeded and succeeded != "0":
             return "success"
         if failed and failed != "0":
-            return "failed"
+            return "deadline_exceeded" if deadline else "failed"
+        if deadline:
+            return "deadline_exceeded"
         if active and active != "0":
             return "running"
         return "unknown"
@@ -421,6 +525,25 @@ class K8sJobLauncher:
             return None
         return _job_failure_summary(job_ref, self.namespace, pods,
                                     self.pod_log_tail)
+
+    def deadline_seconds(self, job_ref: str) -> int | None:
+        """spec.activeDeadlineSeconds of a launched Job (None when unreadable)."""
+        if self._in_cluster():
+            try:
+                body = self._k8s_api(
+                    "GET", f"/apis/batch/v1/namespaces/{self.namespace}/jobs/{job_ref}")
+            except Exception:  # noqa: BLE001 - detail is best-effort
+                return None
+            value = (body.get("spec") or {}).get("activeDeadlineSeconds")
+            return value if isinstance(value, int) else None
+        try:
+            out = self._kubectl(
+                "get", "job", job_ref, "-n", self.namespace,
+                "-o", "jsonpath={.spec.activeDeadlineSeconds}")
+        except Exception:  # noqa: BLE001 - detail is best-effort
+            return None
+        out = (out or "").strip()
+        return int(out) if out.isdigit() else None
 
     def delete(self, job_ref: str) -> bool:
         if self._in_cluster():
@@ -493,10 +616,20 @@ class ClusterK8sClient:
         if st.get("succeeded"):
             return "success"
         if st.get("failed"):
-            return "failed"
+            return "deadline_exceeded" if _deadline_exceeded(st) else "failed"
         if st.get("active"):
             return "running"
         return "unknown"
+
+    def job_deadline_seconds(self, name: str) -> int | None:
+        """spec.activeDeadlineSeconds of this Job; None when unset/gone."""
+        ns = self.cluster.namespace
+        try:
+            body = self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}")
+        except Exception:  # noqa: BLE001 - detail is best-effort
+            return None
+        value = (body.get("spec") or {}).get("activeDeadlineSeconds")
+        return value if isinstance(value, int) else None
 
     def _api_text(self, method: str, path: str) -> str:
         """Raw-text request for the pod log endpoint (returns text/plain)."""
@@ -746,6 +879,7 @@ class MultiClusterLauncher:
                                         "cluster": cluster.name}},
                 "spec": {
                     "backoffLimit": 1,
+                    "activeDeadlineSeconds": _active_deadline_seconds(),
                     "ttlSecondsAfterFinished": 86400,
                     "template": {
                         "metadata": {"labels": {"app": "direct-crawl",
@@ -809,6 +943,7 @@ class MultiClusterLauncher:
                                         "cluster": cluster.name}},
                 "spec": {
                     "backoffLimit": 2,
+                    "activeDeadlineSeconds": _active_deadline_seconds(),
                     "ttlSecondsAfterFinished": 86400,
                     "template": {
                         "metadata": {"labels": {"app": "concept-crawl",
@@ -834,6 +969,20 @@ class MultiClusterLauncher:
             return ClusterK8sClient(cluster).job_status(job_name)
         except Exception:  # noqa: BLE001 - api unreachable / job gone
             return "unknown"
+
+    def deadline_seconds(self, job_ref: str) -> int | None:
+        """The ceiling the Job actually carries, not today's env value."""
+        if "/" not in job_ref:
+            return None
+        cluster_name, job_name = job_ref.split("/", 1)
+        session = self._session()
+        try:
+            cluster = session.query(Cluster).filter_by(name=cluster_name).first()
+        finally:
+            session.close()
+        if cluster is None:
+            return None
+        return ClusterK8sClient(cluster).job_deadline_seconds(job_name)
 
     def diagnose(self, job_ref: str) -> str | None:
         """Pod terminal-state evidence for a failed dispatched Job
@@ -1228,9 +1377,15 @@ def reconcile_once(
                             run.id, run.status)
             continue
         state = launcher.poll(run.job_ref)
-        if state in ("success", "failed"):
+        if state in ("success", "failed", "deadline_exceeded"):
             run.status = classify_yield(run) if state == "success" else "failed"
-            if (state == "failed" and not run.detail
+            if state == "deadline_exceeded":
+                # add-crawl-job-deadline: the Job was killed by its
+                # activeDeadlineSeconds ceiling. Write a detail that names the
+                # ceiling so a wedged crawler is distinguishable from a slow
+                # upstream on the ledger (and in the crawl_runs error_head).
+                run.detail = _deadline_detail(launcher, run.job_ref)
+            elif (state == "failed" and not run.detail
                     and run.rows_attempted is None and run.rows_new is None):
                 # 2026-10-05 incident: a container crash BEFORE the runner's
                 # first yield report closed the run with an empty error_head,
