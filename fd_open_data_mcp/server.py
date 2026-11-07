@@ -67,6 +67,13 @@ from fd_open_data_mcp.auth_tools import register_auth_tools
 
 register_auth_tools(mcp)
 
+# Attach the restaurant-vertical read tools (add-restaurant-vertical 4.5):
+# universe / disclosure events / quarterly financials / macro series / SAMR
+# notices. Read-only; unavailable lanes return an explicit reason instead of
+# an empty series.
+from fd_open_data_mcp.restaurant_tools import register_restaurant_tools
+
+register_restaurant_tools(mcp)
 
 def _session():
     return get_database().get_session()

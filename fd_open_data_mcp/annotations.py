@@ -203,6 +203,16 @@ TOOL_ANNOTATIONS: dict[str, dict[str, Any]] = {
     "auth_events": dict(READ_ONLY),
     "auth_request_login": dict(WRITE_NOT_IDEMPOTENT),  # appends a note event per call
     "auth_launch_login": dict(WRITE_NOT_IDEMPOTENT),  # creates a station + Job per call
+
+    # ── restaurant vertical (restaurant_tools.py) ─────────────────────────
+    # All five are pure reads over the observation store and the crawl event
+    # plane: no cache warming, no gap fill, no dispatch, no hit counters.
+    "restaurant_universe": dict(READ_ONLY),
+    "restaurant_company_events": dict(READ_ONLY),
+    "restaurant_company_financials": dict(READ_ONLY),
+    "restaurant_series": dict(READ_ONLY),
+    "restaurant_sampling_notices": dict(READ_ONLY),
+
 }
 
 
