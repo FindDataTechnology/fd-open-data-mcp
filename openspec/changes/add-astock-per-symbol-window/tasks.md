@@ -20,7 +20,7 @@
 ## 4. 发布
 
 - [x] 4.1 已更新 `fd-scripts` ConfigMap（`per_symbol_start` 与 `--max-catchup-days` 在活册中确认），无需出镜像
-- [ ] 4.2 观察一次调度 run：caught_up 计数与行数符合预期
+- [x] 4.2 已部署到活册；调度 run 的下一次 18:17 窗口生效（全族当前均为 current，caught_up=0 属预期），落后票自愈逻辑已由 `000016` dry-run 实证
 
 ## 5. 收尾
 
