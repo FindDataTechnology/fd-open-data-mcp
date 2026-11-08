@@ -99,9 +99,12 @@ def _fetch_with_alarm(fn, timeout: int = FETCH_ALARM):
 
 def load_code_map(engine) -> dict[str, int]:
     with engine.connect() as c:
+        # JOIN entities: never trust the identifier's own type (see
+        # fix-financials-code-map-entity-join).
         rows = c.execute(text(
-            "SELECT identifier, entity_id FROM entity_source_identifiers "
-            "WHERE entity_type=:et AND source=:src"
+            "SELECT i.identifier, i.entity_id FROM entity_source_identifiers i "
+            "JOIN entities e ON e.id = i.entity_id "
+            "WHERE i.entity_type=:et AND i.source=:src AND e.entity_type=:et"
         ), {"et": ENTITY_TYPE, "src": SOURCE}).all()
     out = {}
     for r in rows:

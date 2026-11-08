@@ -164,18 +164,34 @@ def _norm_code(raw) -> str | None:
 
 
 def load_code_map(engine) -> dict[str, int]:
-    """{bare_6digit_code: entity_id} for all A-share stocks."""
+    """{bare_6digit_code: entity_id} for A-share stocks, verified against entities.
+
+    The join on ``entities`` is load-bearing, not cosmetic: ``i.entity_type`` is a
+    *claim* that the 2026-11-08 correction proved can be wrong. When a stock-typed
+    identifier hangs off a non-stock entity, trusting it redirects a company's
+    financials — the industry entity 医药生物 (801150) carried ``00712`` typed
+    ``stock``, so ``000712`` mapped to it and 锦龙股份's statements landed on the
+    industry (8,500 observations measured across 11 such ids).
+    """
     with engine.connect() as c:
         rows = c.execute(text(
-            "SELECT identifier, entity_id FROM entity_source_identifiers "
-            "WHERE entity_type=:et AND source=:src"
+            "SELECT i.identifier, i.entity_id FROM entity_source_identifiers i "
+            "JOIN entities e ON e.id = i.entity_id "
+            "WHERE i.entity_type=:et AND i.source=:src AND e.entity_type=:et"
         ), {"et": ENTITY_TYPE, "src": SOURCE}).all()
-    out = {}
-    for r in rows:
-        code = _norm_code(r[0])
-        if code is not None:
-            out[code] = r[1]
-    log.info("code map: %d stocks", len(out))
+    out: dict[str, int] = {}
+    conflicts = 0
+    for ident, eid in rows:
+        code = _norm_code(ident)
+        if code is None:
+            continue
+        prev = out.get(code)
+        if prev is not None and prev != eid:
+            conflicts += 1          # keep the first, never silently overwrite
+            continue
+        out[code] = eid
+    log.info("code map: %d stocks%s", len(out),
+             f" ({conflicts} code collisions kept-first)" if conflicts else "")
     return out
 
 

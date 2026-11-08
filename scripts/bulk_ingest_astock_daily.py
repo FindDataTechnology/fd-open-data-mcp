@@ -253,9 +253,14 @@ def _astock_ident(engine, read_ft: str, codes: list[str] | None = None,
     single stock can never end up split across two entities.
     """
     with engine.connect() as conn:
+        # JOIN entities: the identifier row's own entity_type is a claim that can
+        # be wrong (an industry entity carrying 00712 typed 'stock' made 000712
+        # resolve to 医药生物 — measured 2026-11-08).
         ident = conn.execute(text(
-            "SELECT identifier, entity_id FROM entity_source_identifiers "
-            "WHERE entity_type=:et AND source=:src ORDER BY 1"),
+            "SELECT i.identifier, i.entity_id FROM entity_source_identifiers i "
+            "JOIN entities e ON e.id = i.entity_id "
+            "WHERE i.entity_type=:et AND i.source=:src AND e.entity_type=:et "
+            "ORDER BY 1"),
             {"et": ENTITY_TYPE, "src": "akshare"}).fetchall()
     wanted = None if codes is None else set(codes)
     pairs: list[tuple[str, int]] = []

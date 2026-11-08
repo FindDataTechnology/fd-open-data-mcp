@@ -178,12 +178,19 @@ def _parse_date(d) -> str | None:
 
 
 def load_stock_identifiers(engine) -> list[tuple[str, int]]:
-    """(akshare_code, entity_id) for all A-share stocks with an akshare identifier."""
+    """(akshare_code, entity_id) for A-share stocks with an akshare identifier.
+
+    Joins ``entities`` and requires the ENTITY's type to be ``stock``: the
+    identifier row's own ``entity_type`` is a claim that can be wrong (an
+    industry entity carrying ``00712`` typed ``stock`` redirected 000712's
+    financials onto 医药生物 — measured 2026-11-08).
+    """
     with engine.connect() as c:
         rows = c.execute(text(
             "SELECT esi.identifier, esi.entity_id "
             "FROM entity_source_identifiers esi "
-            "WHERE esi.entity_type=:et AND esi.source=:src "
+            "JOIN entities e ON e.id = esi.entity_id "
+            "WHERE esi.entity_type=:et AND esi.source=:src AND e.entity_type=:et "
             "ORDER BY esi.entity_id"
         ), {"et": ENTITY_TYPE, "src": SOURCE}).all()
     out = []
@@ -386,6 +393,14 @@ def main() -> int:
 
     n = ingest(engine, ids, done_ids, bs_c, ps_c, cf_c, args.shard)
     log.info("done: %d observations upserted", n)
+    # yield accounting (fix-silent-zero-yield-crawls): a direct-script pod reports
+    # nothing by itself, so without this the run row closes zero_yield however
+    # many rows landed. Never fails an ingest that already wrote rows.
+    try:
+        from fd_open_data_mcp.refresh.yield_report import report_run_yield
+        report_run_yield(n, n)
+    except Exception:  # noqa: BLE001
+        log.warning("yield report skipped", exc_info=True)
     return 0
 
 
