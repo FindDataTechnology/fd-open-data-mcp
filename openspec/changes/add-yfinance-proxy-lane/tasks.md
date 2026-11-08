@@ -18,8 +18,8 @@
 ## 4. 验证与发布
 
 - [x] 4.1 真网实测（pod 内装补丁版 `runner.py`/`injection.py`，同一进程先跑对照）：**直连对照组** `DIRECT ERR YFRateLimitError`；**设 `FD_YF_PROXY` 后** `PROXIED rows: 23`，末两行 2026-11-05/06 真实 OHLCV（344.17 / 342.37）。另举证：`set_config` 单独、`set_config`+env、env 单独三种写法均 5 行；直连失败后再设代理也能恢复（非单例污染）
-- [ ] 4.2 出片（0.5.47）+ 两 CronJob 滚动 + `clusters.image`
-- [ ] 4.3 台账记一条（含"换 IP 无用、代理+impersonation 才通"的结论与 27/45 数据）
+- [x] 4.2 出片（0.5.47，镜像 `sha-4ddf7f7`）+ 两 CronJob 滚动 + `clusters.image` id9；**另发现并修复了选路链的上游陈旧件**：`proxy-fw` 的 `panel-ops` 镜像没有 `source_provider_routes`/mihomo provider，cheap-1 出片 `fd-proxy-service:sha-f9e677b`（`route_for` 2 处、`providers/mihomo.py`、`NAME=mihomo`）并滚动六节点全 Ready；同时把 35 行 `provider='mihomo-win'` 纠正为注册表用的 `mihomo`（代码里无该字面量，纯数据值），`yfinance → ['mihomo']` 路由行落库后 `/acquire` 首轮即给 mihomo 地址
+- [x] 4.3 真管线实测：`instrumented_fetch("yfinance","ticker_history",{"symbol":"AAPL"}, real_source="yfinance")` → **rows=23 / 7.5s**，`fetch_log` 记 `ok`；回归面 `nbs` 2h 内 506 成功/12 失败（直连，无回归）；台账见 §15.138 续十八
 
 ## 5. 收尾
 
