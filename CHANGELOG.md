@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.48] - 2026-11-08
+- **fix(stop-passing-dsn-on-argv)**: direct-script Job 的**命令行里带着库口令**。
+  `_direct_manifests()` 拼的是 `… <script> <args> --db-url "$FD_OPEN_DATA_MCP_DATABASE_URL"`，
+  展开后口令进入 Job 的 `spec.containers[0].command`（任何 `get pods` 都能读到）**和**
+  `/proc/<pid>/cmdline`。0.5.46 只修了日志，argv 是漏下的那份。现改为：命令行只留脚本与
+  policy 参数，DSN 从容器 env（`fd-db-secret` → `FD_OPEN_DATA_MCP_DATABASE_URL`）取；
+  脚本在 `--db-url` 缺省时读 env，两者皆无则显式报错退出（本地/回补仍可用 `--db-url`）。
+  带回归单测（断言 Job 命令不含 `--db-url`/`postgresql`）。
+
 ## [0.5.47] - 2026-11-08
 - **feat(add-yfinance-proxy-lane)**: yfinance 在本舰队**完全不可用**——所有直连出口都被封。
   实测 2026-11-08：`fd-deploy`(124.220.7.175)/`cheap3` 回 429（23 字节 `Edge: Too Many Requests`，

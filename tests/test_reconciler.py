@@ -705,3 +705,28 @@ def test_kubectl_poll_reads_json_not_positional_jsonpath(monkeypatch):
 
     monkeypatch.setattr(K8sJobLauncher, "_kubectl", _boom)
     assert launcher.poll("crawl-policy-1-x") == "unknown"
+
+
+def test_direct_job_command_carries_no_dsn(monkeypatch):
+    """The DSN must never ride on the command line (stop-passing-dsn-on-argv).
+
+    It used to be appended as ``--db-url "$FD_OPEN_DATA_MCP_DATABASE_URL"``,
+    which expanded the password into the Job spec's container command (readable
+    with ``kubectl get pods -o yaml``) and into ``/proc/<pid>/cmdline``. The
+    value already arrives through ``FD_OPEN_DATA_MCP_DATABASE_URL`` in the env.
+    """
+    from types import SimpleNamespace as NS
+    from fd_open_data_mcp.refresh import reconciler
+    from fd_open_data_mcp.refresh.reconciler import MultiClusterLauncher
+
+    monkeypatch.setattr(reconciler, "_read_script", lambda path: "# stub\n")
+    cluster = _fake_cluster()
+    docs = MultiClusterLauncher()._direct_manifests(
+        "job-c", NS(id=9, script="adhoc", script_args=["--universe", "--limit", "1"]),
+        cluster)
+    job = next(d for d in docs if d["kind"] == "Job")
+    command = job["spec"]["template"]["spec"]["containers"][0]["command"]
+    shell = command[-1]
+    assert "--db-url" not in shell
+    assert "postgresql" not in shell and "psycopg2" not in shell
+    assert shell.endswith("--universe --limit 1")

@@ -852,10 +852,13 @@ class MultiClusterLauncher:
         script_name = policy.script
         script_path = f"/app/scripts/{script_name}.py"
         args = list(policy.script_args or [])
-        # inject --db-url from the shared env so scripts don't hardcode creds
-        cmd = (f"/opt/venv/bin/python /src/{script_name}.py "
-               + " ".join(args)
-               + ' --db-url "$FD_OPEN_DATA_MCP_DATABASE_URL"')
+        # The DSN arrives as FD_OPEN_DATA_MCP_DATABASE_URL in the container env
+        # (see _common_env). It used to be appended here as
+        # `--db-url "$FD_OPEN_DATA_MCP_DATABASE_URL"`, which expanded the
+        # password into the Job spec's command and into /proc/<pid>/cmdline —
+        # readable by anyone with `get pods`. Scripts read the env when the flag
+        # is absent (stop-passing-dsn-on-argv).
+        cmd = f"/opt/venv/bin/python /src/{script_name}.py " + " ".join(args)
         env = self._common_env(cluster)
         dns = self._dns_config(cluster)
         pod_spec = {
