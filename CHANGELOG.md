@@ -2,6 +2,30 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.52] - 2026-11-08
+- **fix(reads)**: 0.5.50 那刀钉错了对象。它约束的是 `semantic_observations.entity_type`
+  ——**行自己声明的类型**——而错位行声明的恰好也是 `'stock'`，所以拿行业 id / 基金经理 id
+  去查股票概念照样取得到。真库实测 2026-11-08（715.9 万行）：声明 `stock` 但实体不是股票的
+  观测共 **343,411** 条 —— 基金(经理 `person`) **333,975**（865 个实体，每人约 443 行
+  `price.high/low/open/close/amount`，2026-06-09~09-18，源 akshare，标识是天天基金经理 id）、
+  行业 8,500、基金(fund) 936。现以**实体自身的类**为准：
+  - 新增 `entities.resolver.check_entity_identity`（证券类 `SECURITY_ENTITY_TYPES={'stock'}`），
+    在三处缓存读入口 `read_cache` / `read_cache_all` / `read_cache_range` 校验
+    （`read` / `fetch` / `read_series` / gapfill 全部经由此处），错误信息说明"这是错挂数据、
+    不是覆盖缺口"；实体行缺失不拦（悬空 id 属另一类缺陷）。
+  - `hotel_tools.hotel_series` 改为**要求行声明的类等于其所属实体的类**
+    （`EXISTS (... e.entity_type = o.entity_type)`），证券概念再加实体必须是 stock；
+    `hotel_kpi` 的 RevPAR/ADR/occupancy 分支同样加实体为 stock 的条件。
+  - `analysis/backend.time_series` 对证券类加同样的 `exists()` 过滤。
+- **fix(hotel_series) 回归**: 0.5.50 的 `o.entity_type = 概念类型` 误伤了合法跨层——星级季报
+  同一概念按城市/省/国家三层存（城市行 5,565 条挂 city 实体，概念却是 `region` 型），
+  按概念类型钉行会让城市级读数为 0。真库实测：修复后
+  `hotel.cn.star_rated.count.all.quarterly` + 北京(BJS, id=17) 回到 5 点
+  （2023-06-30~2024-09-30）；行业/基金经理 id 仍为 unavailable。
+  为什么不能一刀切"实体类型 == 概念类型"：`country→city` 6,302、`region→city` 5,565、
+  `region→country` 96 是产品的多层级形态，硬相等会读没真序列。
+- 已证写入侧无新增污染：`fetched_at > 2026-11-06` 的错位行为 0 条（写侧 `3225f4d` 之后）。
+
 ## [0.5.51] - 2026-11-08
 - **fix(astock)**: `bulk_ingest_astock_daily.py` 补 `import os`。0.5.48 把 DSN 从命令行挪进
   环境变量时写了 `db_url = args.db_url or os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL")`

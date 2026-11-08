@@ -36,6 +36,8 @@ from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from fd_open_data_mcp.entities.resolver import check_entity_identity
+
 from fd_open_data_mcp.models import SemanticObservation
 from fd_open_data_mcp.semantic.dates import (
     SHAPE_LIKE_PATTERNS,
@@ -248,6 +250,7 @@ def read_cache(
     Without ``source``, the highest-ranked source's row wins (base path; the
     view path returns the view's pre-deduped row — see module docstring).
     """
+    check_entity_identity(session, entity_type, entity_id)
     prefixes = period_prefixes(date, frequency)
     if source is not None:
         rows = _read_base_period(session, concept_id, entity_type, entity_id, date,
@@ -294,6 +297,7 @@ def read_cache_all(
     docstring). Never dispatches; a missing source is a coverage gap, not a
     surprise fetch.
     """
+    check_entity_identity(session, entity_type, entity_id)
     rows = _read_base_all(session, concept_id, entity_type, entity_id, date)
     if len(rows) > 1:
         order = _source_order(session, concept_id)
@@ -335,6 +339,7 @@ def read_cache_range(
     returned — one row per point, as plain reads expect. ``source`` narrows to
     one source's rows (base-table query).
     """
+    check_entity_identity(session, entity_type, entity_id)
     lo, hi = sql_bounds(start, end)
     if source is not None or not _use_view(session):
         rows = _read_base_range(session, concept_id, entity_type, entity_id, lo, hi,

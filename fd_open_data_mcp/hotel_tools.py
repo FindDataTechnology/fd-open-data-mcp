@@ -36,6 +36,7 @@ from sqlalchemy import text
 
 from fd_open_data_mcp.annotations import annotations_for
 from fd_open_data_mcp.db import get_database
+from fd_open_data_mcp.entities.resolver import SECURITY_ENTITY_TYPES
 
 UNIVERSE_SOURCE = "hotel-universe"
 
@@ -220,12 +221,30 @@ def register_hotel_tools(mcp: FastMCP) -> None:
                 return {"code": code, "unavailable": [_unavailable(
                     "该概念不存在", f"concepts.code={code!r} 未在册")]}
             params: dict[str, Any] = {"cid": concept["id"]}
-            # A series belongs to entities of the concept's own type. Without this
-            # the read mixes classes: rows typed 'stock' sit on some industry
-            # entity ids (8,500 of them, measured 2026-11-08), so an industry id
-            # could surface a company's price/financials.
-            where = ["o.concept_id = :cid", "o.entity_type = :cet"]
-            params["cet"] = concept["entity_type"]
+            # A row may only be read through the entity it hangs off: the class
+            # the row *declares* must be that entity's own class. Measured
+            # 2026-11-08: 351,740 rows declare a class their entity is not —
+            # 333,975 price/financials rows on fund-manager (person) entities,
+            # 8,500 on industry entities, 936 on a fund. Comparing the row's
+            # declared type to the *concept's* type (0.5.50) cannot see them,
+            # because they declare 'stock' like a real stock row does.
+            where = [
+                "o.concept_id = :cid",
+                "EXISTS (SELECT 1 FROM entities e WHERE e.id = o.entity_id"
+                " AND e.entity_type = o.entity_type)",
+            ]
+            # Pinning the row to the concept's own type would be wrong here: the
+            # star-rated survey stores the same concept per city, province and
+            # country, so city rows sit on city entities under a region-typed
+            # concept (5,565 rows). Security classes have no such multi-level
+            # form — a price/financials series belongs to a security — so only
+            # there is the concept type also required.
+            if concept["entity_type"] in SECURITY_ENTITY_TYPES:
+                where.append(
+                    "EXISTS (SELECT 1 FROM entities e WHERE e.id = o.entity_id"
+                    " AND e.entity_type = :cet)"
+                )
+                params["cet"] = concept["entity_type"]
             if source_used:
                 where.append("o.source_used = :src")
                 params["src"] = source_used
@@ -339,6 +358,8 @@ def register_hotel_tools(mcp: FastMCP) -> None:
                     FROM semantic_observations o
                     JOIN concepts c ON c.id = o.concept_id
                     WHERE o.entity_id = :eid AND o.entity_type = 'stock'
+                      AND EXISTS (SELECT 1 FROM entities e WHERE e.id = o.entity_id
+                                  AND e.entity_type = 'stock')
                       AND (c.code LIKE '%revpar%' OR c.code LIKE '%adr%'
                            OR c.code LIKE '%occupancy%' OR c.code LIKE '%.occ.%')
                     ORDER BY c.code, o.date

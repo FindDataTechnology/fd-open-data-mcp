@@ -76,12 +76,14 @@ class _FakeSession:
 
     def execute(self, statement, params=None):
         sql = str(statement)
+        # observations first: their guard embeds a correlated "FROM entities"
+        # subquery, so a prefix match on entities would swallow the read.
+        if "FROM semantic_observations" in sql:
+            return _FakeResult(self.observations)
         if "FROM entities" in sql:
             return _FakeResult([self.entity] if self.entity else [])
         if "FROM concepts" in sql:
             return _FakeResult([self.concept] if self.concept else [])
-        if "FROM semantic_observations" in sql:
-            return _FakeResult(self.observations)
         if "FROM crawl_items" in sql:
             return _FakeResult(self.items)
         return _FakeResult([])
@@ -191,13 +193,19 @@ def test_series_points_carry_source_and_caliber_caveats():
     assert "2024Q3" in joined                       # 已停更
 
 
-def test_series_read_is_scoped_to_the_concept_entity_type():
-    """A series must not mix entity classes.
+def test_series_read_requires_the_row_to_belong_to_its_entity():
+    """A row's declared class must be the class of the entity it hangs off.
 
-    Measured 2026-11-08: 8,500 stock-typed observations sit on **industry**
-    entity ids (mislabelled fund/ETF codes), so a read filtering only by
-    concept+entity_id would surface a company's price/financials when asked
-    about an industry. The query pins ``o.entity_type`` to the concept's type.
+    Measured 2026-11-08: 351,740 rows declare a class their entity is not
+    (333,975 price/financials rows on fund-manager ``person`` entities, 8,500
+    on ``industry``, 936 on a ``fund``). The query joins the entity and compares
+    the two, which is the only predicate that separates them from real rows —
+    they declare 'stock' exactly like a genuine stock row does.
+
+    Deliberately *not* ``o.entity_type = concept.entity_type``: the star-rated
+    survey stores one region-typed concept per city, province and country, so
+    city rows sit on city entities (5,565 rows) and pinning them to the
+    concept's type made them unreadable.
     """
     captured = {}
 
@@ -229,6 +237,49 @@ def test_series_read_is_scoped_to_the_concept_entity_type():
     tools = _tools(_S())
     out = tools["hotel_series"](code="hotel.cn.star_rated.occupancy.all.quarterly",
                                 entity_id=2053)
-    assert "o.entity_type = :cet" in captured["sql"]
-    assert captured["params"]["cet"] == "industry"
+    assert "e.entity_type = o.entity_type" in captured["sql"]
+    # a non-security concept must NOT be pinned to its own type
+    assert "cet" not in captured["params"]
+    assert out["unavailable"], out
+
+
+def test_series_read_requires_the_entity_to_be_of_the_concept_class():
+    """The row's *declared* type is not enough for a security series.
+
+    Measured 2026-11-08: all 343,411 mis-attached price/financials rows declare
+    ``entity_type='stock'`` themselves — they sit on person (fund managers),
+    industry and fund entities. Only the entity's own class tells them apart, so
+    a stock concept read must also require the entity row to be a stock.
+    """
+    captured = {}
+
+    class _S(_FakeSession):
+        def execute(self, stmt, params=None):
+            text = str(stmt)
+            if "FROM concepts" in text:
+                class _R:
+                    def mappings(self):
+                        class _M:
+                            def first(_self):
+                                return {"id": 7, "code": "financials.revenue.total",
+                                        "name_zh": "营业总收入", "name_en": "revenue",
+                                        "unit": "CNY", "frequency": "quarterly",
+                                        "entity_type": "stock", "category": None}
+                        return _M()
+                return _R()
+            captured["sql"] = text
+            captured["params"] = params or {}
+
+            class _Empty:
+                def mappings(self):
+                    class _M:
+                        def all(self):
+                            return []
+                    return _M()
+            return _Empty()
+
+    tools = _tools(_S())
+    out = tools["hotel_series"](code="financials.revenue.total", entity_id=2053)
+    assert "EXISTS (SELECT 1 FROM entities e WHERE e.id = o.entity_id" in captured["sql"]
+    assert captured["params"]["cet"] == "stock"
     assert out["unavailable"], out

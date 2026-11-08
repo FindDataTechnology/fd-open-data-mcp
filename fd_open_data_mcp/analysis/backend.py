@@ -31,9 +31,11 @@ import os
 from abc import ABC, abstractmethod
 from typing import Callable
 
+from sqlalchemy import exists
 from sqlalchemy.orm import Session
 
-from fd_open_data_mcp.models import Concept, ConceptCoverage, SemanticObservation
+from fd_open_data_mcp.entities.resolver import SECURITY_ENTITY_TYPES
+from fd_open_data_mcp.models import Concept, ConceptCoverage, Entity, SemanticObservation
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +87,14 @@ class RollupBackend(AnalysisBackend):
                     SemanticObservation.entity_type == entity_type,
                     SemanticObservation.entity_id == entity_id)
         )
+        if entity_type in SECURITY_ENTITY_TYPES:
+            # The row's declared type is 'stock' for 343,411 price/financials
+            # rows that hang off person/industry/fund entities (measured
+            # 2026-11-08); only the entity's own class can tell them apart.
+            q = q.filter(exists().where(
+                Entity.id == SemanticObservation.entity_id,
+                Entity.entity_type == entity_type,
+            ))
         if start:
             q = q.filter(SemanticObservation.date >= start)
         if end:

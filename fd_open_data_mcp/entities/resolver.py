@@ -14,6 +14,7 @@ import logging
 import re
 from typing import Optional
 
+from sqlalchemy import text
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import Concept, Entity, EntitySourceIdentifier
@@ -31,6 +32,62 @@ class InvalidIdentifier(ValueError):
 
 class EntityTypeMismatch(Exception):
     """Raised when a concept is requested for an incompatible entity type."""
+
+
+# Entity classes whose series may only be attached to entities of that same
+# class. Price/financials rows are *declared* entity_type='stock', but 343,411
+# of them hang off person (fund managers), industry and fund entities
+# (measured 2026-11-08 against the production database). A read predicate that
+# compares the row's declared type cannot see that — the row claims 'stock'.
+# The class of the entity itself has to be checked.
+#
+# Deliberately narrow: elsewhere cross-class attachment is legitimate. Hotel
+# country concepts carry per-city rows (6,302) and region concepts carry city
+# rows (5,565) by design, so a blanket "entity type == concept type" rule would
+# hide real series.
+SECURITY_ENTITY_TYPES: frozenset[str] = frozenset({"stock"})
+_ENTITY_CLASS_MEMO = "_fd_entity_class_ok"
+
+
+class EntityClassMismatch(ValueError):
+    """An entity id does not belong to the class the read claims.
+
+    Subclasses ``ValueError`` like the other request-shape guards so callers
+    that turn bad arguments into an error response keep working.
+    """
+
+
+def check_entity_identity(session: Session, entity_type: str, entity_id: int) -> None:
+    """Refuse a security-class read whose entity id is a different class.
+
+    ``check_applicability`` only proves the *concept* is a stock concept; it
+    says nothing about the entity id the caller passed. Passing a fund-manager
+    (person) or industry entity id to a stock concept used to return that
+    entity's mis-attached price/financials rows.
+
+    A missing entity row is not gated here: dangling ids are their own defect
+    and are counted separately, and refusing them would turn a data gap into a
+    tool error.
+    """
+    if entity_type not in SECURITY_ENTITY_TYPES:
+        return
+    # Reads call this per point (dispatch/compare loop over dates), so a
+    # verified pair is remembered on the session instead of re-queried.
+    memo = getattr(session, "info", {}).setdefault(_ENTITY_CLASS_MEMO, set())
+    key = (entity_type, entity_id)
+    if key in memo:
+        return
+    row = session.execute(
+        text("SELECT entity_type FROM entities WHERE id = :i"), {"i": entity_id}
+    ).first()
+    if row is None or row[0] == entity_type:
+        memo.add(key)
+        return
+    raise EntityClassMismatch(
+        f"entity {entity_id} is a {row[0]!r} entity, not {entity_type!r}: a "
+        f"{entity_type} series cannot be read from it (rows of that class on "
+        "such entities are mis-attached data, not a coverage gap)"
+    )
 
 
 class ConceptDeprecated(Exception):
