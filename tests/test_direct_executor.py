@@ -109,7 +109,9 @@ def test_direct_manifest_shape(session, monkeypatch):
     cmd = job["spec"]["template"]["spec"]["containers"][0]["command"][-1]
     assert "bulk_ingest_fund_nav_daily.py" in cmd
     assert "--start-year 2026" in cmd
-    assert '--db-url "$FD_OPEN_DATA_MCP_DATABASE_URL"' in cmd
+    # 0.5.48 moved the DSN off argv (argv is world-readable in the pod spec);
+    # it must never come back as a flag.
+    assert "--db-url" not in cmd
     env = {e["name"]: e["value"] for e in
            job["spec"]["template"]["spec"]["containers"][0]["env"]
            if "value" in e}

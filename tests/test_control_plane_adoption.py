@@ -77,7 +77,9 @@ def mig():
 def test_chain_head_and_wiring():
     script = ScriptDirectory(str(ALEMBIC_DIR))
     # add-data-stream-engine: 0013 obs_month governance + 0014 concept rollups
-    assert script.get_current_head() == "0016_policy_launcher"
+    # fix-census-refresh: 0017 census bigint (0.5.44) is the head the live
+    # schema gate reports; this assertion was left at 0016 and stayed red.
+    assert script.get_current_head() == "0017_census_bigint"
     assert script.get_revision("0013_obs_month_governance").down_revision == (
         "0012_price_active_pool"
     )
