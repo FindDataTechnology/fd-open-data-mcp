@@ -27,19 +27,21 @@ is produced) and 0.5.52 resolves the entity's own class on read, so no answer ca
 surface them. What is left is a bookkeeping question — delete, quarantine, or
 leave — which is the owner's call, not a code change.
 
-This check keeps the *known* baseline visible and fails on anything NEW. A new
-class of mis-attachment is an incident (it means a writer ignored the entity
-join); the historical rows are counted and reported, not failed.
+The rows above were moved to ``semantic_observations_quarantine`` on 2026-11-08
+(batch ``q20261108T141401Z``, 351,740 rows, reversible with
+``scripts/quarantine_misattached_observations.py --restore --batch <id>``), so the
+live table is clean and the invariant is now **zero**: any row whose declared
+class is not its entity's class is a violation, because a writer that produced one
+went around the entity join.
 
-The baseline is per (row type, entity type) with the exact 2026-11-08 counts: a
-pair may stay at or below its recorded count, and a pair that was not there at
-all fails immediately.
+``BASELINE`` stays as an empty dict so a pair can only be tolerated by an explicit,
+reviewed entry — the mechanism is kept, the tolerance is not.
 
 Usage:
     python scripts/check_observation_entity_class.py --db-url <dsn>
     python scripts/check_observation_entity_class.py --db-url <dsn> --show-entities 5
 
-Exit codes: 0 = only the recorded baseline (or nothing); 1 = a new/grown class.
+Exit codes: 0 = none (or only an explicitly tolerated class); 1 = a violation.
 """
 from __future__ import annotations
 
@@ -49,15 +51,10 @@ import sys
 
 from sqlalchemy import create_engine, text
 
-# Measured against production on 2026-11-08. Growth is a violation; shrinkage is
-# fine (it means someone cleaned part of it).
-BASELINE: dict[tuple[str, str], int] = {
-    ("stock", "person"): 333_975,
-    ("stock", "industry"): 8_500,
-    ("country", "city"): 6_302,
-    ("fund", "stock"): 2_027,
-    ("stock", "fund"): 936,
-}
+# Empty by design: the 351,740 rows measured on 2026-11-08 were quarantined
+# (batch q20261108T141401Z), so nothing is tolerated any more. Adding an entry
+# here is a decision to tolerate a known class, and belongs in a code review.
+BASELINE: dict[tuple[str, str], int] = {}
 
 
 def mismatches(conn) -> list[tuple[str, str, int, int]]:
@@ -131,7 +128,7 @@ def main() -> int:
               "writer is resolving entities without checking their type",
               file=sys.stderr)
         return 1
-    print("OK: only the recorded 2026-11-08 baseline; no new mis-attachment")
+    print("OK: no observation declares a class its entity does not have")
     return 0
 
 

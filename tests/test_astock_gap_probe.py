@@ -558,19 +558,21 @@ def test_code_maps_join_entities_not_the_identifier_type():
 
 # ── observation class integrity must stay at its recorded baseline ────────────
 
-def test_observation_entity_class_guard_pins_the_measured_baseline():
-    """The 351,740 mis-attached rows are a counted baseline, not a silent skip.
+def test_observation_entity_class_guard_tolerates_nothing():
+    """The mis-attached rows were quarantined; the invariant is now zero.
 
-    Measured 2026-11-08: rows whose declared class is not their entity's class —
-    333,975 stock rows on fund-manager (person) entities (a fund's daily unit NAV,
+    Measured 2026-11-08: 351,740 rows declared a class their entity is not —
+    333,975 stock rows on fund-manager entities (a fund's daily unit NAV,
     0.89…1.32, un-mappable to the fund it belongs to), 8,500 on industry entities
-    (9 HK tickers + 3 ETFs, and no entity carries those codes), 6,302 country
-    indicators on city entities, plus three small classes.
+    (9 HK tickers + 3 ETFs, and no entity of any class carries those codes), 6,302
+    country indicators on city entities, 2,027 fund return concepts on A-share
+    pharma stocks, 936 stock rows on a fund.
 
-    Reads and writes are both sealed, so the remaining question is disposal, which
-    belongs to the owner. What the code must guarantee is that the set cannot
-    GROW: a new class, or a class above its recorded count, means a writer went
-    around the entity join again. This pins the contract.
+    They were moved to `semantic_observations_quarantine` (batch
+    q20261108T141401Z, reversible with --restore), so the guard's allowlist is
+    empty: any reappearance is a writer that skipped the entity join. Keeping the
+    baseline dict empty is the contract this test pins — an entry here would mean
+    someone re-tolerated a class.
     """
     import importlib.util
     from pathlib import Path
@@ -580,10 +582,9 @@ def test_observation_entity_class_guard_pins_the_measured_baseline():
     mod = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(mod)
 
-    assert mod.BASELINE[("stock", "person")] == 333_975
-    assert mod.BASELINE[("stock", "industry")] == 8_500
-    # every recorded pair is a *known* class; nothing may be silently new
-    assert sum(mod.BASELINE.values()) == 351_740
-    # the security classes are the ones a writer can plausibly re-open
-    assert ("stock", "person") in mod.BASELINE
-    assert ("stock", "fund") in mod.BASELINE
+    assert mod.BASELINE == {}, "a tolerated class came back — review before allowing it"
+    # the security pairs are the ones a writer can plausibly re-open, so the guard
+    # must still know them as *violations*
+    for pair in (("stock", "person"), ("stock", "industry"), ("stock", "fund")):
+        assert pair not in mod.BASELINE
+
