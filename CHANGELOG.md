@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.51] - 2026-11-08
+- **fix(astock)**: `bulk_ingest_astock_daily.py` 补 `import os`。0.5.48 把 DSN 从命令行挪进
+  环境变量时写了 `db_url = args.db_url or os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL")`
+  却没导入 `os`，于是**每一次** direct-script 派发都在这一行
+  `NameError: name 'os' is not defined` 退出 1 —— 约 5 秒就死，赶在 runner 报到之前，
+  所以 `policy_runs` 只能记成"failed before the runner checked in; pod 已回收，无终态可抓"。
+  实测 2026-11-08：`astock-daily-increment`（policy 2659）自 19:21 起 07:17/08:00/08:08
+  三次全红；用 job 自己的脚本 ConfigMap + 同款 1Gi limits 复现，补 import 后同一 pod
+  顺利通过并打印 `universe: 5203 codes / symbols: 5203`。
+  为什么先前的带 `--db-url` 试跑是绿的：`or` 短路，坏的那一侧从未被求值。
+
 ## [0.5.50] - 2026-11-08
 - **fix(hotel_series)**: series 读取**按概念自身的 `entity_type` 约束**。实测 2026-11-08：
   8,500 条 `stock` 型观测挂在**行业**实体 id 上（错标的港股/ETF 代码所致），而
