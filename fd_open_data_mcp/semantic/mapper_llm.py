@@ -32,6 +32,27 @@ _RULES: list[tuple[tuple[str, ...], tuple[str, str, str, str, str], float]] = [
     (("最低", "low"), ("price.low", "stock", "", "currency", "daily"), 0.9),
     (("成交量", "volume"), ("price.volume", "stock", "", "shares", "daily"), 0.9),
     (("成交额", "amount", "turnover"), ("price.amount", "stock", "", "currency", "daily"), 0.85),
+    # ── bank regulatory indicators (awaken-banking-report-ingest 6.1) ──
+    # cn-report 从银行定期报告抽的监管指标。中文科目名互为子串（「资本充足率」⊂
+    # 「核心一级资本充足率」/「一级资本充足率」），故**长名必须排在短名之前**，
+    # 否则「核心一级资本充足率」先被「资本充足率」规则接走，三档资本率会绑到同一概念。
+    (("核心一级资本充足率",), ("financials.cet1_capital_adequacy_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("一级资本充足率",), ("financials.tier1_capital_adequacy_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("资本充足率",), ("financials.capital_adequacy_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("不良贷款余额",), ("financials.npl_balance", "stock", "", "currency", "yearly"), 0.95),
+    (("不良贷款率",), ("financials.npl_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("拨备覆盖率",), ("financials.provision_coverage_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("拨贷比", "贷款拨备率"), ("financials.loan_loss_provision_ratio", "stock", "", "%", "yearly"), 0.9),
+    (("净稳定资金比例",), ("financials.net_stable_funding_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("流动性覆盖率",), ("financials.liquidity_coverage_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("净息差", "净利息收益率"), ("financials.net_interest_margin", "stock", "", "%", "yearly"), 0.9),
+    (("净利差", "净利息差"), ("financials.net_interest_spread", "stock", "", "%", "yearly"), 0.9),
+    (("成本收入比",), ("financials.cost_income_ratio", "stock", "", "%", "yearly"), 0.9),
+    (("正常类贷款迁徙率",), ("financials.normal_loan_migration_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("关注类贷款迁徙率",), ("financials.watch_loan_migration_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("次级类贷款迁徙率",), ("financials.substandard_loan_migration_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("可疑类贷款迁徙率",), ("financials.doubtful_loan_migration_ratio", "stock", "", "%", "yearly"), 0.95),
+    (("杠杆率",), ("financials.leverage_ratio", "stock", "", "%", "yearly"), 0.9),
     # edgar / financial-statement line items
     (("revenue", "total revenue", "营业收入"), ("financials.revenue", "stock", "", "currency", "yearly"), 0.85),
     (("net income", "净利润"), ("financials.net_income", "stock", "", "currency", "yearly"), 0.85),
