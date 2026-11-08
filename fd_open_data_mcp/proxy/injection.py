@@ -76,6 +76,20 @@ def proxy_dict(proxy) -> Optional[dict]:
     return None if url is None else {"http": url, "https": url}
 
 
+def current_proxy_url() -> Optional[str]:
+    """The proxy URL this fetch attempt was given, or None for direct egress.
+
+    Public read of the same contextvar the requests/httpx patches consume. It
+    exists for clients those patches cannot reach: yfinance talks over
+    ``curl_cffi``, so without this the adapter has no way to learn which proxy
+    the pipeline selected for the attempt.
+    """
+    px = _proxy_var.get()
+    if not px:
+        return None
+    return px.get("https") or px.get("http")
+
+
 @contextmanager
 def use_proxy(proxy):
     """Set the proxy for the duration of the block.

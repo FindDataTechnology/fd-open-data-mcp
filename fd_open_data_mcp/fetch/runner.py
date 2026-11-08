@@ -6,6 +6,8 @@ methods + top-level). Requires the `data` extra. ``returned_columns`` extracts
 """
 from __future__ import annotations
 
+import contextlib
+import os
 from typing import Any, Optional
 
 
@@ -67,9 +69,76 @@ def run_akshare(command: str, params: dict) -> Any:
         raise FetchError(f"akshare {command} raised: {e}", status, text) from e
 
 
+@contextlib.contextmanager
+def _yf_proxy_configured():
+    """Point yfinance at this attempt's proxy for the duration of the call.
+
+    yfinance 1.x talks over ``curl_cffi``, which our requests/httpx patches do
+    not cover, so without this it egresses direct. Every direct egress in the
+    fleet is blocked (measured 2026-11-08: 429 with a 23-byte `Edge: Too Many
+    Requests` page from tencent, 403 with a 3,369-byte page from the cheap
+    nodes), while the same endpoint returns 200 through the proxy pool with
+    browser impersonation. Handing ``yf.Ticker(session=…)`` a proxied curl_cffi
+    session is NOT enough - yfinance opens its own cookie/crumb connections
+    (``fc.yahoo.com``) that still fail - so the proxy has to go through its
+    global config.
+
+    ``FD_YF_PROXY`` wins over the pipeline's per-attempt proxy: direct callers
+    (probe job, backfill scripts) never pass through ``instrumented_fetch`` and
+    have no attempt to inherit from.
+    """
+    try:
+        import yfinance as yf  # lazy; requires the `data` extra
+    except ImportError:
+        yield
+        return
+
+    url = os.environ.get("FD_YF_PROXY") or None
+    if not url:
+        try:
+            from fd_open_data_mcp.proxy import injection
+            url = injection.current_proxy_url()
+        except Exception:  # noqa: BLE001 - proxy plumbing must never break a fetch
+            url = None
+    if not url:
+        yield               # no proxy selected: keep today's direct behaviour
+        return
+
+    prev_proxy = getattr(getattr(getattr(yf, "config", None), "network", None), "proxy", None)
+    prev_env = {k: os.environ.get(k) for k in ("HTTP_PROXY", "HTTPS_PROXY")}
+    configured = False
+    try:
+        try:
+            set_cfg = getattr(yf, "set_config", None)
+            if set_cfg is not None:
+                set_cfg(proxy=url)
+                configured = True
+        except Exception:  # noqa: BLE001 - older/newer yfinance: fall through to env
+            configured = False
+        # curl_cffi reads these for its own sessions (cookie/crumb too).
+        os.environ["HTTP_PROXY"] = os.environ["HTTPS_PROXY"] = url
+        yield
+    finally:
+        for k, v in prev_env.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+        if configured:
+            # Restore even when the previous value was None (direct egress): a
+            # proxy must never leak into the next fetch of a long-lived process.
+            with contextlib.suppress(Exception):
+                yf.set_config(proxy=prev_proxy)
+
+
 def run_yfinance(command: str, params: dict) -> Any:
     import yfinance as yf  # lazy; requires the `data` extra
 
+    with _yf_proxy_configured():
+        return _run_yfinance_inner(yf, command, params)
+
+
+def _run_yfinance_inner(yf, command: str, params: dict) -> Any:
     if command.startswith("ticker_"):
         method = command[len("ticker_"):]
         symbol = params.pop("symbol", None)
