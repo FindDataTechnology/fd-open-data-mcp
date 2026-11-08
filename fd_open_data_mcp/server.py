@@ -73,9 +73,15 @@ register_auth_tools(mcp)
 # an empty series.
 from fd_open_data_mcp.hotel_tools import register_hotel_tools
 from fd_open_data_mcp.restaurant_tools import register_restaurant_tools
+# Attach the flower-vertical read tools (add-flower-vertical 5.6): universe /
+# price series / AIPH planted area / company financials / HS6 trade.
+# 5 个只读工具，不可得车道返回显式原因而不是空序列。
+# 漏这一行会让「工具写了、测试绿、活面没有」——本次就是这样漏的（2026-11-08 查实）。
+from fd_open_data_mcp.flower_tools import register_flower_tools
 
 register_restaurant_tools(mcp)
 register_hotel_tools(mcp)
+register_flower_tools(mcp)
 
 
 def _session():
