@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.49] - 2026-11-08
+- **fix(source-credential-hygiene)**: 0.5.48 把 DSN 从**命令行**拿掉后，实测真派发
+  （`cheap/crawl-policy-2659-20261108071716`）发现它仍在 **Job spec 的 env `value:`** 里——
+  `_common_env()` 把 `clusters.runtime_hints.database_url/redis_url`（cheap 行里带明文口令）
+  当字面值写进去，任何 `get pods -o yaml` 都能读到。现改为**一律 `secretKeyRef`**
+  （`fd-db-secret` 的 `DATABASE_URL` / `REDIS_URL`），并在 cheap `scraw` 补齐该 secret；
+  带回归单测（断言两个凭据变量都是 secretKeyRef、无字面 `value`）。
+  `runtime_hints` 的明文值从此不再进入任何 pod 规格（保留字段以兼容旧集群，但不再被使用）。
+
 ## [0.5.48] - 2026-11-08
 - **fix(stop-passing-dsn-on-argv)**: direct-script Job 的**命令行里带着库口令**。
   `_direct_manifests()` 拼的是 `… <script> <args> --db-url "$FD_OPEN_DATA_MCP_DATABASE_URL"`，

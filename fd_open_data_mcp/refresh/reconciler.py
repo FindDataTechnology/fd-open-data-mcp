@@ -784,9 +784,17 @@ class MultiClusterLauncher:
             # to earlier entries, and hint URLs may template it (per-node relay).
             {"name": "K8S_NODE_IP",
              "valueFrom": {"fieldRef": {"fieldPath": "status.hostIP"}}},
+            # Credentials come from the Secret, never as a literal env value:
+            # a plain `value:` lands in the Job/pod spec, where anyone with
+            # `get pods` can read it (measured 2026-11-08 on the cheap cluster,
+            # whose runtime_hints carried the DSN with its password). Every
+            # crawl namespace carries `fd-db-secret` (DATABASE_URL/REDIS_URL).
             {"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
-             "value": hints.get("database_url", self.database_url)},
-            {"name": "REDIS_URL", "value": hints.get("redis_url", self.redis_url)},
+             "valueFrom": {"secretKeyRef": {"name": "fd-db-secret",
+                                            "key": "DATABASE_URL"}}},
+            {"name": "REDIS_URL",
+             "valueFrom": {"secretKeyRef": {"name": "fd-db-secret",
+                                            "key": "REDIS_URL"}}},
             {"name": "SCRAW_CLUSTER_ID", "value": str(cluster.id)},
             {"name": "SCRAW_CLUSTER_NAME", "value": str(cluster.name)},
             {"name": "FD_PROXY_FORWARDER",

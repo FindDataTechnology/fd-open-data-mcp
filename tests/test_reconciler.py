@@ -730,3 +730,27 @@ def test_direct_job_command_carries_no_dsn(monkeypatch):
     assert "--db-url" not in shell
     assert "postgresql" not in shell and "psycopg2" not in shell
     assert shell.endswith("--universe --limit 1")
+
+
+def test_common_env_takes_credentials_from_the_secret(monkeypatch):
+    """DB/Redis URLs must arrive via secretKeyRef, never a literal value.
+
+    Measured 2026-11-08: the cheap cluster's ``clusters.runtime_hints`` carried
+    the DSN with its password, and ``_common_env`` wrote it as ``value:``, so
+    the credential sat in every Job spec (readable with ``get pods``).
+    """
+    from types import SimpleNamespace as NS
+    from fd_open_data_mcp.refresh.reconciler import MultiClusterLauncher
+
+    launcher = MultiClusterLauncher(database_url="postgresql://u:p@h/db",
+                                    redis_url="redis://:pw@h:6379/0")
+    cluster = NS(id=9, name="cheap", namespace="scraw",
+                 runtime_hints={"database_url": "postgresql://u:p@h/db"})
+    env = {e["name"]: e for e in launcher._common_env(cluster)}
+
+    for name in ("FD_OPEN_DATA_MCP_DATABASE_URL", "REDIS_URL"):
+        assert "value" not in env[name], env[name]
+        ref = env[name]["valueFrom"]["secretKeyRef"]
+        assert ref["name"] == "fd-db-secret"
+    assert env["FD_OPEN_DATA_MCP_DATABASE_URL"]["valueFrom"]["secretKeyRef"]["key"] == "DATABASE_URL"
+    assert env["REDIS_URL"]["valueFrom"]["secretKeyRef"]["key"] == "REDIS_URL"
