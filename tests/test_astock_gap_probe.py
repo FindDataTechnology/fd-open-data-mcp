@@ -554,3 +554,36 @@ def test_code_maps_join_entities_not_the_identifier_type():
         for chunk in src.split("FROM entity_source_identifiers")[1:]:
             head = chunk[:260]
             assert "JOIN entities" in head, f"{name}: identifier read without JOIN entities → {head[:80]}"
+
+
+# ── observation class integrity must stay at its recorded baseline ────────────
+
+def test_observation_entity_class_guard_pins_the_measured_baseline():
+    """The 351,740 mis-attached rows are a counted baseline, not a silent skip.
+
+    Measured 2026-11-08: rows whose declared class is not their entity's class —
+    333,975 stock rows on fund-manager (person) entities (a fund's daily unit NAV,
+    0.89…1.32, un-mappable to the fund it belongs to), 8,500 on industry entities
+    (9 HK tickers + 3 ETFs, and no entity carries those codes), 6,302 country
+    indicators on city entities, plus three small classes.
+
+    Reads and writes are both sealed, so the remaining question is disposal, which
+    belongs to the owner. What the code must guarantee is that the set cannot
+    GROW: a new class, or a class above its recorded count, means a writer went
+    around the entity join again. This pins the contract.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "check_observation_entity_class.py"
+    spec = importlib.util.spec_from_file_location("obs_class_guard", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert mod.BASELINE[("stock", "person")] == 333_975
+    assert mod.BASELINE[("stock", "industry")] == 8_500
+    # every recorded pair is a *known* class; nothing may be silently new
+    assert sum(mod.BASELINE.values()) == 351_740
+    # the security classes are the ones a writer can plausibly re-open
+    assert ("stock", "person") in mod.BASELINE
+    assert ("stock", "fund") in mod.BASELINE
