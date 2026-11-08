@@ -28,14 +28,16 @@ import sys
 
 from sqlalchemy import create_engine, text
 
-# (identifier type, entity type) pairs we knowingly leave alone.
+# (identifier type, entity type) pairs we knowingly leave alone, because the
+# rows carry data: the identifiers ARE these entities' only resolution keys, and
+# observations hang off the same ids. Cleaning them without moving that data
+# first would silently cut the fetch path (2026-11-08: 123 entities, 13,288
+# observations). The three classes that carried nothing (stock-on-organization,
+# -index, -exchange: 267 rows, zero observations) were cleaned and are now
+# violations if they reappear.
 DEFERRED = {
-    ("stock", "organization"),
-    ("stock", "fund"),          # re-typed in the 2026-11-08 repair; kept for old rows
-    ("country", "city"),
-    ("stock", "industry"),
-    ("stock", "index"),
-    ("stock", "exchange"),
+    ("country", "city"),    # 36 rows; the cities' own city/country observations live here
+    ("stock", "industry"),  # 32 rows; 8.5k stock + 3.9k industry observations on those ids
 }
 
 

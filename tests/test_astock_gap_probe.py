@@ -519,5 +519,9 @@ def test_identifier_integrity_deferred_pairs_are_explicit():
     spec.loader.exec_module(mod)
 
     assert ("stock", "person") not in mod.DEFERRED      # the class that bit us
-    assert ("stock", "fund") in mod.DEFERRED
-    assert ("country", "city") in mod.DEFERRED
+    # zero-observation leftovers were cleaned on 2026-11-08; a comeback must fail
+    assert ("stock", "organization") not in mod.DEFERRED
+    assert ("stock", "index") not in mod.DEFERRED
+    assert ("stock", "exchange") not in mod.DEFERRED
+    # only the load-bearing classes may stay deferred
+    assert mod.DEFERRED == {("country", "city"), ("stock", "industry")}
