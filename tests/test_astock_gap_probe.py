@@ -499,3 +499,25 @@ def test_per_symbol_start_handles_missing_rows_and_disabled_cap(mod):
     assert start == "2026-10-10" and kind == "capped"
     start, kind = mod.per_symbol_start("2026-11-07", "2026-01-05", "2026-11-08", 0)
     assert start == "2026-11-07" and kind == "current"
+
+
+# ── identifier integrity guard (fix-identifier-entity-type-mismatch) ─────────
+
+def test_identifier_integrity_deferred_pairs_are_explicit():
+    """The five deferred classes are a documented allowlist, not a silent skip.
+
+    Found 2026-11-08: 1,793 identifiers typed `stock` belonged to **person**
+    entities (fund managers), so `512660` resolved to a manager. The rows were
+    removed; the guard must fail on any *new* class and report the deferred ones.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "scripts" / "check_identifier_integrity.py"
+    spec = importlib.util.spec_from_file_location("ident_integrity", path)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+
+    assert ("stock", "person") not in mod.DEFERRED      # the class that bit us
+    assert ("stock", "fund") in mod.DEFERRED
+    assert ("country", "city") in mod.DEFERRED
