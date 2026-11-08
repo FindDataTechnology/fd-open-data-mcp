@@ -66,7 +66,12 @@ def mismatches(conn) -> list[tuple[str, str, int, int]]:
 
 
 def dangling(conn) -> int:
-    """Rows whose entity_id has no entity at all (a separate defect, reported)."""
+    """Rows whose entity_id has no entity at all.
+
+    11 such price rows were measured on 2026-11-08 (ids 26106/26718/26719/26851,
+    written 2026-09-16) and quarantined; the count is now gated because an
+    observation may only point at an entity that exists.
+    """
     return conn.execute(text("""
         SELECT count(*) FROM semantic_observations o
         LEFT JOIN entities e ON e.id = o.entity_id WHERE e.id IS NULL""")).scalar() or 0
@@ -120,9 +125,13 @@ def main() -> int:
             print(f"      entity {eid:<8} {str(code)[:40]:<40} {cnt:>7}")
     print(f"baseline rows total: {total}")
     if orphans:
-        print(f"  report   {orphans} rows carry an entity_id that has no entity "
-              "(separate defect, not gated)")
+        print(f"  VIOLATION {orphans} rows carry an entity_id that has no entity",
+              file=sys.stderr)
 
+    if orphans:
+        print("FAIL: observations point at entity ids that do not exist — a writer "
+              "resolved an id it never created", file=sys.stderr)
+        return 1
     if new or grown:
         print("FAIL: a class of mis-attached observations appeared or grew — a "
               "writer is resolving entities without checking their type",

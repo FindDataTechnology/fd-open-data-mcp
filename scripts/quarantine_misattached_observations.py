@@ -59,16 +59,26 @@ CREATE TABLE IF NOT EXISTS {TABLE} (
 )
 """
 
-# The predicate is the invariant the read guard enforces: a row may only belong
-# to an entity of the class it declares.
+# The predicate the read guard enforces: a row may only belong to an entity of
+# the class it declares. --dangling targets the sibling defect instead: rows whose
+# entity_id has no entity at all (measured 2026-11-08: 11 price rows on four ids
+# that do not exist, written 2026-09-16 by an ingester that resolved ids it never
+# created).
 MISMATCH = "o.entity_type <> e.entity_type"
+DANGLING = "e.id IS NULL"
 
 
-def report(conn) -> list[tuple[str, str, int]]:
+def _join(predicate: str) -> str:
+    """LEFT JOIN when hunting dangling ids, INNER JOIN otherwise."""
+    kind = "LEFT JOIN" if predicate is DANGLING else "JOIN"
+    return f"FROM semantic_observations o {kind} entities e ON e.id = o.entity_id"
+
+
+def report(conn, predicate: str = MISMATCH) -> list[tuple[str, str, int]]:
     return [tuple(r) for r in conn.execute(text(f"""
-        SELECT o.entity_type, e.entity_type, count(*)
-        FROM semantic_observations o JOIN entities e ON e.id = o.entity_id
-        WHERE {MISMATCH}
+        SELECT o.entity_type, COALESCE(e.entity_type, '<missing>'), count(*)
+        {_join(predicate)}
+        WHERE {predicate}
         GROUP BY 1, 2 ORDER BY 3 DESC"""))]
 
 
@@ -78,6 +88,9 @@ def main() -> int:
     ap.add_argument("--db-url", default=os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL"))
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--restore", action="store_true", help="move a batch back")
+    ap.add_argument("--dangling", action="store_true",
+                    help="target rows whose entity_id has no entity (default: rows whose "
+                         "declared class is not their entity's class)")
     ap.add_argument("--batch", help="batch id to restore (default: the newest)")
     ap.add_argument("--reason", default="row declares a class its entity is not")
     args = ap.parse_args()
@@ -109,7 +122,8 @@ def main() -> int:
             print(f"restored batch {batch}: re-inserted {back}, removed {gone} from quarantine")
             return 0
 
-        rows = report(conn)
+        predicate = DANGLING if args.dangling else MISMATCH
+        rows = report(conn, predicate)
         total = sum(r[2] for r in rows)
         print(f"mis-attached observations: {total}")
         for declared, actual, n in rows:
@@ -129,15 +143,20 @@ def main() -> int:
                  declared_type, entity_actual_type, reason, batch_id)
             SELECT o.id, o.concept_id, o.entity_type, o.entity_id, o.date, o.granularity,
                    o.value, o.unit, o.source_used, o.fetched_at, o.obs_month,
-                   o.entity_type, e.entity_type, :reason, :batch
-            FROM semantic_observations o JOIN entities e ON e.id = o.entity_id
-            WHERE {MISMATCH}
+                   o.entity_type, COALESCE(e.entity_type, '<missing>'), :reason, :batch
+            {_join(predicate)}
+            WHERE {predicate}
             ON CONFLICT (id) DO NOTHING"""),
             {"reason": args.reason, "batch": batch}).rowcount
-        deleted = conn.execute(text(f"""
-            DELETE FROM semantic_observations o
-            USING entities e
-            WHERE e.id = o.entity_id AND {MISMATCH}""")).rowcount
+        if predicate is DANGLING:
+            deleted = conn.execute(text(f"""
+                DELETE FROM semantic_observations o
+                WHERE NOT EXISTS (SELECT 1 FROM entities e WHERE e.id = o.entity_id)""")).rowcount
+        else:
+            deleted = conn.execute(text(f"""
+                DELETE FROM semantic_observations o
+                USING entities e
+                WHERE e.id = o.entity_id AND {MISMATCH}""")).rowcount
         held = conn.execute(text(
             f"SELECT count(*) FROM {TABLE} WHERE batch_id = :b"), {"b": batch}).scalar()
 
@@ -146,7 +165,7 @@ def main() -> int:
         print("FAIL: the copy and the delete disagree — inspect before rerunning",
               file=sys.stderr)
         return 1
-    print("OK: live table holds no row whose declared class is not its entity's class")
+    print("OK: the targeted rows are quarantined and gone from the live table")
     return 0
 
 
