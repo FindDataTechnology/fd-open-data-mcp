@@ -39,8 +39,13 @@ written as recently as 2026-09-30 — a live writer, not history.
 - Affected code: `scripts/bulk_ingest_financials_aggregate.py`,
   `scripts/bulk_ingest_stock_financials.py`, plus tests. These are
   ConfigMap/script-delivered, so no image release is needed.
-- Existing mis-homed rows are **not** re-pointed here. Correction to an earlier
-  note: the 121 codes DO have stock entities — the earlier "no target" result was
-  my own bug (comparing ``00712`` without zero-filling to the canonical
-  ``000712``). Re-pointing is therefore feasible; it is tracked as its own step
-  because it must resolve (concept, date) collisions on the target entity first.
+- Existing mis-homed rows are **not** re-pointed here, and they must **not** be:
+  the codes are **Hong Kong tickers** (``00712``, ``01377``, ``01586`` — five
+  digits, with ``.HK`` siblings), so zero-filling them to six digits lands on an
+  unrelated A-share company (``00712`` -> ``000712`` 锦龙股份, ``02001`` ->
+  ``002001`` 新和成 …). A first pass counted 16 "targets" with zero key
+  collisions precisely because the collision is *between companies*, not between
+  rows — re-pointing would have attributed one company's statements to another.
+  The real prerequisite is creating HK stock entities for those five-digit codes
+  (tracked separately); until then the rows stay and the guard keeps the class
+  in its documented allowlist.

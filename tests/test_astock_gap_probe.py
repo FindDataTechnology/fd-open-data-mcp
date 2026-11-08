@@ -525,3 +525,32 @@ def test_identifier_integrity_deferred_pairs_are_explicit():
     assert ("stock", "exchange") not in mod.DEFERRED
     # only the load-bearing classes may stay deferred
     assert mod.DEFERRED == {("country", "city"), ("stock", "industry")}
+
+
+# ── code→entity maps must join entities (fix-financials-code-map-entity-join) ──
+
+def test_code_maps_join_entities_not_the_identifier_type():
+    """Every ingester's code→entity map must filter on the ENTITY's type.
+
+    Found 2026-11-08: the industry entity 医药生物 (801150) carried ``00712``
+    typed ``stock``, so ``000712`` mapped to the industry and that company's
+    financials were written onto it (8,500 rows, newest 2026-09-30 — a live
+    writer). The identifier's own ``entity_type`` is a claim, not a fact.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parents[1] / "scripts"
+    checked = [
+        "bulk_ingest_financials_aggregate.py",
+        "bulk_ingest_stock_financials.py",
+        "bulk_ingest_astock_daily.py",
+        "bulk_ingest_fund_nav_daily.py",
+        "bulk_ingest_stock_indicators_events.py",
+    ]
+    for name in checked:
+        src = (root / name).read_text()
+        assert "FROM entity_source_identifiers" in src, name
+        # every identifier read that feeds an entity map must be joined
+        for chunk in src.split("FROM entity_source_identifiers")[1:]:
+            head = chunk[:260]
+            assert "JOIN entities" in head, f"{name}: identifier read without JOIN entities → {head[:80]}"
