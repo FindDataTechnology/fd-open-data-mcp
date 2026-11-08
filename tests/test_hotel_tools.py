@@ -189,3 +189,46 @@ def test_series_points_carry_source_and_caliber_caveats():
     assert "不得据此外推全行业景气" in joined      # 星级口径
     assert "2,209" in joined                        # 50 城小计
     assert "2024Q3" in joined                       # 已停更
+
+
+def test_series_read_is_scoped_to_the_concept_entity_type():
+    """A series must not mix entity classes.
+
+    Measured 2026-11-08: 8,500 stock-typed observations sit on **industry**
+    entity ids (mislabelled fund/ETF codes), so a read filtering only by
+    concept+entity_id would surface a company's price/financials when asked
+    about an industry. The query pins ``o.entity_type`` to the concept's type.
+    """
+    captured = {}
+
+    class _S(_FakeSession):
+        def execute(self, stmt, params=None):
+            text = str(stmt)
+            if "FROM concepts" in text:
+                class _R:
+                    def mappings(self):
+                        class _M:
+                            def first(_self):
+                                return {"id": 1, "code": "hotel.cn.star_rated.occupancy.all.quarterly",
+                                        "name_zh": "星级饭店出租率", "name_en": "x", "unit": "%",
+                                        "frequency": "quarterly", "entity_type": "industry",
+                                        "category": None}
+                        return _M()
+                return _R()
+            captured["sql"] = text
+            captured["params"] = params or {}
+            return super().execute(stmt, params) if not captured else _Empty()
+
+    class _Empty:
+        def mappings(self):
+            class _M:
+                def all(self):
+                    return []
+            return _M()
+
+    tools = _tools(_S())
+    out = tools["hotel_series"](code="hotel.cn.star_rated.occupancy.all.quarterly",
+                                entity_id=2053)
+    assert "o.entity_type = :cet" in captured["sql"]
+    assert captured["params"]["cet"] == "industry"
+    assert out["unavailable"], out

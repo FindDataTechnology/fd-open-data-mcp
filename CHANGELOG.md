@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.50] - 2026-11-08
+- **fix(hotel_series)**: series 读取**按概念自身的 `entity_type` 约束**。实测 2026-11-08：
+  8,500 条 `stock` 型观测挂在**行业**实体 id 上（错标的港股/ETF 代码所致），而
+  `hotel_series` 支持"任意 code + 任意 entity_id"，只按 `concept_id`/`entity_id` 过滤——
+  拿行业 id 去查股票概念就能取到某公司的行情/财报。现查询固定加
+  `o.entity_type = :cet`（取 `concepts.entity_type`），让"概念是什么类型、观测就必须是什么类型"。
+  与 0.5.49 前的写入口修复（五个 ingest 的 code→entity 映射改 JOIN entities）一起，
+  把这条错配数据在**读、写两端**都挡住。
+
 ## [0.5.49] - 2026-11-08
 - **fix(source-credential-hygiene)**: 0.5.48 把 DSN 从**命令行**拿掉后，实测真派发
   （`cheap/crawl-policy-2659-20261108071716`）发现它仍在 **Job spec 的 env `value:`** 里——

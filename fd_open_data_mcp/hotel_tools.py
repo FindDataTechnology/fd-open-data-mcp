@@ -220,7 +220,12 @@ def register_hotel_tools(mcp: FastMCP) -> None:
                 return {"code": code, "unavailable": [_unavailable(
                     "该概念不存在", f"concepts.code={code!r} 未在册")]}
             params: dict[str, Any] = {"cid": concept["id"]}
-            where = ["o.concept_id = :cid"]
+            # A series belongs to entities of the concept's own type. Without this
+            # the read mixes classes: rows typed 'stock' sit on some industry
+            # entity ids (8,500 of them, measured 2026-11-08), so an industry id
+            # could surface a company's price/financials.
+            where = ["o.concept_id = :cid", "o.entity_type = :cet"]
+            params["cet"] = concept["entity_type"]
             if source_used:
                 where.append("o.source_used = :src")
                 params["src"] = source_used
