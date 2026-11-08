@@ -120,6 +120,73 @@ def test_never_dispatches_upstream(session, concept, monkeypatch):
     assert out["count"] == 1
 
 
+# ─── window bounds are parsed, never string-compared (audit 04-open-data #1) ──
+#
+# `date` is a text column holding the six shapes documented in
+# semantic/dates.py. Lexicographically `"2023" < "2023-01-01"` (a bare year
+# sorts BEFORE every day inside it) and `"2023-W20" > "2023-12-31"`
+# (`'W' > '1'`), so a plain `date >= start AND date <= end` dropped bare-year,
+# bare-month and ISO-week rows from every window — whole years missing, with no
+# gap, no note and no error. Every average/CAGR over such a series was wrong.
+
+SHAPE_DATES = ("2023", "2023-05", "2023-05-17", "2023-W20", "2026-W40", "LATEST")
+
+
+def _write_shapes(session, concept_id):
+    for d in SHAPE_DATES:
+        write_cache(session, concept_id, T, E, d, f"v-{d}", "USD", "worldbank")
+
+
+def test_window_returns_every_stored_date_shape_inside_it(session, concept):
+    _write_shapes(session, concept)
+
+    out = _call(concept, start="2023-01-01", end="2023-12-31")
+    dates = [p["date"] for p in out["points"]]
+
+    # Inside the window: the bare year, the bare month, the day, the ISO week
+    # (2023-W20 is Monday 2023-05-15), ordered by the period each starts.
+    assert dates == ["2023", "2023-05", "2023-W20", "2023-05-17"]
+    # Outside it: an ISO week of another year is not in this window...
+    assert "2026-W40" not in dates
+    # ...and the first-crawl sentinel cannot sit in any window, so it is named
+    # in `gaps` (same {start, end} shape as gap-fill) instead of vanishing.
+    assert "LATEST" not in dates
+    assert [g["start"] for g in out["gaps"]] == ["LATEST"]
+    assert out["gaps"][0]["reason"] == "unparseable_date"
+    assert "LATEST" in out["note"]
+
+
+def test_window_is_a_period_intersection_not_a_string_range(session, concept):
+    """A window inside the year still holds the annual row (that row answers
+    every date in 2023 — the same rule the point reader applies), while a
+    month/week that does not touch the window is excluded."""
+    _write_shapes(session, concept)
+
+    july = _call(concept, start="2023-07-01", end="2023-07-31")
+    assert [p["date"] for p in july["points"]] == ["2023"]
+    assert july.get("gaps") and july["gaps"][0]["start"] == "LATEST"
+
+    may = _call(concept, start="2023-05-01", end="2023-05-31")
+    assert [p["date"] for p in may["points"]] == ["2023", "2023-05", "2023-W20", "2023-05-17"]
+
+
+def test_bare_year_bounds_mean_that_year(session, concept):
+    _write_shapes(session, concept)
+
+    out = _call(concept, start="2023", end="2023")
+
+    assert [p["date"] for p in out["points"]] == ["2023", "2023-05", "2023-W20", "2023-05-17"]
+
+
+def test_no_unparseable_row_means_no_gaps_key(session, concept):
+    """The report is additive and only appears when there is something to say."""
+    write_cache(session, concept, T, E, "2020", "2.0e12", "USD", "worldbank")
+
+    out = _call(concept, start="2018-01-01", end="2022-12-31")
+
+    assert "gaps" not in out and "note" not in out
+
+
 # ─── fill_gaps: an explicit opt-in, never the default (design D3) ──────────
 
 

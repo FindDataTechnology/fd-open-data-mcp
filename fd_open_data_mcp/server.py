@@ -1518,7 +1518,12 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         ) if (resolved and concept is not None) else None
         if violation:
             return violation
-        rows = read_cache_range(s, cid, entity_type, entity_id, start, end)
+        # Stored dates that cannot be placed on the calendar (the LATEST
+        # first-crawl sentinel, garbage) are collected, not dropped: they are
+        # reported in `gaps` instead of silently vanishing from the window.
+        excluded: list[tuple[str, str]] = []
+        rows = read_cache_range(s, cid, entity_type, entity_id, start, end,
+                                excluded=excluded)
         if fill_gaps:
             from fd_open_data_mcp.fetch.gapfill import fill_gaps as _fill
 
@@ -1562,12 +1567,23 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
             "concept_id": cid, "entity_type": entity_type, "entity_id": entity_id,
             "start": start, "end": end, "count": len(points), "points": points,
         }
+        notes: list[str] = []
         if not points:
-            out["note"] = ("no cached observations in this window — a coverage gap, "
-                           "not a failure; no upstream fetch was attempted")
+            notes.append("no cached observations in this window — a coverage gap, "
+                         "not a failure; no upstream fetch was attempted")
         elif truncated:
-            out["note"] = (f"window holds more than {MAX_SERIES_ROWS} points; returned the most "
-                           f"recent {MAX_SERIES_ROWS} — narrow the window for the rest")
+            notes.append(f"window holds more than {MAX_SERIES_ROWS} points; returned the most "
+                         f"recent {MAX_SERIES_ROWS} — narrow the window for the rest")
+        if excluded:
+            # Same {start, end} shape as the gap-fill intervals, plus the reason:
+            # these dates are not a position in time, so no window can hold them.
+            out["gaps"] = [{"start": d, "end": d, "reason": reason}
+                           for d, reason in excluded]
+            notes.append("excluded stored date(s) with no calendar position: "
+                         + ", ".join(sorted({d for d, _ in excluded}))
+                         + " — reported here so the series is not silently short")
+        if notes:
+            out["note"] = " | ".join(notes)
         if resolved:
             scoping.record_hit(s, resolved["name"], len(points))
         return out

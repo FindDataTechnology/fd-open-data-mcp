@@ -37,7 +37,13 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import SemanticObservation
-from fd_open_data_mcp.semantic.dates import obs_month_of
+from fd_open_data_mcp.semantic.dates import (
+    SHAPE_LIKE_PATTERNS,
+    obs_month_of,
+    observation_period,
+    sql_bounds,
+    window_span,
+)
 from fd_open_data_mcp.visibility.coverage import bump_rollups
 
 # TTL by frequency: how long a cached observation is considered fresh.
@@ -299,26 +305,104 @@ def read_cache_all(
 def read_cache_range(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     start: str, end: str, source: Optional[str] = None,
+    excluded: Optional[list[tuple[str, str]]] = None,
 ) -> list:
     """Cached observations in ``[start, end]`` (inclusive), date-ordered.
 
-    Dates are stored as 'YYYY-MM-DD' strings, so lexicographic bounds work.
+    Window bounds are shape-aware, not plain string comparisons: the ``date``
+    column is text and carries the six shapes documented in
+    ``semantic/dates.py``, under which ``"2023" < "2023-01-01"`` (a bare year
+    sorts before every day inside it) and ``"2026-W40" > "2026-12-31"``
+    (``'W' > '1'``). A lexicographic ``date >= start AND date <= end``
+    therefore dropped every bare-year and ISO-week row from the window — whole
+    years missing, no gap, no note. The SQL predicate is widened to whole
+    years (``sql_bounds``) and this function keeps only the rows whose parsed
+    period (``observation_period``) actually intersects the window.
+
+    Period intersection — not period-start containment — matches the point
+    reader (``period_prefixes``): a stored ``"2023"`` is the annual value for
+    every date in 2023, so a window inside 2023 holds it.
+
+    ``excluded``: optional out-parameter. When passed, it receives
+    ``(date, reason)`` for every stored date of this (concept, entity) that
+    cannot be placed on the calendar — in-window garbage as well as shapes the
+    widened predicate cannot even reach (the ``LATEST`` first-crawl sentinel
+    sorts above every ``YYYY-…`` string). Those rows are never silently put in
+    a window; a caller that asks gets them reported instead of dropped.
+
     Prefers the dedup view; falls back to the base table. When several sources
     hold the same (date, granularity) point, the highest-ranked source's row is
     returned — one row per point, as plain reads expect. ``source`` narrows to
     one source's rows (base-table query).
     """
+    lo, hi = sql_bounds(start, end)
     if source is not None or not _use_view(session):
-        rows = _read_base_range(session, concept_id, entity_type, entity_id, start, end,
+        rows = _read_base_range(session, concept_id, entity_type, entity_id, lo, hi,
                                 source=source)
-        return _dedupe_range(rows, concept_id, session)
-    result = session.execute(text(
-        f"SELECT {_READ_COLS} FROM semantic_observations_read "
-        "WHERE concept_id=:c AND entity_type=:t AND entity_id=:e "
-        "AND date>=:s AND date<=:e2 ORDER BY date"
-    ), {"c": concept_id, "t": entity_type, "e": entity_id,
-        "s": start, "e2": end})
-    return [_ReadRow(r) for r in result]
+        rows = _dedupe_range(rows, concept_id, session)
+    else:
+        result = session.execute(text(
+            f"SELECT {_READ_COLS} FROM semantic_observations_read "
+            "WHERE concept_id=:c AND entity_type=:t AND entity_id=:e "
+            "AND date>=:s AND date<=:e2 ORDER BY date"
+        ), {"c": concept_id, "t": entity_type, "e": entity_id,
+            "s": lo, "e2": hi})
+        rows = [_ReadRow(r) for r in result]
+    if excluded is not None:
+        excluded.extend(_unmappable_dates(session, concept_id, entity_type, entity_id,
+                                          source=source))
+    return _window_only(rows, start, end, excluded)
+
+
+def _window_only(
+    rows: list, start: str, end: str,
+    excluded: Optional[list[tuple[str, str]]] = None,
+) -> list:
+    """Keep the rows whose parsed period intersects ``[start, end]``.
+
+    A row that fits no shape is dropped from the window (it has no position)
+    and, when the caller asked for a report, appended to ``excluded`` with its
+    reason instead of vanishing. An unparseable *window* keeps the previous
+    lexicographic meaning — the rows already satisfy it.
+    """
+    span = window_span(start, end)
+    if span is None:
+        return list(rows)
+    decorated = []
+    for r in rows:
+        period = observation_period(r.date)
+        if period is None:
+            if excluded is not None:
+                excluded.append((r.date, "unparseable_date"))
+            continue
+        if period[1] >= span[0] and period[0] <= span[1]:
+            decorated.append((period[0], r.date, r))
+    decorated.sort(key=lambda item: (item[0], item[1]))
+    return [r for _, _, r in decorated]
+
+
+def _unmappable_dates(
+    session: Session, concept_id: int, entity_type: str, entity_id: int,
+    source: Optional[str] = None,
+) -> list[tuple[str, str]]:
+    """Stored dates for one point that fit none of ``semantic/dates.py``'s shapes.
+
+    Found by shape, not by position: the ``LATEST`` sentinel sorts above every
+    ``YYYY-…`` string, so no widened window can reach it, yet a caller must be
+    able to tell "window empty" from "this point's date is not a date". Only
+    runs when a caller asks for the report (``read_cache_range(excluded=...)``),
+    so write-path lookups never pay for it.
+    """
+    mappable = or_(*[SemanticObservation.date.like(p) for p in SHAPE_LIKE_PATTERNS])
+    q = session.query(SemanticObservation.date).filter(
+        SemanticObservation.concept_id == concept_id,
+        SemanticObservation.entity_type == entity_type,
+        SemanticObservation.entity_id == entity_id,
+        ~mappable,
+    )
+    if source is not None:
+        q = q.filter(SemanticObservation.source_used == source)
+    return [(d, "unparseable_date") for d in sorted({row[0] for row in q.all()}) if d]
 
 
 def _dedupe_range(rows: list, concept_id: int, session: Session) -> list:
@@ -388,6 +472,14 @@ def _read_base_range(
     start: str, end: str, source: Optional[str] = None,
     granularity: Optional[str] = None,
 ) -> list[SemanticObservation]:
+    """Base-table rows whose ``date`` satisfies the given bounds as STRINGS.
+
+    The comparison here is lexicographic, so it is only correct for the bounds
+    the caller supplies. The window reader passes ``dates.sql_bounds(...)``
+    (whole-year bounds) and then decides each row on its parsed period; the
+    write paths pass canonical ``min(rows)``/``max(rows)`` keys, which are
+    exact by construction.
+    """
     q = (
         session.query(SemanticObservation)
         .filter(

@@ -225,13 +225,31 @@ class _ProxyClient:
             return None
         try:
             data = json.dumps(payload).encode()
+            headers = {"Content-Type": "application/json"}
+            # The control plane requires a shared token on /acquire and /release.
+            # Without it every call is refused and we silently egress direct.
+            token = os.environ.get("PROXY_CONTROL_TOKEN")
+            if token:
+                headers["X-Management-Token"] = token
             req = urllib.request.Request(
                 f"{base}{path}", data=data,
-                headers={"Content-Type": "application/json"},
+                headers=headers,
                 method="POST",
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 return json.loads(resp.read())
+        except urllib.error.HTTPError as e:
+            # The forwarder is UP and refusing us: 401 = our PROXY_CONTROL_TOKEN
+            # does not match its MANAGEMENT_TOKEN, 503 = none configured there.
+            # That is a configuration fault, not "no healthy proxy". Logging it
+            # at warning level would hide it for weeks — the crawl keeps working,
+            # just without rotation.
+            logger.error(
+                "proxy_client %s rejected with %s — check PROXY_CONTROL_TOKEN "
+                "against the forwarder's MANAGEMENT_TOKEN; egressing direct",
+                path, e.code,
+            )
+            return None
         except (urllib.error.URLError, TimeoutError, OSError, ValueError) as e:
             logger.warning("proxy_client %s failed: %s — egressing direct", path, e)
             return None
