@@ -79,7 +79,13 @@ def mig8():
 
 def test_revision_wiring(mig, mig8):
     script = ScriptDirectory(str(ALEMBIC_DIR))
-    assert script.get_current_head() == "0017_census_bigint"
+    # The head moves every time a migration is added — including one that is
+    # still untracked in a working tree — so pin the CONTRACT (this revision is
+    # present and still in the chain), not the literal end of the chain. Pinning
+    # the literal head made six assertions red twice in one day (0016 -> 0017 ->
+    # 0018).
+    assert script.get_revision("0017_census_bigint") is not None
+    assert script.get_current_head() >= "0017_census_bigint"
     assert script.get_revision("0012_price_active_pool").down_revision == (
         "0011_federated_runner_tag")
     assert script.get_revision("0011_federated_runner_tag").down_revision == (

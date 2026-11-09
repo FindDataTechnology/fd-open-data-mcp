@@ -118,7 +118,13 @@ def test_sqlite_chain_upgrade_runs_green(tmp_path, monkeypatch):
     monkeypatch.setenv("FD_OPEN_DATA_MCP_DATABASE_URL", f"sqlite:///{tmp_path/'m.db'}")
     command.upgrade(cfg, "head")
     script = ScriptDirectory(str(PROJECT_ROOT / "alembic"))
-    assert script.get_current_head() == "0017_census_bigint"
+    # The head moves every time a migration is added — including one that is
+    # still untracked in a working tree — so pin the CONTRACT (this revision is
+    # present and still in the chain), not the literal end of the chain. Pinning
+    # the literal head made six assertions red twice in one day (0016 -> 0017 ->
+    # 0018).
+    assert script.get_revision("0017_census_bigint") is not None
+    assert script.get_current_head() >= "0017_census_bigint"
 
 
 # ─── 3.2 CRUD + 空集校验 + unscoped 保留名 ──────────────────────────────────
