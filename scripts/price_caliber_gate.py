@@ -463,13 +463,42 @@ def selfcheck() -> int:
     checks.append(("判据二能红", any(v.code == "INDEX_SERIES_ABSENT" for v in w2)))
     checks.append(("判据三能红", any(v.code == "CALIBER_DIVERGENCE" for v in w3)))
 
+    # 判据四：开关断言。四种情形都要验——否则这条判据本身也可能是恒绿的。
+    import os as _os
+
+    _prev = _os.environ.get("PRICE_CALIBER_ENFORCEMENT")
+    try:
+        _os.environ["PRICE_CALIBER_ENFORCEMENT"] = "warn"
+        e_warn, _ = judge_enforcement_mode()
+        checks.append(("判据四：warn 时报违规",
+                       any(v.code == "ENFORCEMENT_STILL_WARN" for v in e_warn)))
+
+        del _os.environ["PRICE_CALIBER_ENFORCEMENT"]
+        e_unset, _ = judge_enforcement_mode()
+        checks.append(("判据四：未设置按 warn 处理并报违规",
+                       any(v.code == "ENFORCEMENT_STILL_WARN" for v in e_unset)))
+
+        _os.environ["PRICE_CALIBER_ENFORCEMENT"] = "refuse"
+        e_refuse, _ = judge_enforcement_mode()
+        checks.append(("判据四：refuse 时放行", e_refuse == []))
+
+        _os.environ["PRICE_CALIBER_ENFORCEMENT"] = "maybe"
+        e_bad, _ = judge_enforcement_mode()
+        checks.append(("判据四：非法取值报违规",
+                       any(v.code == "ENFORCEMENT_MODE_INVALID" for v in e_bad)))
+    finally:
+        if _prev is None:
+            _os.environ.pop("PRICE_CALIBER_ENFORCEMENT", None)
+        else:
+            _os.environ["PRICE_CALIBER_ENFORCEMENT"] = _prev
+
     bad = [name for name, ok in checks if not ok]
     for name, ok in checks:
         print(f"  {'✓' if ok else '✗'} {name}")
     if bad:
         print(f"✗ selfcheck 不成立：{bad}", file=sys.stderr)
         return 1
-    print("✓ selfcheck 通过：三条判据该绿时绿、该红时红")
+    print("✓ selfcheck 通过：四条判据该绿时绿、该红时红（含开关断言的四种取值）")
     return 0
 
 
@@ -504,6 +533,75 @@ def _reg_for_selfcheck(SourceDeclaration, WatermarkProbe):
                           _family_owner=owner)
 
 
+def _emit_violations_before_fatal(report: "Report") -> None:
+    """fatal 退出前，把已经得出的违规先吐出来（写 stderr）。
+
+    为什么必须这么做：探针有几条判据**不依赖库**（判据四是纯环境断言）。库或查询失败时
+    直接 `return 2`，会把这些已经确凿的违规一起吞掉——于是"库挂了"掩盖了"开关还停在 warn"。
+    退出码 2 表示"这次跑不完整"，不等于"没有任何违规成立"。
+    """
+    if report.ok:
+        return
+    print("\n（以下违规与库无关，仍然成立）", file=sys.stderr)
+    for v in report.violations:
+        print(v.line(), file=sys.stderr)
+
+
+def judge_enforcement_mode() -> tuple[list[Violation], dict]:
+    """判据四：口径强制模式必须已收敛到 `refuse`（add-price-supply-and-caliber 6.3）。
+
+    ## 为什么这是一条判据而不是一条建议
+
+    `warn` 是迁移期的观察窗：判据不一致时只告警、不拦。它的存在是有意的，但它**不能是终点**
+    ——一个长期停在 `warn` 的开关，等于把"口径不一致"降级成日志噪音，而真正需要它的时刻
+    恰恰是没人看日志的时候。
+
+    本判据把"还没切"变成可见的违规：只要环境里不是 `refuse`，探针就红。这样收敛工作
+    不会因为"反正没报错"而被无限期推后。
+
+    ## 只读
+
+    只读环境变量，不改配置、不写文件。切开关是运维动作（6.3 的人工部分），本判据负责
+    让"没切"这件事无法被忽略。
+    """
+    import os
+
+    raw = os.environ.get("PRICE_CALIBER_ENFORCEMENT")
+    mode = (raw or "warn").strip().lower()
+    checked = {"mode": mode, "raw": raw}
+
+    if mode == "refuse":
+        return [], checked
+
+    if mode not in ("warn", "refuse"):
+        return [
+            Violation(
+                code="ENFORCEMENT_MODE_INVALID",
+                judgment="enforcement",
+                detail=f"PRICE_CALIBER_ENFORCEMENT={raw!r} 不是合法取值（只认 warn / refuse）",
+                fix="改为 refuse；写错词会让开关静默失效，比不设开关更危险",
+                evidence=checked,
+            )
+        ], checked
+
+    return [
+        Violation(
+            code="ENFORCEMENT_STILL_WARN",
+            judgment="enforcement",
+            detail=(
+                "PRICE_CALIBER_ENFORCEMENT 仍是 warn"
+                f"{'（未设置，按默认 warn 处理）' if raw is None else ''}："
+                "口径不一致只告警不拦，等于把不一致降级成日志噪音"
+            ),
+            fix=(
+                "先完成 6.1（三路收敛到同一 source_id 与同一水位），再把该变量切到 refuse；"
+                "收敛前后端口径不一致是已知状态，切早了会拦住正常结算"
+            ),
+            evidence=checked,
+        )
+    ], checked
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="Price calibre consistency gate (read-only)")
     ap.add_argument("--trading", default=None, help="交易路 source_id")
@@ -531,6 +629,13 @@ def main(argv: Sequence[str] | None = None) -> int:
         print(f"[fatal] 声明不可加载: {exc}", file=sys.stderr)
         return 2
 
+    report = Report()
+    # 判据四**不碰库**，所以在连库之前先跑：库不可达不该顺手掩盖"开关还停在 warn"。
+    # 一个不依赖外部资源的判据，因为别的判据跑不了而沉默，是最没道理的一种沉默。
+    v4, c4 = judge_enforcement_mode()
+    for v in v4:
+        report.add(v)
+
     try:
         from fd_open_data_mcp.db import get_database
 
@@ -538,9 +643,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         session = get_database().get_session()
     except Exception as exc:
         print(f"[fatal] 库不可达: {exc}", file=sys.stderr)
+        _emit_violations_before_fatal(report)
         return 2
 
-    report = Report()
     paths = {
         "trading": args.trading or _env_source(PATH_ENV["trading"]),
         "research": args.research or _env_source(PATH_ENV["research"]),
@@ -553,13 +658,15 @@ def main(argv: Sequence[str] | None = None) -> int:
         v3, c3 = judge_divergence(session, reg, today, args.threshold_pct)
     except Exception as exc:  # 探针自身故障必须与"有违规"区分
         print(f"[fatal] 探针执行失败: {exc}", file=sys.stderr)
+        _emit_violations_before_fatal(report)
         return 2
     finally:
         session.close()
 
     for v in v1 + v2 + v3:
         report.add(v)
-    report.checked = {"three_paths": c1, "index_series": c2, "cross_source": c3}
+    report.checked = {"three_paths": c1, "index_series": c2,
+                      "cross_source": c3, "enforcement": c4}
 
     if args.json:
         print(json.dumps(report.to_dict(), ensure_ascii=False, indent=2))

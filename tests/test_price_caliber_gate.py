@@ -126,8 +126,13 @@ def test_empty_overlap_is_not_a_pass(session, monkeypatch, tmp_path):
 
 
 def test_green_when_everything_converges(session, monkeypatch, tmp_path):
-    """全绿 = 同源同水位 + 指数有观测 + 无可比分歧。"""
+    """全绿 = 同源同水位 + 指数有观测 + 无可比分歧 + **开关已切 refuse**。
+
+    第四条是 change1 6.3 加的：只把数据理齐、开关还停在 warn，不算收敛完成——
+    那等于把"口径不一致"永久降级成日志噪音。
+    """
     monkeypatch.setenv("FD_OPEN_DATA_MCP_DATABASE_URL", f"sqlite:///{tmp_path/'green.db'}")
+    monkeypatch.setenv("PRICE_CALIBER_ENFORCEMENT", "refuse")
     c = Concept(code="price.close", entity_type="stock", frequency="daily", unit="CNY")
     ci = Concept(code="price.close", entity_type="index", frequency="daily", unit="point")
     e = Entity(entity_type="stock", code="600036", name_zh="招商银行")
@@ -181,3 +186,61 @@ def test_env_fallback_picks_up_paths(store, monkeypatch):
     # 三路已从 env 解析到 → 不该再报"未配置"；剩下的红必须来自指数与价差
     assert "PATH_SOURCE_UNSPECIFIED" not in out
     assert "INDEX_SERIES_ABSENT" in out
+
+
+# ------------------------------------ 判据四：开关断言（change1 6.3）
+
+
+def test_warn_mode_is_a_violation(monkeypatch):
+    """开关停在 warn 就是违规——它不是"暂时没关系"，是"还没收敛完"。"""
+    from scripts.price_caliber_gate import judge_enforcement_mode
+
+    monkeypatch.setenv("PRICE_CALIBER_ENFORCEMENT", "warn")
+    vs, checked = judge_enforcement_mode()
+    assert any(v.code == "ENFORCEMENT_STILL_WARN" for v in vs)
+    assert checked["mode"] == "warn"
+
+
+def test_unset_mode_defaults_to_warn_and_is_a_violation(monkeypatch):
+    from scripts.price_caliber_gate import judge_enforcement_mode
+
+    monkeypatch.delenv("PRICE_CALIBER_ENFORCEMENT", raising=False)
+    vs, checked = judge_enforcement_mode()
+    assert any(v.code == "ENFORCEMENT_STILL_WARN" for v in vs)
+    assert checked["raw"] is None
+    assert "未设置" in vs[0].detail
+
+
+def test_invalid_mode_is_a_violation(monkeypatch):
+    from scripts.price_caliber_gate import judge_enforcement_mode
+
+    monkeypatch.setenv("PRICE_CALIBER_ENFORCEMENT", "maybe")
+    vs, _ = judge_enforcement_mode()
+    assert any(v.code == "ENFORCEMENT_MODE_INVALID" for v in vs)
+
+
+def test_refuse_mode_produces_no_enforcement_violation(monkeypatch):
+    from scripts.price_caliber_gate import judge_enforcement_mode
+
+    monkeypatch.setenv("PRICE_CALIBER_ENFORCEMENT", "refuse")
+    vs, checked = judge_enforcement_mode()
+    assert vs == [] and checked["mode"] == "refuse"
+
+
+def test_enforcement_violation_is_visible_even_when_db_is_unreachable(monkeypatch, tmp_path):
+    """库不可达（exit 2）时，判据四的违规仍必须出现在输出里。
+
+    这条钉的是设计意图：一个不依赖外部资源的判据，不该因为别的判据跑不了而沉默。
+    """
+    import contextlib
+    import io
+
+    from scripts.price_caliber_gate import main
+
+    monkeypatch.setenv("FD_OPEN_DATA_MCP_DATABASE_URL", f"sqlite:///{tmp_path/'empty.db'}")
+    monkeypatch.delenv("PRICE_CALIBER_ENFORCEMENT", raising=False)
+    err = io.StringIO()
+    with contextlib.redirect_stderr(err):
+        rc = main(["--today", "2026-07-20"])
+    assert rc == 2  # 库确实跑不起来
+    assert "ENFORCEMENT_STILL_WARN" in err.getvalue()
