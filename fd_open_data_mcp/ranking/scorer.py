@@ -61,24 +61,80 @@ def ensure_rankings_for_concept(session: Session, concept_id: int) -> None:
     session.commit()
 
 
+def source_frequencies_for_concept(session: Session, concept_id: int) -> dict[str, str]:
+    """source name → that source's function cadence for this concept.
+
+    A concept can be served by sources of different cadence (a yearly World Bank
+    series and a daily akshare series for the same daily concept). Freshness fit
+    has to be per source or it becomes the same constant multiplier for every
+    candidate — which is what it used to be, so it could not reorder anything.
+
+    First binding wins when a source has several columns for one concept; a
+    function with no ``frequency`` is simply absent from the map and the caller
+    falls back to the concept's cadence (unchanged behaviour for those rows).
+    """
+    from fd_open_data_mcp.models import ConceptBinding
+
+    out: dict[str, str] = {}
+    for b in session.query(ConceptBinding).filter_by(concept_id=concept_id).all():
+        fn = session.get(Function, b.column.function_id)
+        if fn is None or not fn.frequency or fn.source is None:
+            continue
+        out.setdefault(fn.source.name, fn.frequency)
+    return out
+
+
 def composite_score(row: SourceRanking, freshness_fit: Optional[float] = None) -> float:
     f = freshness_fit if freshness_fit is not None else row.freshness_fit
     return row.quality * row.accessibility * f
 
 
-def freshness_fit_for(concept_frequency: Optional[str], requested_date: Optional[str] = None) -> float:
-    """Higher score when the source frequency matches the request's recency.
+#: A request this recent (in days) counts as "intraday/near-real-time". A yearly
+#: series cannot answer it at all, which is the one rule the spec states
+#: explicitly ("a yearly source is skipped for an intraday request").
+_INTRADAY_WINDOW_DAYS = 2.0
 
-    v1 coarse heuristic (spec source-ranking: a yearly source is skipped for an
-    intraday request). A date-aware refinement is a future improvement.
+#: Fit for a cadence that cannot possibly answer a near-real-time request.
+_INTRADAY_MISMATCH_FIT = 0.05
+
+
+def _request_is_intraday(requested_date: Optional[str]) -> bool:
+    """True when ``requested_date`` is今天/最近两天（即"要当下"的请求）。"""
+    if not requested_date:
+        return False
+    raw = str(requested_date).strip()
+    for fmt, width in (("%Y-%m-%d", 10), ("%Y-%m-%dT%H:%M:%S", 19), ("%Y-%m", 7), ("%Y", 4)):
+        try:
+            when = datetime.strptime(raw[:width], fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        return (datetime.now(timezone.utc) - when).total_seconds() <= _INTRADAY_WINDOW_DAYS * 86400
+    return False
+
+
+def freshness_fit_for(frequency: Optional[str], requested_date: Optional[str] = None) -> float:
+    """Higher score when a source's cadence matches how recent the request is.
+
+    ``frequency`` is the **source's** cadence when the caller knows it (a
+    function's own ``frequency``), else the concept's as a fallback — see
+    :func:`rank_sources_for_concept`. Passing only the concept's frequency for
+    every candidate made this a constant multiplier, and a constant cannot
+    reorder anything, so the documented rule ("a yearly source is skipped for an
+    intraday request") did not exist in the code.
+
+    ``requested_date`` closes the other half: a yearly series asked for *today*
+    is demoted hard (0.05), while the same series asked for two years ago keeps
+    its normal 0.2 — "cannot answer this request" is a property of the pair, not
+    of the cadence alone.
     """
-    freq = (concept_frequency or "").lower()
+    freq = (frequency or "").lower()
+    intraday = _request_is_intraday(requested_date)
     if freq in ("daily", "irregular", "realtime"):
         return 0.9
     if freq in ("weekly", "monthly", "quarterly"):
         return 0.5
     if freq == "yearly":
-        return 0.2
+        return _INTRADAY_MISMATCH_FIT if intraday else 0.2
     return 0.5
 
 
@@ -124,11 +180,15 @@ def rank_sources_for_concept(
         )
         raise ConceptDeprecated(concept, find_canonical_replacement(session, concept))
     ensure_rankings_for_concept(session, concept_id)
-    freq = concept.frequency if concept else None
-    ff = freshness_fit_for(freq, requested_date)
+    concept_freq = concept.frequency if concept else None
+    # Per-source cadence where the binding declares one; the concept's cadence is
+    # only a fallback. Using the concept's for everyone made this a constant
+    # factor (audit 04 §10) — it could not change any ordering.
+    src_freqs = source_frequencies_for_concept(session, concept_id)
     rows = session.query(SourceRanking).filter_by(concept_id=concept_id).all()
     scored = []
     for r in rows:
+        ff = freshness_fit_for(src_freqs.get(r.source) or concept_freq, requested_date)
         scored.append({
             "source": r.source, "score": round(composite_score(r, ff), 4),
             "quality": r.quality, "accessibility": r.accessibility,
