@@ -112,6 +112,37 @@ def _build_params(fn: Function, identifier: str, date: str, binding=None) -> dic
     return params
 
 
+def _missing(value) -> bool:
+    """True when ``value`` means "no data" rather than "data worth keeping".
+
+    Covers ``None``, float ``NaN`` (including numpy's), ``pandas.NaT`` and
+    ``pandas.NA``. The ``value != value`` test is the portable one: NaN is the
+    only thing that is not equal to itself, and both NaT and NA also fail
+    equality. ``None`` is checked first because ``None == None`` is True.
+
+    Why this exists: the legacy DataFrame lookup returns the raw cell, and the
+    caller only rejected ``if value is None``. A NaN sailed through, was written
+    as ``str(value)`` → the literal text ``"nan"``, and rows whose period has
+    elapsed are period-final and never re-fetched — so one bad write made
+    ``"nan"`` a permanent "observation" that also recorded a *successful* fetch.
+    """
+    if value is None:
+        return True
+    # pandas 的 NA/NaT 让 `value != value` 返回 pd.NA 而不是 bool，`bool(pd.NA)`
+    # 会抛 TypeError——所以走 pandas 自己的判据（pandas 已在函数入口按需 import）。
+    try:
+        import pandas as pd
+
+        if pd.isna(value) is True:
+            return True
+    except (ImportError, TypeError, ValueError):
+        pass
+    try:
+        return bool(value != value)
+    except (TypeError, ValueError):
+        return False
+
+
 def _extract_value(result, column_name: str, date: str, source: Optional[str] = None, command: Optional[str] = None,
                    identifier: Optional[str] = None):
     """Value extraction: delegate to the adapter registry if one is registered for
@@ -143,11 +174,13 @@ def _extract_value(result, column_name: str, date: str, source: Optional[str] = 
         df = df.set_index(date_col)
     idx_str = [str(i) for i in df.index]
     if date in idx_str:
-        return df.iloc[idx_str.index(date)][column_name]
+        cell = df.iloc[idx_str.index(date)][column_name]
+        return None if _missing(cell) else cell
     # tolerate YYYY-MM-DD vs YYYYMMDD
     compact = date.replace("-", "")
     if compact in idx_str:
-        return df.iloc[idx_str.index(compact)][column_name]
+        cell = df.iloc[idx_str.index(compact)][column_name]
+        return None if _missing(cell) else cell
     return None
 
 
