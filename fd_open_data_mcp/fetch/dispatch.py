@@ -182,7 +182,12 @@ def dispatch_one(
     obs = read_cache(session, concept_id, entity_type, entity_id, date, source=source,
                      frequency=concept.frequency)
     if obs is not None and not is_stale(obs, concept.frequency):
-        return {"date": date, "value": obs.value, "unit": obs.unit,
+        # `value` is a VARCHAR column written as str(value), so a cache hit would
+        # otherwise hand back "1650.0" where a fresh fetch hands back 1650.0 —
+        # in the SAME read() call, since one date can be cached and the next not.
+        # Clients then hit `TypeError: can't concat float to str` on sum().
+        # The range path already coerces (`_coerce_value`); this is the missed one.
+        return {"date": date, "value": _coerce_value(obs.value), "unit": obs.unit,
                 "source_used": obs.source_used, "from_cache": True}
 
     # Why a read can come back empty, kept distinct so callers can act:
