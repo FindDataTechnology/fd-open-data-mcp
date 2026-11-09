@@ -516,15 +516,34 @@ def federated_read(
         return [{"date": str(dates[0]), "value": None, **payload}]
 
     by_year = {r["year"]: r for r in _year_rows(payload, source_db, entry.get("unit"))}
-    return [
-        {
+    out: list[dict] = []
+    for d in dates:
+        row = by_year.get(str(d)[:4])
+        if row is None:
+            # The upstream answered, but without this year. Saying `value: None`
+            # and nothing else lets a caller read it as "the value is null" — and
+            # an agent reports "China's 1990 value was null" instead of "not
+            # covered". The local path always labels absence
+            # (`dispatch.py` returns `error` + `detail` + `series_state`), and this
+            # module's own docstring promises "every failure is an explicit error
+            # payload, never empty values" (audit 04 §12).
+            out.append({
+                "date": d,
+                "value": None,
+                "unit": entry.get("unit"),
+                "source_used": source_db,
+                "error": "not_covered_upstream",
+                "detail": (f"{source_db} returned no row for {str(d)[:4]}; "
+                           "this year is not covered, not a null value"),
+            })
+            continue
+        out.append({
             "date": d,
-            "value": by_year.get(str(d)[:4], {}).get("value"),
-            "unit": by_year.get(str(d)[:4], {}).get("unit", entry.get("unit")),
+            "value": row.get("value"),
+            "unit": row.get("unit", entry.get("unit")),
             "source_used": source_db,
-        }
-        for d in dates
-    ]
+        })
+    return out
 
 
 def _federated_yearbook_read(
