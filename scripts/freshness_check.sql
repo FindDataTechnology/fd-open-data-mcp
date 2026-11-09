@@ -7,11 +7,28 @@
 -- 用法： psql "$FD_OPEN_DATA_MCP_DATABASE_URL" -f scripts/freshness_check.sql
 -- 判读：滞后/无数据 里，先看该概念有没有被 enabled 策略覆盖（第二段查询）——
 --       无策略覆盖的"缺口"是尚未接入，不是故障。
-with obs as (
+-- window_start 用**字面量**（如 2025-10-05）。写 current_date 表达式会让
+-- postgres_fdw 拒绝下推，退化成搬运分片全表 4825 万行（EXPLAIN 实证）。
+\set window_start 2025-10-05
+
+with local_obs as materialized (
   select concept_id, max(date) as latest
   from semantic_observations
-  where date ~ '^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$'   -- YYYY | YYYY-MM | YYYY-MM-DD
+  where date ~ '^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$'
     and date not like '%-W%'
+  group by 1
+),
+shard_obs as materialized (
+  -- MATERIALIZED 必须：不写它，planner 把 GROUP BY 拆回本地，只下推 WHERE，
+  -- 仍要搬 487 万行过 tailnet。
+  select concept_id, max(date) as latest
+  from ft_sem_obs_xinru3
+  where date > :'window_start'
+  group by 1
+),
+obs as (
+  select concept_id, max(latest) as latest
+  from (select * from local_obs union all select * from shard_obs) u
   group by 1
 ),
 exp as (
@@ -52,10 +69,21 @@ from judged group by 1
 order by 滞后 desc, 无数据 desc, 1;
 
 -- 第二段：只看「被 enabled 策略覆盖、但滞后或无数据」的概念（真正的待办）
-with obs as (
+with local_obs as materialized (
   select concept_id, max(date) as latest
   from semantic_observations
   where date ~ '^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$' and date not like '%-W%'
+  group by 1
+),
+shard_obs as materialized (
+  select concept_id, max(date) as latest
+  from ft_sem_obs_xinru3
+  where date > :'window_start'
+  group by 1
+),
+obs as (
+  select concept_id, max(latest) as latest
+  from (select * from local_obs union all select * from shard_obs) u
   group by 1
 ),
 cov as (
@@ -111,3 +139,50 @@ where p.enabled
   and w.runs >= 3
   and w.yields = 0
 order by w.runs desc, p.id;
+
+-- ── 第四段：同策略内的落后者（局部失效）───────────────────────────────────
+-- 前三段是整体尺度；这一段专抓「同伴都好了，只有它没好」。
+-- 2026-11-09 实例：策略 4 的 8 个概念里 6 个到 2025-12-31，只有
+-- co2_emissions / co2.per_capita 为空——整体统计只会把它算进"yearly 128 个滞后"，
+-- 看不出这是一处局部失效（源侧标识符过期）。
+with local_obs as materialized (
+  select concept_id, max(date) as latest
+  from semantic_observations
+  where date ~ '^[0-9]{4}(-[0-9]{2}(-[0-9]{2})?)?$' and date not like '%-W%'
+  group by 1
+),
+shard_obs as materialized (
+  select concept_id, max(date) as latest
+  from ft_sem_obs_xinru3
+  where date > :'window_start'
+  group by 1
+),
+obs as (
+  select concept_id, max(latest) as latest
+  from (select * from local_obs union all select * from shard_obs) u
+  group by 1
+),
+cov as (
+  select p.id as pid, p.name as pname,
+         jsonb_array_elements_text(p.concept_ids)::int as cid
+  from crawl_policies p
+  where p.enabled and p.concept_ids is not null
+),
+joined as (
+  select cov.pid, cov.pname, c.id, c.code, c.frequency, o.latest
+  from cov join concepts c on c.id = cov.cid
+  left join obs o on o.concept_id = c.id
+),
+bench as (
+  select pid, frequency, max(latest) as best, count(*) as members
+  from joined group by 1, 2 having count(*) >= 3
+)
+select j.pid, left(j.pname, 26) as policy, j.id as concept,
+       left(j.code, 30) as code, j.frequency,
+       coalesce(j.latest, '(none)') as latest,
+       b.best as 同伴最好, b.members as 同组数
+from joined j
+join bench b on b.pid = j.pid and b.frequency = j.frequency
+where b.best is not null
+  and (j.latest is null or j.latest < b.best)
+order by j.pid, j.frequency, j.id;
