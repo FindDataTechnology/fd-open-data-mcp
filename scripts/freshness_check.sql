@@ -81,3 +81,33 @@ where (c.frequency in ('quarter','quarterly')
    or (c.frequency = 'daily'
          and (o.latest is null or o.latest < (current_date - 1)::text))
 order by cov.pid, c.id;
+
+-- ── 第三段：策略出数率（第二道闸门）─────────────────────────────────────────
+-- 第一段问"数据停了吗"，这一段问"策略在跑但一行没出吗"。
+-- 2026-11-09 的教训：四个 enabled 策略连续 7–8 轮全部 skipped、零产出、零失败，
+-- 状态看着都"成功"，只有出数率能揭示它们空转。
+-- 判读：轮次≥3 且 出数=0 即空转；跳过占满且 detail 为空的是"跳过原因不可见"
+--（0.5.57 起 detail 会写明原因，此列可用来确认镜像是否已更新）。
+with w as (
+  select policy_id,
+         count(*)                                                as runs,
+         count(*) filter (where coalesce(rows_new, 0) > 0)        as yields,
+         count(*) filter (where status in ('redundant','no_op'))  as skipped,
+         count(*) filter (where status = 'failed')                as failed,
+         count(*) filter (where status = 'zero_yield')            as zero_yield,
+         max(started_at) filter (where coalesce(rows_new,0) > 0)  as last_yield,
+         count(*) filter (where status in ('redundant','no_op') and detail is null) as skip_without_reason
+  from policy_runs
+  where started_at > now() - interval '7 day'
+  group by 1
+)
+select p.id, left(p.name, 28) as policy, p.executor,
+       w.runs as 轮次, w.yields as 出数, w.skipped as 跳过,
+       w.failed as 失败, w.zero_yield as 零产出,
+       w.skip_without_reason as 跳过无原因,
+       to_char(w.last_yield, 'MM-DD HH24:MI') as 最后出数
+from w join crawl_policies p on p.id = w.policy_id
+where p.enabled
+  and w.runs >= 3
+  and w.yields = 0
+order by w.runs desc, p.id;
