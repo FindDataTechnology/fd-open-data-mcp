@@ -103,3 +103,64 @@ jobs:
 
       - name: Vocabulary conformance tests
         run: pytest tests/test_vocabulary_conformance.py -v
+
+  # add-price-supply-and-caliber 2.5：价格口径探针的**自检**进 CI。
+  #
+  # 为什么只跑 --selfcheck 而不跑真实判定：CI 里没有生产数据，三条判据会因「没有数据」
+  # 而红——那是环境红，不是口径红。把两者塞进同一个作业，得到的闸要么永远红（没人再看）
+  # 要么永远绿（不设防）。这里验的是闸**本身可信**：造一个全绿场景与一个必红场景，
+  # 断言三条判据该绿时绿、该红时红。
+  #
+  # 真实环境的一致性判定（三路同源 / 指数可得 / 跨源价差）仍由人工或调度在连得上分片库
+  # 的环境里跑：.venv/bin/python scripts/price_caliber_gate.py
+  caliber-gate-selfcheck:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install (no data extras — selfcheck only needs stdlib + sqlalchemy + pyyaml)
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e . pyyaml
+
+      - name: Price calibre gate selfcheck (三条判据该绿时绿、该红时红)
+        run: python scripts/price_caliber_gate.py --selfcheck
+
+      - name: Gate unit tests
+        run: pytest tests/test_price_caliber_gate.py tests/test_price_source_registry.py -q
+
+  # harden-knowledge-surfaces 5.1：知识面完整性契约的断言进 CI。
+  #
+  # 实测背景：本仓四支 checker（`check_vocabulary_conformance` /
+  # `check_identifier_integrity` / `check_observation_entity_class` /
+  # `price_caliber_gate`）里只有第一支被 workflow 调用过——闸写在仓里但没人跑，
+  # 正是审计说的「闸门宣称的 ≠ 闸门检查的」。契约要求的三条不变量若只留在测试目录，
+  # 会重复同一个病。这个作业把它们真正挂在 PR 上。
+  #
+  # 断言覆盖（tests/test_knowledge_surface_integrity.py）：
+  #   R1 覆盖率必须报面级（read / snapshot / history）并声明口径，
+  #      「没尝试过」不得落成 0%，旧类级数字保留但带标签；
+  #   R2 退役前必须能答出依赖，退役留可解析墓碑，且不自动改指向；
+  #   R3 读路径命中 / 未找到 / 已退役三态可判别。
+  knowledge-surface-integrity:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -e .
+
+      - name: Knowledge surface integrity assertions
+        run: pytest tests/test_knowledge_surface_integrity.py -v

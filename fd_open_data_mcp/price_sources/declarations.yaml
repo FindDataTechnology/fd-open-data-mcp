@@ -1,0 +1,108 @@
+# 行情源声明（openspec change: add-price-supply-and-caliber）
+#
+# 这里只声明**静态事实**：覆盖范围、复权口径与锚点、许可状态、以及这个源为哪个价格
+# 概念族提供首选读数。水位**不在这里写**——水位必须由数据算出来（写死的水位会变成假绿）。
+#
+# 改这个文件之前先读 design.md 的 D1/D2/D7：
+#   - 换锚点 = 换口径 = 换 source_id，不是原地改写历史行；
+#   - 每个价格族恰好一个首选源，重复声明是歧义而不是"后来者覆盖"；
+#   - license_state 以拒绝生效，不是警告。
+
+schema_version: "1"
+
+# 每个"价格概念族"必须恰好有一个首选源。没有首选源的族，读取会被拒绝（fail-closed）。
+# 基金净值族暂不在册：它的源名尚未在注册表里确认，宁缺勿猜。
+price_families:
+  - price.stock.daily
+  - price.index.daily
+
+sources:
+  # ---------------------------------------------------------------- A 股个股
+  # 分片库里的遗留表（14.2M 行，前复权）。实测最大日期 2026-07-10
+  # （见 fd-paper-trading/openspec/changes/archive/2026-11-06-astock-price-channel/
+  #   reports/astock-spike-index-data.md 第 5 项）。
+  #
+  # 锚点写成实测停更日而不是"今天"：这批复权确实锚定在 2026-07-10。
+  # 抓取恢复、数据延伸后锚点会变——那时必须新增一个 <id>@<新锚点> 的口径，
+  # 让"锚点变了"成为一次显式事件，而不是一次静默的历史改写。
+  astock_daily:
+    instrument_types: [stock]
+    markets: [XSHG, XSHE]
+    adjustment: qfq
+    adjustment_anchor: "2026-07-10"
+    factor_source: null   # 前复权价是入库时算好的，库里没有可复用的因子列
+    frequency: daily
+    license_state: legacy   # 遗留只读表；增量走 gapfill + active_pool
+    # delivery 缺省 auto（= 按许可种别推演 → 当前判为**不可对外交付**）。
+    # 「能不能对客」是执照与合同问题，不是数据出处问题；若业务确认可对客，
+    # 这里改成 `delivery: deliverable` 即可，**不必改代码**。改前先确认抓取主体与授权。
+    preferred_for: [price.stock.daily]
+    access:
+      kind: federated_view
+      dsn_env: ASTOCK_DSN
+    watermark:
+      entity_type: stock
+      concept_codes: [price.close]
+      # 与生产 ASTOCK_CALENDAR_REFS 同一组"大盘参照篮"：实测 2006-2026 密集
+      # （4,346-4,702 行），4.9s/年即可判定市场日历。
+      reference_basket: ["600000", "600036", "600585", "600900", "601318"]
+      lookback_days: 400
+    notes: >-
+      前复权（qfq）。实测最大日期 2026-07-10；价格抓取服务端自 2026-10-07 政策冻结，
+      故水位不前移是**真结论**而非故障。与 akshare 同日整差 1.00 元（复权锚点不同），
+      因此钉源纪律（一条序列只认一个 source）是必要的，不是洁癖。
+
+  # ---------------------------------------------------------------- akshare
+  # 同族第二个源，只作**对照**用（all_sources 比对），不是首选读数源。
+  #
+  # 锚点 = per_fetch：每批抓取各自锚定在抓取时点的最新价上。这是一个已知有害的口径
+  # ——不同批次之间不可比。显式登记它，是为了让"为什么不能混读"有据可查。
+  akshare:
+    instrument_types: [stock]
+    markets: [XSHG, XSHE]
+    adjustment: qfq
+    adjustment_anchor: per_fetch
+    factor_source: null
+    frequency: daily
+    license_state: legacy
+    preferred_for: []   # 刻意不指定：首选源只能有一个，见 D7
+    access:
+      kind: federated_view
+      dsn_env: ASTOCK_DSN
+    watermark:
+      entity_type: stock
+      concept_codes: [price.close]
+      reference_basket: ["600000", "600036", "600585", "600900", "601318"]
+      lookback_days: 400
+    notes: >-
+      实测约 2026-09-10 的覆盖面（2,174 只），同样受 2026-10-07 政策冻结影响。
+      锚点按抓取批次变化，故不与其他批次、也不与 astock_daily 混读。
+
+  # ---------------------------------------------------------------- 指数（基准）
+  # 指数实体与 index 概念族已注册，但**全库零观测**（实测）。本口径为一次性种子导入
+  # 预留：source_id 与许可状态先立起来，数据落库后同一 id 直接可用。
+  #
+  # license_state=provisional：可内部消费；对外交付必须显式声明来源与"待持牌源替换"
+  # （闸门见 price_sources.delivery）。
+  index-seed:
+    instrument_types: [index]
+    markets: [XSHG, XSHE]
+    adjustment: not_applicable   # 指数不复权；显式登记"不适用"而不是留空
+    adjustment_anchor: null
+    factor_source: null
+    frequency: daily
+    license_state: provisional
+    preferred_for: [price.index.daily]
+    access:
+      kind: federated_view
+      dsn_env: ASTOCK_DSN
+    watermark:
+      entity_type: index
+      concept_codes: [price.close]
+      # 基准候选：沪深300 / 中证500 / 上证综指 / 深证成指（同时是既有结算的基准映射目标）
+      reference_basket: ["000300", "000905", "000001", "399001"]
+      lookback_days: 400
+    notes: >-
+      实测指数实体与 index 概念族全库零观测——"并入 astock 家族"是死路，没有存量可读。
+      基准端到端收口的真前置是指数日线抓取，而价格抓取处于政策冻结，
+      故本口径只先立形状：种子导入后同一 source_id 可用，持牌源到位后换 id 即换源。

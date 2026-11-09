@@ -2,6 +2,40 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.59] - 2026-11-10
+- **feat(price-sources): 行情源注册表 + 口径探针（add-price-supply-and-caliber 前段）。**
+  源成为声明对象（覆盖/复权口径与锚点/许可/访问协议按 kind 不按源名）；水位由数据派生
+  （参照篮，标注 method），`list_price_sources` 为消费方唯一出口、不缓存；指数族
+  `index-seed` 一次性导入通道（identity 按 entity_type 区分防同码碰撞）；`delivery`
+  显式覆盖（"能不能对客"是商业决定，落在一行 YAML）；只读探针 `price_caliber_gate`
+  三判据（三路同源/指数可得/跨源价差）+ `--selfcheck` 进 CI。打包修复：
+  `declarations.yaml` 显式进 wheel（实测未声明时 wheel 0 个 yaml）。
+- **feat(coverage): 覆盖率改为按「分发面」申报，并声明口径。** 此前 `coverage_summary` 只有
+  类级口径：`covered` 等于「概念有任何一条观测」，于是一个有 snapshot + history 两个面、实际
+  只取到实时值的概念会被报成 100% 覆盖。现在每个概念带 `surfaces: {read, snapshot, history}`
+  （来自 `_caps()` 的 routable/snapshot/history 三元组）与 `surfaces_covered`，归属依据是
+  `fetch_log.function_id -> functions.bulk_snapshot/bulk_history`——观测行本身不带面标记，
+  是抓取日志能归属，所以这是**实测**而非推断。汇总新增 `granularity: "surface"`、
+  `class_dimension: "entity_type"`、逐 entity_type 的面级 routable/covered/never_attempted。
+- **fix(coverage): 「没尝试过」不再落成 0%。** 从未被尝试过的面报 `never_attempted`，与
+  「试过但失败」（covered=0）分开——否则会把「没有证据」变成「证明没有」。
+  **口径提示：面级数字上线后整体覆盖率会明显低于旧类级数字，这是口径变严，不是覆盖变少**；
+  旧数字仍由 `legacy.covered` 保留并标注 `granularity: "concept"`。
+- **feat(retirement): 退役前先答依赖，答不出来就拒绝。** 新增 `coverage/retirement.py`：
+  `dependents()` 只读联查 `crawl_policies.concept_ids` + 绑定数；`retire_concept()` 在存在
+  **在役**依赖时抛 `RetirementBlocked` 且不落盘，`force=True` 才能越过。它**不自动改指向**
+  ——后继按 `name_zh` + 同 entity_type 解析，单位/频率/实体域都可能不同，自动重绑是伪造等价。
+  与 `freshness_check.sql` 第五段的分工：那段是**事后巡检**（策略已钉住废弃概念），本模块是
+  **事前阻断**（退役那一刻就知道谁会断）。
+- **fix(coverage): 退役概念不再从缺口清单整行消失。** `coverage_inventory` 原用
+  `filter(Concept.deprecated.is_(False))` 把退役概念整行丢弃，于是退役连同依赖它的策略一起从
+  缺口视图消失、无处可查（2026-09-17 那批 15 个概念就是这么静默的）。现在退役行保留并带
+  `deprecated` / `canonical_replacement` / `dependents`，`gap_set` 单独排除它们（不爬退役指标）。
+- **ci(knowledge-surface)**: 新增 `knowledge-surface-integrity` 作业，把上述三条不变量
+  （面级口径 / 退役依赖与墓碑 / 读路径三态）的断言挂到 PR 上。实测背景：仓内四支 checker 里
+  只有 `check_vocabulary_conformance` 曾被 workflow 调用——闸写在仓里没人跑，正是
+  「闸门宣称的 ≠ 闸门检查的」。
+
 ## [0.5.58] - 2026-11-10
 - **fix(reconciler)**: **「全部概念被拒」不再记成 `no_op`，而是当场 `failed` 并写明原因。**
   2026-09-17/19 有人把这批概念标成 `deprecated`（策略 4 的 248-255、策略 5 的 383-388、
