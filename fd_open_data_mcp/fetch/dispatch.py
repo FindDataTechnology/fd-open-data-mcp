@@ -347,12 +347,21 @@ def read(
     # not read(). Cap and warn; callers page for larger ranges.
     MAX_DATES = 366
     if len(dates) > MAX_DATES:
+        # Keep the TAIL, not the head. The old `dates[:MAX_DATES]` kept the
+        # oldest 366 of the list, so a caller asking for five years of daily
+        # prices got rows ending ~four years in the past and no hint that the
+        # recent ones were dropped — a "latest close" query silently answered
+        # with a 2021 value. read_series already resolves this the same way
+        # (`rows[-MAX_SERIES_ROWS:]` plus a note); read() still has no place to
+        # put a note because it returns a bare list, so the tail choice plus
+        # this warning is the honest minimum.
         logger.warning(
-            "read() requested %d dates for concept %s entity %s; truncating to %d. "
-            "Use the astock_daily migrate path for bulk history.",
+            "read() requested %d dates for concept %s entity %s; keeping the most "
+            "recent %d. Use read_series (which also reports the truncation) for "
+            "long windows.",
             len(dates), concept_id, entity_id, MAX_DATES,
         )
-        dates = dates[:MAX_DATES]
+        dates = dates[-MAX_DATES:]
     if all_sources:
         results = []
         for d in dates:
