@@ -112,6 +112,35 @@ def _build_params(fn: Function, identifier: str, date: str, binding=None) -> dic
     return params
 
 
+def _declared_unit(result) -> Optional[str]:
+    """The unit the *source* declared for this result, if it declared one.
+
+    Some adapters emit a ``unit`` column next to the value (``nbs_gdp`` writes
+    ``十亿元`` / ``亿元`` / ``指数``). The write path used to ignore it and stamp
+    the concept's unit on every row, so a frame whose native unit differs was
+    silently relabelled — the number *is* in 亿元, calling it the concept's unit
+    makes every aggregated read wrong by the conversion factor, with no field
+    saying so (audit 04 §6).
+
+    Returns ``None`` when the source said nothing (most adapters) or when the
+    frame carries conflicting units — in both cases the caller falls back to the
+    concept's unit, which is the previous behaviour. Guessing here would be
+    worse than the old silence.
+    """
+    try:
+        import pandas as pd
+    except ImportError:
+        pd = None
+    if pd is not None and isinstance(result, pd.DataFrame) and "unit" in result.columns:
+        seen = {str(v).strip() for v in result["unit"].dropna().unique() if str(v).strip()}
+        return seen.pop() if len(seen) == 1 else None
+    if isinstance(result, dict):
+        raw = result.get("unit")
+        if isinstance(raw, str) and raw.strip():
+            return raw.strip()
+    return None
+
+
 def _missing(value) -> bool:
     """True when ``value`` means "no data" rather than "data worth keeping".
 
@@ -289,8 +318,15 @@ def dispatch_one(
                     continue
                 record_fetch_outcome(session, cand_source, concept_id, "ok", latency)
                 promote_on_sample(session, fn.id, returned_columns(result))
+                declared = _declared_unit(result)
+                if declared is not None and concept.unit and declared != concept.unit:
+                    logger.warning(
+                        "unit mismatch for concept %s from %s: source says %r, "
+                        "concept says %r — storing the source's unit",
+                        concept_id, cand_source, declared, concept.unit,
+                    )
                 write_cache(session, concept_id, entity_type, entity_id, date,
-                            str(value), concept.unit, cand_source,
+                            str(value), declared or concept.unit, cand_source,
                             granularity=_write_granularity(concept.frequency))
                 return {"date": date, "value": value, "unit": concept.unit,
                         "source_used": cand_source, "real_source_used": real_source, "from_cache": False}
@@ -592,9 +628,19 @@ def _read_range_one(
                     continue
                 record_fetch_outcome(session, source, concept_id, "ok", _ms(t0))
                 promote_on_sample(session, fn.id, returned_columns(result))
+                # Same rule as the point write: a source that declares its own
+                # unit wins over the concept's label, because the numbers really
+                # are in that unit.
+                declared = _declared_unit(result)
+                if declared is not None and concept.unit and declared != concept.unit:
+                    logger.warning(
+                        "unit mismatch for concept %s from %s: source says %r, "
+                        "concept says %r — storing the source's unit",
+                        concept_id, source, declared, concept.unit,
+                    )
                 write_cache_range(
                     session, concept_id, entity_type, entity_id,
-                    series, concept.unit, source,
+                    series, declared or concept.unit, source,
                     granularity=_write_granularity(concept.frequency),
                 )
                 return [
