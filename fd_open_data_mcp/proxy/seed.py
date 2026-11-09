@@ -93,6 +93,7 @@ RATE_LIMITS: dict[str, tuple[float, int]] = {
     "worldbank": (2.0, 4),
     "wbgapi": (2.0, 4),
     "nbs-gdp": (0.5, 2),   # gov site (data.stats.gov.cn) - polite
+    "nbs": (0.5, 2),       # same adapter, keyed by the circuits' source name
 }
 
 # source -> (command, params) for the probe job's recovery probe. A cheap,
