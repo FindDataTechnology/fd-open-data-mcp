@@ -143,8 +143,21 @@ def test_summary_counts_per_entity_type(session):
     _obs(session, cid, dt.date.today().isoformat())
     summary = coverage_summary(session)
     stock = summary["per_entity_type"]["stock"]
-    assert stock == {"routable": 1, "covered": 1, "never_crawled": 0, "stale": 0}
+    # Legacy class-level counters stay exactly as they were.
+    assert {k: stock[k] for k in ("routable", "covered", "never_crawled", "stale")} == {
+        "routable": 1, "covered": 1, "never_crawled": 0, "stale": 0}
     assert summary["covered"] == 1 and summary["routable"] == 1
+    # ... and the payload now also carries its caliber plus the per-surface split
+    # (knowledge-surface-integrity: a class-level figure must never be read as a
+    # surface-level one).
+    assert summary["granularity"] == "surface"
+    assert summary["class_dimension"] == "entity_type"
+    assert set(stock["surfaces"]) == {"read", "snapshot", "history"}
+    # This fixture's function has no bulk capability, so only the read surface is
+    # routable — which is the whole point of reporting per surface.
+    assert stock["surfaces"]["read"]["routable"] == 1
+    assert stock["surfaces"]["snapshot"]["routable"] == 0
+    assert stock["surfaces"]["history"]["routable"] == 0
 
 
 def test_unroutable_concept_excluded_from_gap(session):

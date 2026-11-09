@@ -18,13 +18,15 @@ Mutates nothing (spec: the inventory SHALL write nothing). Shared by the
 from __future__ import annotations
 
 import datetime as dt
+import json
 import logging
 
 from sqlalchemy import case, func
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import (
-    Concept, ConceptBinding, Function, FunctionColumn, SemanticObservation,
+    Concept, ConceptBinding, CrawlPolicy, FetchLog, Function, FunctionColumn,
+    SemanticObservation,
 )
 from fd_open_data_mcp.semantic.bindings import DEFAULT_THRESHOLD as DISPATCH_THRESHOLD
 
@@ -67,14 +69,23 @@ def coverage_inventory(
     session: Session,
     entity_type: str | None = None,
     routable_only: bool = True,
+    include_deprecated: bool = True,
 ) -> list[dict]:
     """Per-concept coverage rows (see module docstring). Read-only.
 
     ``routable_only=True`` drops concepts with no dispatch-eligible binding —
     the default matches the gap-set definition in the spec (unroutable
     concepts are never counted nor selected for waves).
+
+    ``include_deprecated=True`` keeps retired concepts in the inventory, marked
+    ``deprecated`` and carrying their canonical successor. They used to be
+    filtered out entirely, which meant a retirement made the concept — and every
+    policy that depended on it — vanish from the gap view with no trace. Retired
+    rows stay resolvable instead; the gap set excludes them separately.
     """
-    q = session.query(Concept).filter(Concept.deprecated.is_(False))
+    q = session.query(Concept)
+    if not include_deprecated:
+        q = q.filter(Concept.deprecated.is_(False))
     if entity_type:
         q = q.filter(Concept.entity_type == entity_type)
     concepts = q.all()
@@ -120,7 +131,44 @@ def coverage_inventory(
                        SemanticObservation.date))),
     ).group_by(SemanticObservation.concept_id).all()}
 
+    # Surface attribution, one grouped scan over successful fetches. Observations
+    # do not record which surface produced them, but `fetch_log` does: each ok
+    # row carries the dispatched function, and the function carries the
+    # capability flags. This is what makes surface coverage MEASURED instead of
+    # inferred from "any row exists".
+    covered_surfaces: dict[int, dict[str, bool]] = {}
+    attempted: set[int] = set()
+    for cid, status, fn_snap, fn_hist in session.query(
+        FetchLog.concept_id, FetchLog.status, Function.bulk_snapshot, Function.bulk_history,
+    ).join(Function, FetchLog.function_id == Function.id).filter(
+        FetchLog.concept_id.isnot(None),
+    ).all():
+        attempted.add(cid)
+        if status != "ok":
+            continue
+        flags = covered_surfaces.setdefault(
+            cid, {"read": False, "snapshot": False, "history": False})
+        flags["read"] = True
+        if fn_snap:
+            flags["snapshot"] = True
+        if fn_hist:
+            flags["history"] = True
+
     today = dt.date.today()
+    # Dependency index, computed once: which policies name this concept. Retiring
+    # blind is what let a policy die silently for 54 days.
+    dependents_by_concept: dict[int, list[dict]] = {}
+    for p in session.query(CrawlPolicy).all():
+        ids = p.concept_ids or []
+        if isinstance(ids, str):
+            try:
+                ids = json.loads(ids)
+            except (TypeError, ValueError):
+                ids = []
+        for cid in ids if isinstance(ids, list) else []:
+            dependents_by_concept.setdefault(cid, []).append(
+                {"policy_id": p.id, "name": p.name, "enabled": bool(p.enabled)})
+    replacement_by_concept: dict[int, object] = {}
     out: list[dict] = []
     for c in concepts:
         routable, snap, hist = _caps(c.id)
@@ -130,6 +178,13 @@ def coverage_inventory(
         watermark = {"day": wm_day, "month": wm_month, "year": wm_year}[
             _granularity_for(c.frequency)]
         watermark = str(watermark)[:10] if watermark else None
+        got = covered_surfaces.get(c.id, {})
+        replacement = None
+        if c.deprecated:
+            # The successor is resolved by the same rule the read path uses
+            # (`check_applicability`), so the tombstone and the error agree.
+            from fd_open_data_mcp.entities.resolver import find_canonical_replacement
+            replacement = find_canonical_replacement(session, c)
         out.append({
             "concept_id": c.id,
             "code": c.code,
@@ -139,6 +194,24 @@ def coverage_inventory(
             "routable": routable,
             "bulk_snapshot": snap,
             "bulk_history": hist,
+            # Retired concepts stay visible and resolvable instead of vanishing;
+            # `dependents` answers "who breaks if this stays retired".
+            "deprecated": bool(c.deprecated),
+            "canonical_replacement": (replacement.code if replacement else None),
+            "dependents": dependents_by_concept.get(c.id, []),
+            # The three dispatchable surfaces a concept can expose, and whether
+            # each ever produced a successful fetch. A concept is not "covered"
+            # in aggregate — it is covered per surface.
+            "surfaces": {"read": routable, "snapshot": snap, "history": hist},
+            "surfaces_covered": {
+                "read": bool(got.get("read")),
+                "snapshot": bool(got.get("snapshot")),
+                "history": bool(got.get("history")),
+            },
+            # "never attempted" is NOT "covered 0%": a surface that was never
+            # tried carries no information, and reporting it as zero would turn
+            # an absence of evidence into evidence of absence.
+            "fetch_attempted": c.id in attempted,
             "ever_crawled": watermark is not None,
             "watermark": watermark,
             "stale": _stale(c.frequency, watermark, today),
@@ -148,16 +221,23 @@ def coverage_inventory(
 
 
 def coverage_summary(session: Session) -> dict:
-    """Aggregated gap view: per entity_type, routable/covered/never/stale.
+    """Aggregated gap view, reported PER SURFACE, not per concept.
 
-    This is the number the digest and ``coverage_report`` lead with —
-    "covered vs routable" is the single metric expansion moves.
+    ``granularity`` and ``class_dimension`` are part of the payload: a coverage
+    number without its caliber is unusable (a class-level figure must never be
+    read as surface-level). Per entity_type the summary carries the three
+    dispatchable surfaces with their own routable/covered counts, because a
+    concept that has a snapshot binding but has only ever served realtime reads
+    is NOT snapshot-covered even though "any row exists" says otherwise.
     """
     rows = coverage_inventory(session)
+    surfaces = ("read", "snapshot", "history")
     per_type: dict[str, dict] = {}
     for r in rows:
         agg = per_type.setdefault(r["entity_type"], {
             "routable": 0, "covered": 0, "never_crawled": 0, "stale": 0,
+            "surfaces": {s: {"routable": 0, "covered": 0, "never_attempted": 0}
+                         for s in surfaces},
         })
         agg["routable"] += 1
         if r["ever_crawled"]:
@@ -166,20 +246,49 @@ def coverage_summary(session: Session) -> dict:
                 agg["stale"] += 1
         else:
             agg["never_crawled"] += 1
+        for s in surfaces:
+            if r["surfaces"][s]:
+                agg["surfaces"][s]["routable"] += 1
+                if r["surfaces_covered"][s]:
+                    agg["surfaces"][s]["covered"] += 1
+                elif not r["fetch_attempted"]:
+                    # Never tried: no information, not a zero.
+                    agg["surfaces"][s]["never_attempted"] += 1
+
+    flat = {s: {k: sum(a["surfaces"][s][k] for a in per_type.values())
+                for k in ("routable", "covered", "never_attempted")}
+            for s in surfaces}
+    legacy_covered = sum(a["covered"] for a in per_type.values())
     return {
+        # A number without its caliber is unusable: state both dimensions.
+        "granularity": "surface",
+        "class_dimension": "entity_type",
         "total_concepts": session.query(func.count(Concept.id)).scalar(),
         "routable": sum(a["routable"] for a in per_type.values()),
-        "covered": sum(a["covered"] for a in per_type.values()),
+        "covered": legacy_covered,
         "gap": sum(a["never_crawled"] for a in per_type.values()),
         "stale": sum(a["stale"] for a in per_type.values()),
+        "surfaces": flat,
+        # The class-level figure is kept for existing consumers but labelled:
+        # it counts concepts with ANY observation, not per-surface coverage.
+        "legacy": {
+            "covered": legacy_covered,
+            "granularity": "concept",
+            "note": "class-level: counts a concept with any observation as covered; "
+                    "do not read as surface-level coverage",
+        },
         "per_entity_type": dict(sorted(per_type.items())),
     }
 
 
 def gap_set(session: Session) -> list[dict]:
-    """The wave-planner input: routable concepts that are never-crawled OR stale.
+    """The wave-planner input: routable, non-retired concepts that are
+    never-crawled OR stale.
 
+    Retired concepts are excluded here (not in the inventory): they stay
+    resolvable and visible, but crawling a retired indicator is never right.
     Regenerable from live data at any time (spec: concepts that gained rows
     since a previous attempt are skipped — resumability without state).
     """
-    return [r for r in coverage_inventory(session) if not r["ever_crawled"] or r["stale"]]
+    return [r for r in coverage_inventory(session)
+            if not r["deprecated"] and (not r["ever_crawled"] or r["stale"])]
