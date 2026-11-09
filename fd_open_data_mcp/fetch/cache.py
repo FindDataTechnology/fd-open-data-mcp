@@ -38,7 +38,7 @@ from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.entities.resolver import check_entity_identity
 
-from fd_open_data_mcp.models import SemanticObservation
+from fd_open_data_mcp.models import ObservationRevision, SemanticObservation
 from fd_open_data_mcp.semantic.dates import (
     SHAPE_LIKE_PATTERNS,
     obs_month_of,
@@ -599,6 +599,8 @@ def write_cache_range(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     rows: dict[str, object], unit: Optional[str], source_used: str,
     granularity: str = "day",
+    *, revision_reason: Optional[str] = None,
+    revision_batch_id: Optional[str] = None,
 ) -> int:
     """Bulk-upsert observations for ``{date: value}`` in one commit.
 
@@ -610,6 +612,20 @@ def write_cache_range(
     This is the *first fetch* path: it may refresh a value (notably today's
     cell, which the TTL governs). **Gap filling must not use it** — use
     :func:`write_cache_range_new_only`, which never overwrites a stored value.
+
+    Revision trail (define-ingest-revision-and-coverage)
+    ----------------------------------------------------
+    Refreshing a stored value rewrites it, so the old value now lands in
+    ``observation_revisions`` before it is replaced: the requirement is not
+    "never overwrite" (the current period is *meant* to be revised) but "an
+    overwrite must not make the old value disappear".
+
+    Two shapes:
+      * default — one revision row per point.
+      * ``revision_batch_id`` — the caller knows this is a whole-series rewrite
+        (forward-adjusted prices after a dividend), where per-point history
+        costs far more than it is worth: one batch row records the range, the
+        point count and the reason instead.
     """
     if not rows:
         return 0
@@ -622,6 +638,7 @@ def write_cache_range(
     }
     now = datetime.now(timezone.utc)
     inserted, touched = [], []
+    revised_points = 0
     for d, value in rows.items():
         obs = existing.get(d)
         if obs is None:
@@ -633,11 +650,31 @@ def write_cache_range(
             ))
             inserted.append(d)
         else:
-            obs.value = str(value)
+            new_value = str(value)
+            if revision_batch_id is None:
+                # 单点修订：旧值必须留下，否则"改了什么"无从回答。
+                session.add(ObservationRevision(
+                    concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
+                    date=d, granularity=granularity, source_used=source_used,
+                    revision_kind="overwrite",
+                    old_value=obs.value, new_value=new_value,
+                    reason=revision_reason, revised_at=now,
+                ))
+            revised_points += 1
+            obs.value = new_value
             obs.unit = unit
             obs.fetched_at = now
             obs.obs_month = obs_month_of(d)
         touched.append(d)
+    if revision_batch_id is not None and revised_points:
+        # 整段修订只记一行：范围 + 点数 + 原因。逐点旧值不存是有意的取舍。
+        session.add(ObservationRevision(
+            concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
+            date=min(rows), granularity=granularity, source_used=source_used,
+            revision_kind="batch", batch_id=revision_batch_id,
+            range_start=min(rows), range_end=max(rows), point_count=revised_points,
+            reason=revision_reason, revised_at=now,
+        ))
     bump_rollups(session, concept_id, entity_type, entity_id, source_used,
                  inserted, touched, now, granularity=granularity)
     session.commit()

@@ -433,6 +433,63 @@ class SemanticObservation(Base):
         }
 
 
+class ObservationRevision(Base):
+    """定型前修订的留痕（define-ingest-revision-and-coverage）。
+
+    ``semantic_observations`` 只保留当前值；每次覆写前的旧值落在这里。
+    两种形态：
+
+    * ``revision_kind='overwrite'``：单点修订，带 ``old_value`` / ``new_value``。
+    * ``revision_kind='batch'``：整段修订（如分红后前复权序列整体重写），
+      记 ``batch_id`` + ``range_start``/``range_end`` + ``point_count``，逐点旧值不存。
+
+    只追加：不更新、不删除（保留期清理是唯一删除路径，且须显式配置）。
+    """
+
+    __tablename__ = "observation_revisions"
+    __table_args__ = (
+        CheckConstraint("revision_kind IN ('overwrite','batch')",
+                        name="ck_obs_revision_kind"),
+        Index("ix_obs_revision_coord", "concept_id", "entity_type", "entity_id",
+              "date", "granularity"),
+        Index("ix_obs_revision_batch", "batch_id"),
+        Index("ix_obs_revision_time", "revised_at"),
+    )
+
+    # Bigint（= Bigint().with_variant(Integer, "sqlite")）：SQLite 只有
+    # INTEGER PRIMARY KEY 才自增，Postgres 侧仍是 bigserial 口径。
+    id = Column(Bigint, primary_key=True, autoincrement=True)
+    concept_id = Column(Integer, nullable=False)
+    entity_type = Column(String(32), nullable=False)
+    entity_id = Column(Integer, nullable=False)
+    date = Column(String(64), nullable=False)
+    granularity = Column(String(8), nullable=False, default="day", server_default="day")
+    source_used = Column(String(64), nullable=False)
+    revision_kind = Column(String(16), nullable=False, default="overwrite",
+                           server_default="overwrite")
+    old_value = Column(String(255), nullable=True)
+    new_value = Column(String(255), nullable=True)
+    batch_id = Column(String(64), nullable=True)
+    range_start = Column(String(64), nullable=True)
+    range_end = Column(String(64), nullable=True)
+    point_count = Column(Integer, nullable=True)
+    reason = Column(String(128), nullable=True)
+    revised_at = Column(DateTime, nullable=False, default=_now, server_default=func.now())
+
+    def toDict(self) -> dict:
+        return {
+            "concept_id": self.concept_id, "entity_type": self.entity_type,
+            "entity_id": self.entity_id, "date": self.date,
+            "granularity": self.granularity, "source_used": self.source_used,
+            "revision_kind": self.revision_kind,
+            "old_value": self.old_value, "new_value": self.new_value,
+            "batch_id": self.batch_id,
+            "range_start": self.range_start, "range_end": self.range_end,
+            "point_count": self.point_count, "reason": self.reason,
+            "revised_at": self.revised_at.isoformat() if self.revised_at else None,
+        }
+
+
 class FetchLog(Base):
     __tablename__ = "fetch_log"
 

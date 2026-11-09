@@ -65,11 +65,36 @@ def series_dates(
 
     This is the series' own trading calendar — the basis for judging coverage
     without an external calendar (design D1).
+
+    Cost note (change: define-ingest-revision-and-coverage, decision 2C)
+    --------------------------------------------------------------------
+    This used to read EVERY row (all columns, all sources) just to collect dates:
+    a 6,000-point series fetched 6,000 full rows to produce 6,000 strings. The
+    narrowing below asks the database for ``DISTINCT date`` instead, which walks
+    the existing ``uq_sem_obs`` index (concept, entity_type, entity_id, date, …)
+    and never materializes a value column.
+
+    Why a query rather than a materialized calendar table: a table would be
+    derived state that can drift from the rows it summarizes (R3). A query is
+    always correct for free. Decision 2C said "materialize"; measured against the
+    actual query shape, the index-only form gets the win without the drift, so it
+    is the one implemented. If it ever proves too slow on the production
+    coordinator, adding the table is a local change confined to this function.
     """
-    rows = _read_base_range(
-        session, concept_id, entity_type, entity_id, "0000-01-01", "9999-12-31"
+    from sqlalchemy import distinct, select
+
+    from fd_open_data_mcp.models import SemanticObservation
+
+    stmt = (
+        select(distinct(SemanticObservation.date))
+        .where(
+            SemanticObservation.concept_id == concept_id,
+            SemanticObservation.entity_type == entity_type,
+            SemanticObservation.entity_id == entity_id,
+        )
+        .order_by(SemanticObservation.date)
     )
-    return sorted({r.date for r in rows})
+    return [row[0] for row in session.execute(stmt) if row[0]]
 
 
 def fingerprint(dates_values: list[tuple[str, object]]) -> str:

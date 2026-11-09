@@ -1623,6 +1623,51 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
             notes.append("excluded stored date(s) with no calendar position: "
                          + ", ".join(sorted({d for d, _ in excluded}))
                          + " — reported here so the series is not silently short")
+
+        # R8 (change: define-ingest-revision-and-coverage, decision 2C): the default
+        # path used to report only dates that cannot be placed on a calendar. A
+        # window that is merely *incomplete* — some fresh rows, some absent — looked
+        # exactly like a complete one. That is the shape a consumer cannot question.
+        # Now it declares requested/covered-or-missing alongside the points.
+        #
+        # Cost: `series_dates` is an index-only DISTINCT scan (decision 2C), not the
+        # full-row read it used to be, so this does not turn the hot path into a
+        # table read. Caliber stays honest: this path never dispatches upstream, so
+        # `degraded` is false unless the coverage judgment itself fails.
+        try:
+            from fd_open_data_mcp.fetch.coverage import (
+                _merge_intervals,
+                coverage as _coverage,
+            )
+            from fd_open_data_mcp.fetch.gapfill import series_dates as _series_dates
+
+            cov_entity_type = out.get("landed_entity_type") or entity_type
+            if cov_entity_type and entity_id is not None:
+                _dates = _series_dates(s, cid, cov_entity_type, entity_id)
+                _cov = _coverage(_dates, start, end)
+                in_window = [d for d in _dates if start <= d <= end]
+                out["coverage"] = {
+                    "requested": [start, end],
+                    "covered": [list(iv) for iv in _merge_intervals(
+                        (d, d) for d in in_window)],
+                    "missing": [list(g) for g in _cov.gaps],
+                    "known_empty": [list(g) for g in _cov.known_empty],
+                    "complete": _cov.complete,
+                }
+                out["degraded"] = {"degraded": False, "reason": None,
+                                   "sources_failed": []}
+                if not _cov.complete:
+                    notes.append("window is incomplete: "
+                                 + ", ".join(f"{g[0]}..{g[1]}" for g in _cov.gaps)
+                                 + " — results are partial, not a complete series")
+        except Exception as exc:  # noqa: BLE001 - 声明失败不得让读取本身失败
+            # 说"我不知道覆盖度"，而不是默认它完整。
+            out["coverage"] = {"requested": [start, end], "covered": None,
+                               "missing": None, "complete": None}
+            out["degraded"] = {"degraded": True,
+                               "reason": f"coverage could not be computed: {exc}",
+                               "sources_failed": []}
+            notes.append("coverage unknown: this read cannot prove it is complete")
         if notes:
             out["note"] = " | ".join(notes)
         if resolved:

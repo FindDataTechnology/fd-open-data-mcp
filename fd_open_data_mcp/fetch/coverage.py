@@ -166,8 +166,11 @@ def coverage(
         if _width(*lead) >= min_hole_days:
             gaps.append(lead)
     if span_end and span_end < end:
-        trail = (_next_day(span_end), end)
-        if _width(*trail) >= min_hole_days:
+        # 左端必须裁到窗口：否则"窗口整体在序列末尾之后"会报出一个从
+        # span_end+1 开始的缺口——那段调用方从没要求过。两个后果都真实：
+        # 报表里出现窗口外的缺失，补数会去问窗口之前的日期。
+        trail = (max(start, _next_day(span_end)), end)
+        if trail[0] <= trail[1] and _width(*trail) >= min_hole_days:
             gaps.append(trail)
 
     # Interior: only judged where the series proves it trades (inside its span).

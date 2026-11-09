@@ -530,6 +530,87 @@ def _extract_series(
     return out
 
 
+def read_range_with_coverage(
+    session: Session, concept_ids: list[int], entity_type: str, entity_id: int,
+    start: str, end: str,
+    *, min_hole_days: float | None = None, min_coverage: float | None = None,
+) -> dict[int, dict]:
+    """读区间并**声明覆盖与降级**（change: define-ingest-revision-and-coverage）。
+
+    为什么需要这个入口
+    -----------------
+    ``read_range`` 的返回体只有值。它的 docstring 自己写着覆盖度"只按陈旧度判"：
+    一个窗口里既有新鲜行又缺一段，读起来和"完整"完全一样。消费方据此算出来的
+    收益率、同比、缺口统计都可能建立在半份数据上，而没有任何信号。
+
+    本函数不改变 ``read_range`` 的行为（老调用方零影响），只多给两件事：
+
+      ``coverage``  ``{requested, covered, missing}``——窗口内实际覆盖的区间与
+                    缺失区间。判定复用 ``fetch.coverage.coverage()``，日期基准是
+                    序列自身的日历（与补数同一套），不引外部交易日历。
+      ``degraded``  ``{degraded, reason, sources_failed}``——回源全失败并退回缓存，
+                    或干脆没有数据时，这里必须为真。**"取不到"不能长得像"没有"**。
+
+    ``covered`` 为空的含义要分清：窗口内确实没有数据（冷序列）与"有数据但都在窗口
+    之外"都表现为空，前者 ``missing`` 覆盖整个窗口，后者由 ``coverage`` 的 span 说明。
+    """
+    from fd_open_data_mcp.fetch.cache import _read_base_range
+    from fd_open_data_mcp.fetch.coverage import _merge_intervals, coverage
+
+    if not concept_ids or start > end:
+        return {}
+
+    kwargs: dict = {}
+    if min_hole_days is not None:
+        kwargs["min_hole_days"] = min_hole_days
+    if min_coverage is not None:
+        kwargs["min_coverage"] = min_coverage
+
+    out: dict[int, dict] = {}
+    for concept_id in concept_ids:
+        ex = _read_range_one_ex(session, concept_id, entity_type, entity_id, start, end)
+
+        all_dates = sorted({
+            r.date for r in _read_base_range(
+                session, concept_id, entity_type, entity_id, "0000-01-01", "9999-12-31",
+            )
+        })
+        report = coverage(all_dates, start, end, **kwargs)
+        in_window = [d for d in all_dates if start <= d <= end]
+        covered = [list(iv) for iv in _merge_intervals((d, d) for d in in_window)]
+
+        served = ex["served_from"]
+        failed = ex["sources_failed"]
+        degraded = served == "cache_degraded"
+        if served == "none" and failed:
+            # 尝试过来源、全都失败、缓存也没有 —— 这不是"没有数据"，是"没读到"。
+            degraded = True
+        reason = None
+        if served == "cache_degraded":
+            reason = ("upstream unavailable; served cached rows "
+                      f"({len(ex['values'])} point(s), {ex['stale_in_window']} stale)")
+        elif degraded:
+            reason = f"all sources failed ({', '.join(sorted(set(failed)))})"
+
+        out[concept_id] = {
+            "values": ex["values"],
+            "coverage": {
+                "requested": [start, end],
+                "covered": covered,
+                "missing": [list(g) for g in report.gaps],
+                "known_empty": [list(g) for g in report.known_empty],
+                "complete": report.complete,
+            },
+            "degraded": {
+                "degraded": degraded,
+                "reason": reason,
+                "sources_failed": failed,
+            },
+            "served_from": served,
+        }
+    return out
+
+
 def read_range(
     session: Session, concept_ids: list[int], entity_type: str, entity_id: int,
     start: str, end: str,
@@ -571,13 +652,27 @@ def _coerce_value(value):
         return value
 
 
-def _read_range_one(
+def _read_range_one_ex(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     start: str, end: str,
-) -> list[dict]:
+) -> dict:
+    """``_read_range_one`` 加上本次读取的自证信息（change:
+    define-ingest-revision-and-coverage）。
+
+    返回值形状：
+      ``values``        行列表（与旧 ``_read_range_one`` 完全同形）
+      ``served_from``   ``"cache"``（命中且无陈旧）| ``"fetch"``（回源后返回）
+                        | ``"cache_degraded"``（回源全失败、退回缓存）| ``"none"``
+      ``sources_failed`` 尝试过但失败/无数据的来源（去重后按尝试顺序）
+      ``stale_in_window`` 窗口内读到但被判陈旧的缓存行数
+
+    把"回源失败后退回缓存"标成 ``cache_degraded`` 是关键：旧实现里它与"缓存
+    本来就新鲜"返回同一个空/旧结果，调用方无法区分"没有数据"和"取不到数据"。
+    """
     concept = session.get(Concept, concept_id)
     if concept is None:
-        return []
+        return {"values": [], "served_from": "none", "sources_failed": [],
+                "stale_in_window": 0, "cold": True}
     check_applicability(session, concept_id, entity_type)
 
     cached = read_cache_range(session, concept_id, entity_type, entity_id, start, end)
@@ -585,10 +680,17 @@ def _read_range_one(
     stale_count = len(cached) - len(fresh)
 
     if fresh and stale_count == 0:
-        return [
-            {"date": r.date, "value": _coerce_value(r.value), "unit": r.unit, "source_used": r.source_used}
-            for r in fresh
-        ]
+        return {
+            "values": [
+                {"date": r.date, "value": _coerce_value(r.value), "unit": r.unit,
+                 "source_used": r.source_used}
+                for r in fresh
+            ],
+            "served_from": "cache", "sources_failed": [],
+            "stale_in_window": 0, "cold": False,
+        }
+
+    failed: list[str] = []
 
     # Fetch path: ranked sources, one upstream range call per (source, binding).
     for cand in rank_sources_for_concept(session, concept_id, None):
@@ -612,12 +714,15 @@ def _read_range_one(
                     )
                 except SourceUnavailable:
                     record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
+                    failed.append(str(real_source or source))
                     continue
                 except FetchError:
                     record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
+                    failed.append(str(real_source or source))
                     continue
                 except Exception:  # noqa: BLE001
                     record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
+                    failed.append(str(real_source or source))
                     continue
 
                 series = _extract_series(
@@ -625,6 +730,7 @@ def _read_range_one(
                 )
                 if not series:
                     record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
+                    failed.append(str(real_source or source))
                     continue
                 record_fetch_outcome(session, source, concept_id, "ok", _ms(t0))
                 promote_on_sample(session, fn.id, returned_columns(result))
@@ -643,8 +749,39 @@ def _read_range_one(
                     series, declared or concept.unit, source,
                     granularity=_write_granularity(concept.frequency),
                 )
-                return [
-                    {"date": d, "value": v, "unit": concept.unit, "source_used": source}
-                    for d, v in sorted(series.items())
-                ]
-    return []
+                return {
+                    "values": [
+                        {"date": d, "value": v, "unit": concept.unit, "source_used": source}
+                        for d, v in sorted(series.items())
+                    ],
+                    "served_from": "fetch",
+                    "sources_failed": failed,
+                    "stale_in_window": stale_count,
+                    "cold": not cached,
+                }
+
+    # 回源全部失败：退回缓存（若有）并标记降级。旧实现这里直接 return []，
+    # 让"取不到数据"和"没有数据"长得一模一样。
+    if fresh or cached:
+        return {
+            "values": [
+                {"date": r.date, "value": _coerce_value(r.value), "unit": r.unit,
+                 "source_used": r.source_used}
+                for r in (fresh or cached)
+            ],
+            "served_from": "cache_degraded",
+            "sources_failed": failed,
+            "stale_in_window": stale_count,
+            "cold": not cached,
+        }
+    return {"values": [], "served_from": "none", "sources_failed": failed,
+            "stale_in_window": stale_count, "cold": not cached}
+
+
+def _read_range_one(
+    session: Session, concept_id: int, entity_type: str, entity_id: int,
+    start: str, end: str,
+) -> list[dict]:
+    """兼容入口：只要值，不要自证信息（既有调用方行为不变）。"""
+    return _read_range_one_ex(session, concept_id, entity_type, entity_id,
+                              start, end)["values"]
