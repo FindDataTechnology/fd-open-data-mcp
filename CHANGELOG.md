@@ -2,6 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.53] - 2026-11-09
+- **fix(ingest)**: direct-script 任务**一律从 env 取 DSN**，四个脚本补齐 env 回退。
+  0.5.48 把 `--db-url` 从命令行拿掉之后，只认这个 flag 的脚本就永远连不上库：
+  - `bulk_ingest_fund_nav_daily` / `bulk_ingest_stock_indicators_events`：仍写着
+    `if not args.db_url: ap.error("--db-url is required…")` → 秒退 2。策略 8、2658 一直红在这里。
+  - `bulk_ingest_stock_financials` / `bulk_ingest_financials_aggregate`：默认值是一个
+    **本地开发库** `postgres:admin123@127.0.0.1:55432` → pod 内 connection refused，且报错
+    完全不提"配置错了"。策略 7（ashare 财报）2026-11-08 12:37 就是这么挂的。
+  四个脚本统一改为 `args.db_url or os.environ["FD_OPEN_DATA_MCP_DATABASE_URL"]`，两者皆无
+  才显式报错；两个 localhost 默认值一律删除，配错时在 argparse 阶段就失败而不是去拨开发机。
+
 ## [0.5.52] - 2026-11-08
 - **fix(reads)**: 0.5.50 那刀钉错了对象。它约束的是 `semantic_observations.entity_type`
   ——**行自己声明的类型**——而错位行声明的恰好也是 `'stock'`，所以拿行业 id / 基金经理 id
