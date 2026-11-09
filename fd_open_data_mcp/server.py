@@ -1324,6 +1324,18 @@ def _local_concept_for_key(session, key):
     )
 
 
+def _real_entity_type(session, entity_id: int) -> str | None:
+    """The entity's own class. Reads compare against this, never against a
+    row's declared type: 351,740 rows declare a class their entity is not
+    (2026-11-08), so a declaration can be wrong while the entity id cannot."""
+    from sqlalchemy import text
+
+    row = session.execute(
+        text("SELECT entity_type FROM entities WHERE id = :i"), {"i": entity_id}
+    ).first()
+    return row[0] if row else None
+
+
 # ─── Concept-fetch ──────────────────────────────────────────────────────────
 @mcp.tool(annotations=annotations_for("read"))
 def read(concept_id: int | str, entity_type: str | None = None,
@@ -1569,8 +1581,37 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         }
         notes: list[str] = []
         if not points:
-            notes.append("no cached observations in this window — a coverage gap, "
-                         "not a failure; no upstream fetch was attempted")
+            # A type label can be wrong while the data is there: the star-rated
+            # survey stores one concept on country, province and city entities,
+            # so a caller that names the wrong level reads zero rows and would
+            # be told "coverage gap" — the coverage fact is really "your entity
+            # label is not this entity's class". Read by landing in that case
+            # (only when the entity's REAL class differs from what was asked,
+            # so a genuine empty window is still reported as empty).
+            landed = None
+            if entity_id is not None and entity_type:
+                landed = _real_entity_type(s, entity_id)
+                if landed and landed != entity_type:
+                    alt = read_cache_range(s, cid, landed, entity_id, start, end)
+                    if alt:
+                        kept = alt[-MAX_SERIES_ROWS:]
+                        points = [
+                            {"date": r.date, "value": _coerce_value(r.value),
+                             "unit": r.unit, "source_used": r.source_used}
+                            for r in kept
+                        ]
+            if points:
+                out["count"] = len(points)
+                out["points"] = points
+                out["landed_entity_type"] = landed
+                notes.append(
+                    f"read by landing: entity {entity_id} is a {landed!r} entity, so its rows "
+                    f"are stored as {landed!r} (the concept declares {concept.entity_type!r} "
+                    f"and carries several levels); no rows exist under {entity_type!r}"
+                )
+            else:
+                notes.append("no cached observations in this window — a coverage gap, "
+                             "not a failure; no upstream fetch was attempted")
         elif truncated:
             notes.append(f"window holds more than {MAX_SERIES_ROWS} points; returned the most "
                          f"recent {MAX_SERIES_ROWS} — narrow the window for the rest")

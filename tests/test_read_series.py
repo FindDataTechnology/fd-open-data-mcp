@@ -253,3 +253,44 @@ def test_filling_twice_on_a_complete_window_is_stable(session, price_concept) ->
     second = _call(price_concept, **args)
     assert first["fingerprint"] == second["fingerprint"]
     assert first["points"] == second["points"]
+
+
+# ─── a wrong entity LABEL is not a coverage gap (add-hotel-vertical, E16) ─────
+#
+# The star-rated quarterly survey stores one concept on country, province and
+# city entities at once. The concept row declares a single ``entity_type``
+# ('region'), while the national aggregate lands on a *country* entity — so a
+# caller asking for (region, 1) used to read zero rows and be told "coverage
+# gap", i.e. a type mismatch was disguised as missing data. The read now follows
+# the landing class of the entity id it was given, and says so.
+
+def test_read_by_landing_class_when_the_label_is_wrong(session):
+    from fd_open_data_mcp.models import Entity
+
+    c = Concept(code="hotel.cn.star_rated.occupancy.all.quarterly",
+                entity_type="region", frequency="quarterly", unit="%",
+                verified=True)
+    session.add(c)
+    session.commit()
+    national = Entity(id=1, entity_type="country", code="CN", name_zh="中国")
+    session.add(national)
+    session.commit()
+    for date, value in (("2023-06-30", "52.1"), ("2024-09-30", "52.96")):
+        write_cache(session, c.id, "country", 1, date, value, "%", "mct-star-hotel")
+
+    out = _call(c.id, entity_type="region", entity_id=1,
+                start="2023-01-01", end="2024-12-31")
+
+    assert out["count"] == 2, out
+    assert out["points"][-1]["value"] == pytest.approx(52.96)
+    assert out["landed_entity_type"] == "country"
+    assert "read by landing" in out["note"]
+    assert "coverage gap" not in out["note"]
+
+
+def test_a_genuinely_empty_window_is_still_a_coverage_gap(session, concept):
+    """The fallback must not relabel an empty window as a type problem."""
+    out = _call(concept)  # concept declares country, entity 42 is absent anyway
+    assert out["count"] == 0
+    assert "coverage gap" in out["note"]
+    assert "landed_entity_type" not in out
