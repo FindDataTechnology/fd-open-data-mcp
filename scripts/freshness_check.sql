@@ -186,3 +186,21 @@ join bench b on b.pid = j.pid and b.frequency = j.frequency
 where b.best is not null
   and (j.latest is null or j.latest < b.best)
 order by j.pid, j.frequency, j.id;
+
+-- ── 第五段：策略钉住了已废弃的概念（静默死亡）─────────────────────────────
+-- 2026-11-10 定位：2026-09-17/19 有人把这批概念标成 deprecated
+-- （248-255 / 381 / 383-388 / 1446-1455 / 2111），而 planner 的「废弃即拒绝」
+-- 闸门会让这些概念全部进 unroutable → plan_cells=0 → 以 no_op 收盘。
+-- 结果是 4 个 enabled 策略每天照跑、零报错、零告警，静默 54 天。
+-- 判据只有一条：enabled 策略的 concept_ids 里出现 concepts.deprecated = true。
+-- 废弃数 = 概念总数 → 该策略已完全死掉；小于则是部分少抓。
+select p.id, left(p.name, 30) as policy, p.entity_type,
+       jsonb_array_length(p.concept_ids) as 概念总数,
+       count(*) as 废弃数,
+       string_agg(c.id::text || ' ' || c.code, ', ' order by c.id) as 废弃概念
+from crawl_policies p
+cross join lateral jsonb_array_elements_text(p.concept_ids) t(cid)
+join concepts c on c.id = t.cid::int
+where p.enabled and c.deprecated
+group by p.id, p.name, p.entity_type, p.concept_ids
+order by count(*) desc, p.id;

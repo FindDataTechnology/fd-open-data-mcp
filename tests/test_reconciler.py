@@ -320,14 +320,19 @@ def test_force_overrides_guardrail(session, monkeypatch):
 
 def test_series_mode_estimates_one_fetch_per_entity(session):
     cid = _register(session)
-    _policy(session, cid, mode="series",
-            date_policy={"mode": "explicit", "start": "2020-01-01", "end": "2025-12-31"})
-    # series would refuse: get_hist is not bulk_history -> unroutable, estimate 0
+    p = _policy(session, cid, mode="series",
+                date_policy={"mode": "explicit", "start": "2020-01-01", "end": "2025-12-31"})
+    # get_hist is not bulk_history -> the only concept is unroutable, so the
+    # plan is empty for a ROUTING reason. That must be a loud refusal: since
+    # 0.5.58 an all-unroutable plan closes as failed without launching a pod
+    # (before, it launched one that could only report zeros and closed no_op).
     launcher = _FakeLauncher()
     summary = reconcile_once(session, launcher, now=NOW)
-    plan, _ = launcher.launched[0]
-    assert plan.unroutable[0]["reason"] == "no bulk_history source for series mode"
-    assert estimate_fetches(session, plan) == 0
+    assert launcher.launched == []
+    assert "no bulk_history source for series mode" in summary["refused"][0]["reason"]
+    run = session.query(PolicyRun).filter_by(policy_id=p.id).one()
+    assert run.status == "failed" and "unroutable" in run.detail
+    assert run.plan_cells == 0
 
 
 # ─── K8sJobLauncher transports (5.4) ─────────────────────────────────────────

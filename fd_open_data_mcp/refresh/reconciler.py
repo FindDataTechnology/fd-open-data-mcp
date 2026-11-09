@@ -1231,6 +1231,21 @@ def launch_policy(
         source_filter=policy.source_filter, mode=policy.mode or "per_date",
     )
 
+    # A plan that refused every concept is a routing failure, not an empty
+    # window: close it as a refusal NOW instead of launching a pod that can
+    # only report zeros and be read as "nothing due". See _all_refused_detail.
+    refused_detail = _all_refused_detail(policy.concept_ids, plan.unroutable)
+    if refused_detail is not None:
+        logger.warning("policy %s %s", policy.name, refused_detail)
+        session.add(PolicyRun(policy_id=policy.id, status="failed",
+                              plan_json=plan.model_dump(mode="json"),
+                              plan_cells=plan.plan_cells, started_at=now,
+                              finished_at=now, detail=refused_detail))
+        policy.last_run_at = now
+        session.commit()
+        return {"policy": policy.name, "status": "refused",
+                "reason": refused_detail}
+
     # leasing execution model (add-data-stream-engine task 4.1/4.3): a policy
     # that opts into leasing splits the plan into work items and enqueues them
     # to a per-run lease queue instead of launching one Job. The guardrail
@@ -1323,6 +1338,48 @@ def _skip_detail(run: PolicyRun) -> Optional[str]:
         return ("redundant: fetched, but every key was already stored — the "
                 "window was complete before this run")
     return None
+
+
+def _all_refused_detail(concept_ids, unroutable) -> Optional[str]:
+    """Why a zero-cell plan is a REFUSAL, not a caught-up watermark.
+
+    ``plan_cells == 0`` has two opposite causes: nothing is due (the watermark
+    is current, a legitimate ``no_op``) or every requested concept was refused
+    by the planner (deprecated, no confirmed binding, entity_type mismatch).
+    Only the first is healthy. The second used to launch a job, produce nothing
+    and close as ``no_op`` — so on 2026-09-17/19, when the concepts four
+    enabled policies pinned were flagged deprecated, those policies ran daily
+    for 54 days with zero cells, zero failures and zero alerts. The ledger said
+    "nothing due" every single day.
+
+    Returns the refusal detail when EVERY requested concept is unroutable, else
+    None (a partial refusal still plans the concepts that survived).
+    """
+    requested = set()
+    for cid in concept_ids or []:
+        try:
+            requested.add(int(cid))
+        except (TypeError, ValueError):
+            continue
+    if not requested:
+        return None
+    refused = set()
+    for u in unroutable or []:
+        cid = u.get("concept_id")
+        if cid is not None:
+            try:
+                refused.add(int(cid))
+            except (TypeError, ValueError):
+                continue
+    if not requested <= refused:
+        return None
+    shown = "; ".join(
+        f"{u.get('code') or u.get('concept_id')}: {u.get('reason')}"
+        for u in unroutable[:3]
+    )
+    extra = len(unroutable) - 3
+    tail = f" (+{extra} more)" if extra > 0 else ""
+    return f"refused: every requested concept is unroutable — {shown}{tail}"
 
 
 def _frozen_window(policy: CrawlPolicy, local_today: dt.date) -> str | None:
