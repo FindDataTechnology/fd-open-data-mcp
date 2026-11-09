@@ -38,6 +38,7 @@ from fd_open_data_mcp.fetch.cache import (
     write_cache,
     write_cache_range,
 )
+from fd_open_data_mcp.fetch.finalization import finalized_through, resolve_window
 from fd_open_data_mcp.fetch.instrumentation import SourceUnavailable, instrumented_fetch
 from fd_open_data_mcp.fetch.runner import FetchError, returned_columns
 from fd_open_data_mcp.models import Concept, ConceptBinding, Function
@@ -534,6 +535,7 @@ def read_range_with_coverage(
     session: Session, concept_ids: list[int], entity_type: str, entity_id: int,
     start: str, end: str,
     *, min_hole_days: float | None = None, min_coverage: float | None = None,
+    revision_reason: str | None = None,
 ) -> dict[int, dict]:
     """读区间并**声明覆盖与降级**（change: define-ingest-revision-and-coverage）。
 
@@ -568,7 +570,10 @@ def read_range_with_coverage(
 
     out: dict[int, dict] = {}
     for concept_id in concept_ids:
-        ex = _read_range_one_ex(session, concept_id, entity_type, entity_id, start, end)
+        ex = _read_range_one_ex(
+            session, concept_id, entity_type, entity_id, start, end,
+            revision_reason=revision_reason,
+        )
 
         all_dates = sorted({
             r.date for r in _read_base_range(
@@ -613,7 +618,7 @@ def read_range_with_coverage(
 
 def read_range(
     session: Session, concept_ids: list[int], entity_type: str, entity_id: int,
-    start: str, end: str,
+    start: str, end: str, revision_reason: str | None = None,
 ) -> dict[int, list[dict]]:
     """Bulk read a list of concepts for an entity over ``[start, end]``.
 
@@ -637,7 +642,10 @@ def read_range(
         return {c: [] for c in concept_ids}
     out: dict[int, list[dict]] = {}
     for concept_id in concept_ids:
-        out[concept_id] = _read_range_one(session, concept_id, entity_type, entity_id, start, end)
+        out[concept_id] = _read_range_one_ex(
+            session, concept_id, entity_type, entity_id, start, end,
+            revision_reason=revision_reason,
+        )["values"]
     return out
 
 
@@ -652,9 +660,51 @@ def _coerce_value(value):
         return value
 
 
+def _plan_range_read(cached, concept, start: str, end: str) -> dict:
+    """把区间读拆成「缓存可服务」与「需要回源」两段。
+
+    纯函数（不碰库、不发请求），因此可以脱离数据库单测——这是"放宽定型窗口不会
+    变成上游流量事件"这条要求的守卫点。
+
+    规则：
+      * 日期早于 ``finalized_through`` 切点的行已定型，永不回源。
+      * 未定型段里按 TTL 判陈旧；只要有一段陈旧（或该段根本没有行）才回源。
+      * 回源起点取 ``max(start, cutoff)``，所以已定型的历史段不会被拖进请求。
+      * 切点晚于窗口末尾（整窗已成定型）时 ``need_fetch`` 为 False。
+    """
+    granularity = _write_granularity(getattr(concept, "frequency", None))
+    cutoff = finalized_through(
+        granularity, resolve_window(granularity, concept)
+    ).isoformat()
+
+    finalized = [r for r in cached if r.date < cutoff]
+    mutable_tail = [r for r in cached if r.date >= cutoff]
+    tail_stale = [r for r in mutable_tail if is_stale(r, getattr(concept, "frequency", None))]
+
+    fetch_start = max(start, cutoff)
+    need_fetch = fetch_start <= end and bool(tail_stale or not mutable_tail)
+
+    # 冷区间（整窗没有任何缓存行）是**缺口/冷启动**，不是"已定型历史"——没有可保护的
+    # 值，整窗回源才是对的。把它也挡掉会让历史区间永远补不了数。
+    if not cached:
+        fetch_start = start
+        need_fetch = start <= end
+
+    return {
+        "cutoff": cutoff,
+        "finalized": finalized,
+        "mutable_tail": mutable_tail,
+        "tail_stale": tail_stale,
+        "stale_count": len(tail_stale),
+        "fetch_start": fetch_start,
+        "need_fetch": need_fetch,
+        "cold": not cached,
+    }
+
+
 def _read_range_one_ex(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
-    start: str, end: str,
+    start: str, end: str, revision_reason: str | None = None,
 ) -> dict:
     """``_read_range_one`` 加上本次读取的自证信息（change:
     define-ingest-revision-and-coverage）。
@@ -676,15 +726,21 @@ def _read_range_one_ex(
     check_applicability(session, concept_id, entity_type)
 
     cached = read_cache_range(session, concept_id, entity_type, entity_id, start, end)
-    fresh = [r for r in cached if not is_stale(r, concept.frequency)]
-    stale_count = len(cached) - len(fresh)
 
-    if fresh and stale_count == 0:
+    # 分区：已定型的行永不回源；只有未定型且过期的尾段才回源。
+    plan = _plan_range_read(cached, concept, start, end)
+    finalized = plan["finalized"]
+    mutable_tail = plan["mutable_tail"]
+    stale_count = plan["stale_count"]
+    fetch_start = plan["fetch_start"]
+    need_fetch = plan["need_fetch"]
+
+    if not need_fetch:
         return {
             "values": [
                 {"date": r.date, "value": _coerce_value(r.value), "unit": r.unit,
                  "source_used": r.source_used}
-                for r in fresh
+                for r in sorted(cached, key=lambda r: r.date)
             ],
             "served_from": "cache", "sources_failed": [],
             "stale_in_window": 0, "cold": False,
@@ -699,7 +755,7 @@ def _read_range_one_ex(
         if identifier is None:
             continue
         for binding, fn in _bindings_for_source(session, concept_id, source):
-            params = _build_range_params(fn, identifier, start, end, binding)
+            params = _build_range_params(fn, identifier, fetch_start, end, binding)
             real_sources = _get_real_sources(fn)
             sources_to_try = real_sources if real_sources else [{"name": source, "priority": 0}]
             for real_source_spec in sources_to_try:
@@ -726,7 +782,7 @@ def _read_range_one_ex(
                     continue
 
                 series = _extract_series(
-                    result, binding.column.name, start, end, source, fn.command,
+                    result, binding.column.name, fetch_start, end, source, fn.command,
                 )
                 if not series:
                     record_fetch_outcome(session, source, concept_id, "error", _ms(t0))
@@ -748,26 +804,37 @@ def _read_range_one_ex(
                     session, concept_id, entity_type, entity_id,
                     series, declared or concept.unit, source,
                     granularity=_write_granularity(concept.frequency),
+                    # 声明式重取：带 reason 的写入才允许改写已定型的历史值
+                    # （定型窗口修正后的补救性重抓走这条）。
+                    revision_reason=revision_reason,
                 )
+                # 合并：已定型段与未变动的尾段从缓存出，回源只覆盖 [fetch_start, end]。
+                # 旧实现这里只返回上游那一段，等于把缓存里的历史行从响应里丢掉。
+                by_date: dict[str, dict] = {
+                    r.date: {"date": r.date, "value": _coerce_value(r.value),
+                             "unit": r.unit, "source_used": r.source_used}
+                    for r in cached
+                }
+                for d, v in series.items():
+                    by_date[d] = {"date": d, "value": v, "unit": concept.unit,
+                                  "source_used": source}
                 return {
-                    "values": [
-                        {"date": d, "value": v, "unit": concept.unit, "source_used": source}
-                        for d, v in sorted(series.items())
-                    ],
+                    "values": [by_date[d] for d in sorted(by_date)],
                     "served_from": "fetch",
                     "sources_failed": failed,
                     "stale_in_window": stale_count,
                     "cold": not cached,
+                    "refetched_range": [fetch_start, end],
                 }
 
     # 回源全部失败：退回缓存（若有）并标记降级。旧实现这里直接 return []，
     # 让"取不到数据"和"没有数据"长得一模一样。
-    if fresh or cached:
+    if cached:
         return {
             "values": [
                 {"date": r.date, "value": _coerce_value(r.value), "unit": r.unit,
                  "source_used": r.source_used}
-                for r in (fresh or cached)
+                for r in sorted(cached, key=lambda r: r.date)
             ],
             "served_from": "cache_degraded",
             "sources_failed": failed,

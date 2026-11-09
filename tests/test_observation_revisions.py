@@ -62,10 +62,16 @@ def test_overwrite_keeps_old_value(session, cid):
 
 
 def test_repeated_overwrites_accumulate_history(session, cid):
-    """改两次就要有两条记录：只留最后一版等于没有历史。"""
-    _write(session, cid, {"2026-11-08": 1.0})
-    _write(session, cid, {"2026-11-08": 2.0})
-    _write(session, cid, {"2026-11-08": 3.0})
+    """改两次就要有两条记录：只留最后一版等于没有历史。
+
+    用**当期**日期：定型后的改写会被写闸拒绝（那是另一条要求的场景），而本用例
+    考的是「未定型期反复覆写必须逐次留痕」。
+    """
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date().isoformat()
+    _write(session, cid, {today: 1.0})
+    _write(session, cid, {today: 2.0})
+    _write(session, cid, {today: 3.0})
 
     olds = [r.old_value for r in
             session.query(ObservationRevision).order_by(ObservationRevision.id)]
@@ -108,10 +114,15 @@ def test_batch_with_no_existing_points_writes_no_revision(session, cid):
 
 
 def test_revision_is_per_source(session, cid):
-    """两个来源对同一点各自修订：修订记录按 (date, source) 分开，不互相串。"""
-    _write(session, cid, {"2026-11-08": 1.0}, source="akshare")
-    _write(session, cid, {"2026-11-08": 2.0}, source="eia")
-    _write(session, cid, {"2026-11-08": 1.5}, source="akshare")
+    """两个来源对同一点各自修订：修订记录按 (date, source) 分开，不互相串。
+
+    同样用当期日期：定型前的覆写才是本用例要覆盖的场景。
+    """
+    from datetime import datetime, timezone
+    today = datetime.now(timezone.utc).date().isoformat()
+    _write(session, cid, {today: 1.0}, source="akshare")
+    _write(session, cid, {today: 2.0}, source="eia")
+    _write(session, cid, {today: 1.5}, source="akshare")
 
     revs = session.query(ObservationRevision).all()
     assert len(revs) == 1, "只有 akshare 那一行被修订过"

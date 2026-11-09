@@ -30,14 +30,17 @@ every read.
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional, Union
+from typing import Iterable, Optional, Union
 
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.entities.resolver import check_entity_identity
+from fd_open_data_mcp.errors import FinalizedObservationError
+from fd_open_data_mcp.fetch.finalization import is_finalized, resolve_window
 
+from fd_open_data_mcp.models import Concept as _Concept
 from fd_open_data_mcp.models import ObservationRevision, SemanticObservation
 from fd_open_data_mcp.semantic.dates import (
     SHAPE_LIKE_PATTERNS,
@@ -71,20 +74,57 @@ def _today() -> str:
 
 
 def _period_final(obs_date: Optional[str], granularity: Optional[str], today_str: str) -> bool:
-    """Has the observation's period fully elapsed?
+    """Has the observation's period left its revision window?
 
-    A past day/month/year is an immutable historical fact (its value is final);
-    the current period may still be revised and is therefore TTL-gated. Be
-    conservative: an unknown/empty date is never treated as final.
+    Delegates to :mod:`fd_open_data_mcp.fetch.finalization`, which owns the
+    window rules. The important difference from the pre-window rule: a **year**
+    is not final on 1 January of the next year — annual statistics get revised
+    for a year or two, so yearly values stay revisable through the whole
+    following year and finalize on 1 January of the year after.
+
+    A past day/month is still an immutable historical fact; only the current
+    period is revisable. Be conservative: an unknown/empty date is never
+    treated as final.
     """
-    g = (granularity or "day").lower()
-    if not obs_date or len(obs_date) < 4:
+    if not obs_date or len(str(obs_date)) < 4:
         return False
-    if g in ("month", "monthly"):
-        return obs_date[:7] < today_str[:7]      # a prior month
-    if g in ("year", "yearly"):
-        return obs_date[:4] < today_str[:4]       # a prior year
-    return obs_date < today_str                    # day (default) + any other
+    try:
+        now = datetime.strptime(today_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+    except (ValueError, TypeError):
+        return False
+    return is_finalized(obs_date, granularity, now=now)
+
+
+def is_finalized_obs(obs, concept=None) -> bool:
+    """Is this stored observation past its revision window (immutable)?"""
+    window = resolve_window(getattr(obs, "granularity", None) or "day", concept)
+    return is_finalized(getattr(obs, "date", None),
+                        getattr(obs, "granularity", None), window)
+
+
+def should_refetch(obs, frequency: Optional[str], concept=None) -> bool:
+    """Does this stored row need another upstream attempt?
+
+    Deliberately distinct from "is it finalized": finality answers *may this
+    value still change*, refetching answers *should we go ask again*. Keeping
+    them apart is what stops a window change from silently becoming an upstream
+    traffic change — a finalized row is never refetched no matter how old
+    ``fetched_at`` is.
+    """
+    if getattr(obs, "fetched_at", None) is None:
+        return True
+    if is_finalized_obs(obs, concept):
+        return False
+    fetched = obs.fetched_at
+    # SQLite stores datetimes naive (no tzinfo); coerce to UTC for comparison.
+    if fetched.tzinfo is None:
+        fetched = fetched.replace(tzinfo=timezone.utc)
+    return datetime.now(timezone.utc) - fetched > ttl_for(frequency)
+
+
+def is_stale(obs, frequency: Optional[str]) -> bool:
+    """Backwards-compatible alias: a row is "stale" exactly when it needs refetching."""
+    return should_refetch(obs, frequency)
 
 
 def period_prefixes(date: str, frequency: Optional[str]) -> Optional[list[str]]:
@@ -502,10 +542,61 @@ def _read_base_range(
     return q.order_by(SemanticObservation.date).all()
 
 
+def _enforce_finalized_write_guard(
+    session: Session, concept_id: int, entity_type: str, entity_id: int,
+    granularity: str, existing: Iterable, *, correction: bool,
+    reason: Optional[str],
+) -> None:
+    """定型写闸：拒绝改写已定型的**已有**观测。
+
+    边界是「改写」，不是「写入」——首次写入一个历史点是补数（gap fill / 冷启动），
+    不是修订。把首次写入也挡掉，历史区间将永远补不了数。
+
+    因此：只检查命中的既有行；没有任何既有行时放行。
+
+    确需更正时用法是 ``correction=True`` + 非空 ``reason``：放行，并照常落
+    ``observation_revisions`` 留痕（调用点已负责写修订行）。空 reason 一律拒绝——
+    没有理由的更正与静默覆写无法区分。
+
+    概念级的窗口声明非法时 `resolve_window` 抛错，这里**不吞**：静默退化为默认会让
+    "声明了却没生效"变成一个看不见的坑。
+    """
+    if correction and not (reason or "").strip():
+        raise FinalizedObservationError(
+            "correction=True 需要非空 reason：没有理由的更正与静默覆写无法区分",
+        )
+
+    blocked = []
+    hit_window: dict = {}
+    concept = session.get(_Concept, concept_id) if session is not None else None
+    window = resolve_window(granularity, concept)
+    for obs in existing:
+        if is_finalized(getattr(obs, "date", None), granularity, window):
+            blocked.append((concept_id, entity_type, entity_id,
+                            obs.date, granularity))
+            hit_window = {"grace_days": window.grace_days,
+                          "granularity": granularity}
+
+    if not blocked or correction:
+        return
+
+    preview = ", ".join(
+        f"{c[1]}/{c[2]}/{c[3]}/{c[4]}" for c in blocked[:5]
+    )
+    more = "" if len(blocked) <= 5 else f" 等共 {len(blocked)} 处"
+    raise FinalizedObservationError(
+        f"拒绝改写已定型观测：{preview}{more}（窗口 grace_days="
+        f"{hit_window.get('grace_days')}/{granularity}）；确需更正请走 correction 通道并给出 reason",
+        coordinates=blocked,
+        window=hit_window,
+    )
+
+
 def write_cache(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     date: str, value: Optional[str], unit: Optional[str], source_used: str,
     granularity: str = "day",
+    *, correction: bool = False, reason: Optional[str] = None,
 ) -> SemanticObservation:
     """Upsert one observation for ``source_used``.
 
@@ -513,6 +604,10 @@ def write_cache(
     an existing row from ANOTHER source is left untouched and a new row is
     added for this source instead. Re-fetch overwrites this row's value and
     bumps ``fetched_at``. Values from different sources are never merged.
+
+    Rewriting an **already finalized** row is refused unless the caller declares
+    ``correction=True`` with a ``reason`` (see `_enforce_finalized_write_guard`).
+    Creating a previously absent historical point is always allowed.
     """
     obs = _read_base(session, concept_id, entity_type, entity_id, date,
                      source=source_used, granularity=granularity)
@@ -527,6 +622,20 @@ def write_cache(
         session.add(obs)
         inserted, touched = [date], [date]
     else:
+        _enforce_finalized_write_guard(
+            session, concept_id, entity_type, entity_id, granularity, [obs],
+            correction=correction, reason=reason,
+        )
+        # 每一次覆写都必须留痕，不只是 correction。此前 `write_cache` 从不写修订行，
+        # 于是单点刷新（`read` 的活路径）覆盖掉的旧值永久消失——as-of 回放对这类点
+        # 只能判 `vintage_unavailable`。这是 `define-ingest-revision-and-coverage` R1
+        # 要求「定型前修订 MUST 留痕」在单点写路径上的缺口，本 change 一并补上。
+        session.add(ObservationRevision(
+            concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
+            date=date, granularity=granularity, source_used=source_used,
+            revision_kind="overwrite", old_value=obs.value, new_value=value,
+            reason=reason, revised_at=now,
+        ))
         obs.value = value
         obs.unit = unit
         obs.fetched_at = now
@@ -636,6 +745,15 @@ def write_cache_range(
             source=source_used, granularity=granularity,
         )
     }
+    # 定型写闸：只拦「改写已有行」，不拦「首次写入历史点」（那是补数）。
+    # 带 reason 的写入视为声明式更正——这对整段重写（前复权）尤其必要：那是合法且
+    # 预期的历史重写，会被审计成一条 batch 修订；无 reason 的覆写与静默改写无法区分。
+    _enforce_finalized_write_guard(
+        session, concept_id, entity_type, entity_id, granularity,
+        [existing[d] for d in rows if d in existing],
+        correction=bool((revision_reason or "").strip()),
+        reason=revision_reason,
+    )
     now = datetime.now(timezone.utc)
     inserted, touched = [], []
     revised_points = 0

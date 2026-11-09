@@ -34,6 +34,10 @@ class SourceDeclaration:
     path: str
     revision_policy: str | None = None
     coverage_capability: str | None = None
+    #: 定型窗口宽限（天）。声明"该源的数据过了多久就不再修订"。缺失表示未声明，
+    #: 由 `fetch/finalization.py` 的粒度默认兜底——**兜底不等于已声明**，
+    #: 未声明的源照旧进待补清单。
+    finalize_grace_days: int | None = None
     #: 声明值非法（不在允许集合内）——与"未声明"是两件事，不能混为一谈。
     invalid: dict[str, str] = field(default_factory=dict)
 
@@ -50,6 +54,7 @@ class SourceDeclaration:
             "name": self.name, "path": self.path,
             "revision_policy": self.revision_policy,
             "coverage_capability": self.coverage_capability,
+            "finalize_grace_days": self.finalize_grace_days,
             "missing_fields": self.missing_fields,
             "invalid": dict(self.invalid),
             "declared": self.declared,
@@ -89,6 +94,17 @@ def declaration_from_manifest(path: str | Path) -> SourceDeclaration:
             decl.coverage_capability = cov
         else:
             decl.invalid["coverage_capability"] = cov
+    grace = data.get("finalize_grace_days")
+    if grace is not None:
+        try:
+            grace_int = int(grace)
+        except (TypeError, ValueError):
+            decl.invalid["finalize_grace_days"] = str(grace)
+        else:
+            if isinstance(grace, bool) or grace_int < 0:
+                decl.invalid["finalize_grace_days"] = str(grace)
+            else:
+                decl.finalize_grace_days = grace_int
     return decl
 
 
@@ -110,13 +126,98 @@ def inspect(declarations: list[SourceDeclaration]) -> dict[str, Any]:
     declared = [d for d in declarations if d.declared]
     pending = [d for d in declarations if d.missing_fields and not d.invalid]
     invalid = [d for d in declarations if d.invalid]
+    # 定型窗口是**新增**的声明位，与既有两个字段分开统计：混进 `pending` 会让
+    # 存量源的既有进度看起来倒退，而它们其实一项都没少。
+    window_pending = [
+        d.to_dict() for d in declarations
+        if d.finalize_grace_days is None and not d.invalid
+    ]
     return {
         "total": len(declarations),
         "declared": [d.to_dict() for d in declared],
         "pending": [d.to_dict() for d in pending],
         "invalid": [d.to_dict() for d in invalid],
-        "counts": {"declared": len(declared), "pending": len(pending),
-                   "invalid": len(invalid)},
+        "pending_finalize_window": window_pending,
+        "counts": {
+            "declared": len(declared),
+            "pending": len(pending),
+            "invalid": len(invalid),
+            "pending_finalize_window": len(window_pending),
+        },
+    }
+
+
+def probe_revision_policy_consistency(
+    session, source_names: Iterable[str] | None = None,
+    declarations: Iterable[SourceDeclaration] | None = None,
+) -> dict[str, Any]:
+    """核对 ``revision_policy`` 声明与**实际写入行为**是否一致。
+
+    只有会在数据里留下痕迹的违规才可事后检出，因此：
+
+    * ``immutable`` 源却存在 ``observation_revisions`` 行 → **报红**：声明"永不改"，
+      而库里明明有它改过的记录，二者必有一错。
+    * ``overwrite_with_history`` / ``batch_revision`` 源 → 覆写路径**总是**写修订行，
+      这是代码不变量（由写路径用例守），数据上无法反证"某次覆写没留痕"——没留痕就
+      没有痕迹可查。因此报 ``verified_by="invariant_test"`` 并**明说这不是数据核验**，
+      不许它冒充绿灯。
+    * 未声明 → 记 ``undeclared``，既不进一致也不进不一致。
+
+    ``consistent`` 只反映**数据可核**的部分；``not_contradicted_but_unproven`` 单独
+    列出，避免"没跑出问题"被读成"证明没问题"。
+    """
+    from sqlalchemy import func
+    from fd_open_data_mcp.models import ObservationRevision
+
+    decl_by_name = {d.name: d for d in (declarations or [])}
+    names = list(source_names) if source_names is not None else sorted(decl_by_name)
+    if not names:
+        names = [r[0] for r in
+                 session.query(ObservationRevision.source_used).distinct().all()]
+
+    rev_counts = {
+        src: cnt for src, cnt in session.query(
+            ObservationRevision.source_used, func.count(ObservationRevision.id)
+        ).group_by(ObservationRevision.source_used).all()
+    }
+
+    violations: list[dict[str, Any]] = []
+    verified_by_invariant: list[dict[str, Any]] = []
+    undeclared: list[str] = []
+    unchecked: list[str] = []
+
+    for name in names:
+        decl = decl_by_name.get(name)
+        policy = getattr(decl, "revision_policy", None) if decl else None
+        if policy is None:
+            undeclared.append(name)
+            continue
+        revs = rev_counts.get(name, 0)
+        if policy == "immutable":
+            if revs:
+                violations.append({
+                    "source": name, "kind": "behaviour_missing",
+                    "declared": "immutable", "revision_rows": revs,
+                    "detail": "声明 immutable，但库中存在该源的修订记录",
+                })
+            else:
+                # 无记录与"从未被改"同形，不能算证明，只能算未被反证。
+                unchecked.append(name)
+        else:
+            verified_by_invariant.append({
+                "source": name, "declared": policy,
+                "verified_by": "invariant_test", "revision_rows": revs,
+            })
+
+    return {
+        "sources_checked": len(names),
+        "violations": violations,
+        "verified_by_invariant": verified_by_invariant,
+        "undeclared": undeclared,
+        "not_contradicted_but_unproven": unchecked,
+        "consistent": not violations,
+        "note": ("consistent 只覆盖数据可核的部分；声明 overwrite_with_history 的源"
+                 "由写入不变量保证，非数据核验"),
     }
 
 

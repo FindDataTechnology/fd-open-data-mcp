@@ -1442,7 +1442,7 @@ MAX_SERIES_ROWS = 5000
 def read_series(concept_id: int | str, entity_type: str | None = None,
                 entity_id: int | None = None, start: str = "", end: str = "",
                 entity: str | None = None, scope: str | None = None,
-                fill_gaps: bool = False) -> dict:
+                fill_gaps: bool = False, as_of_vintage: str | None = None) -> dict:
     """Read a series for one concept x entity over [start, end].
 
     Local concepts (numeric ``concept_id``): serves the stored cache only,
@@ -1471,6 +1471,13 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         scope: optional named retrieval scope
         fill_gaps: fetch the missing intervals of this window (price concepts
             only, additive — never overwrites a stored value)
+        as_of_vintage: read the series **as known at** this instant (ISO date or
+            datetime). Replays ``observation_revisions`` only — never fetches and
+            never fills gaps. Points whose history cannot be reconstructed
+            (batch-rewritten spans, spans predating revision tracking, points not
+            yet written at that instant) are omitted from ``points`` and reported
+            in ``vintage`` / ``vintage_details`` instead of being served as
+            today's value.
     """
     from fd_open_data_mcp import federation, scoping
     from fd_open_data_mcp.entities.resolver import check_applicability
@@ -1536,6 +1543,34 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         excluded: list[tuple[str, str]] = []
         rows = read_cache_range(s, cid, entity_type, entity_id, start, end,
                                 excluded=excluded)
+        if as_of_vintage is not None:
+            # 历史时点读：只用已落库的修订重放，不取数、不填补。
+            # 不可精确回放的点不返回数值——宁缺，也不拿当前值冒充当年值。
+            from fd_open_data_mcp.fetch.vintage import read_range_as_of
+
+            asof = read_range_as_of(
+                s, cid, entity_type, entity_id, start, end, as_of_vintage,
+            )
+            out: dict = {
+                "concept_id": cid, "entity_type": entity_type, "entity_id": entity_id,
+                "start": start, "end": end,
+                "count": asof["count"], "points": asof["values"],
+                "as_of_vintage": asof["as_of_vintage"],
+                "vintage": asof["vintage"],
+            }
+            if asof["details"]:
+                out["vintage_details"] = asof["details"]
+            if not asof["vintage"]["fully_exact"]:
+                out["note"] = (
+                    "历史回放不完整："
+                    f"精确 {asof['vintage']['exact']} / 整段不可回放 "
+                    f"{asof['vintage']['batch_unreplayable']} / 无历史 "
+                    f"{asof['vintage']['vintage_unavailable']} / 当时不存在 "
+                    f"{asof['vintage']['absent']}；不可回放的点未返回数值"
+                )
+            if resolved:
+                scoping.record_hit(s, resolved["name"], out["count"])
+            return out
         if fill_gaps:
             from fd_open_data_mcp.fetch.gapfill import fill_gaps as _fill
 

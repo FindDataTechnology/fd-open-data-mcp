@@ -213,6 +213,11 @@ class Concept(Base):
     source = Column(String(64), nullable=True)  # origin indicator_def source
     verified = Column(Boolean, nullable=False, default=True)
     deprecated = Column(Boolean, nullable=False, default=False)  # retired duplicate; excluded from discovery + dispatch
+    # 定型窗口覆盖（make-observation-vintage-readable）：NULL = 未声明，由 fetch/finalization.py
+    # 的粒度默认兜底并进巡检待补清单。>0 = 在该粒度的**周期基数**上追加天数——年度的基数是
+    # 次年末，故 0 表示"次年整年可修订、第三年元旦定型"，不是"跨年即定型"。
+    # 刻意不给 server_default：有默认值会让"未声明"与"声明为 0"变成同一件事。
+    finalize_grace_days = Column(Integer, nullable=True)
     created_at = Column(DateTime, default=_now)
 
     bindings = relationship("ConceptBinding", back_populates="concept", cascade="all, delete-orphan")
