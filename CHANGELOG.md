@@ -2,6 +2,19 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.54] - 2026-11-09
+- **fix(circuit)**: 探针扫描不再漏掉两类"卡死"状态。`open_for_probe()` 原来只认
+  `state == "open"` 且必须有未到期的 `cooldown_until`，于是：
+  - **`manual_reset` 留下的 HALF_OPEN 永远不会被探**。`manual_reset` 的文档说"之后交给探针"，
+    而 `is_selectable()` 又明确排除 HALF_OPEN —— 两头都不管，等于**永久停用**（circuit 键没有
+    TTL）。实测：`circuit:gost-own:7` / `circuit:gost-mesh:9` 是 2026-10-26
+    `manual_reset_by=redteam-cleanup` 留下的，十二天后仍是 HALF_OPEN；`fd-proxy-probe`
+    报 `probed: 0` 就是这个原因。
+  - **OPEN 但没有 `cooldown_until` 的键**同样永远不被探（状态机只会带着 cooldown 写 OPEN，
+    缺字段属历史残留，没人会重写它）。
+  现在两类都纳入探测；未到期的 cooldown 与 `permanent` 仍然排除。fd-proxy-service 里那份
+  mirror 同步改（实际跑探针的是本仓）。
+
 ## [0.5.53] - 2026-11-09
 - **fix(ingest)**: direct-script 任务**一律从 env 取 DSN**，四个脚本补齐 env 回退。
   0.5.48 把 `--db-url` 从命令行拿掉之后，只认这个 flag 的脚本就永远连不上库：

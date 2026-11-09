@@ -257,10 +257,25 @@ def probe_transition(source: str, unit: str, probe_ok: bool) -> dict:
 
 
 def open_for_probe(r_client=None) -> list[tuple[str, str]]:
-    """Scan for circuits that are OPEN past their cooldown (ready for HALF_OPEN
-    probe). Used by the probe job. Returns ``[(source, unit), ...]`` where
-    ``unit`` is a string (a ``proxies.id`` rendered as text, or a shared exit
-    IP) — the caller resolves it to a concrete address to probe.
+    """Scan for circuits the probe job should resolve. Returns
+    ``[(source, unit), ...]`` where ``unit`` is a string (a ``proxies.id``
+    rendered as text, or a shared exit IP) — the caller resolves it to a
+    concrete address to probe.
+
+    Three states are eligible, and the second and third are why this is not
+    simply "OPEN past cooldown":
+
+    * ``OPEN`` with an expired ``cooldown_until`` — the ordinary case.
+    * ``OPEN`` with **no** ``cooldown_until`` at all. Nothing else ever rewrites
+      such a key (the state machine only sets OPEN together with a cooldown),
+      so without this branch a legacy/incomplete key sits OPEN forever: never
+      probed, never selectable.
+    * ``HALF_OPEN``. ``manual_reset`` parks a circuit here on purpose and its
+      docstring says the probe owns it from there — but ``is_selectable``
+      excludes HALF_OPEN, so if the probe skips it too the proxy is stranded
+      permanently (circuit keys carry no TTL). Observed live: a
+      ``manual_reset_by=redteam-cleanup`` pair from 2026-10-26 was still
+      HALF_OPEN twelve days later.
 
     Note: source here can be either real_source (preferred) or library name
     (fallback when real_sources not declared).
@@ -272,12 +287,22 @@ def open_for_probe(r_client=None) -> list[tuple[str, str]]:
     out = []
     for key in r.scan_iter(match="circuit:*", count=200):
         h = r.hgetall(key)
-        if not h or h.get("state") != "open":
+        if not h:
             continue
         if h.get("permanent") in ("1", "true", "True"):
             continue
-        cd = h.get("cooldown_until")
-        if cd and float(cd) <= now:
+        state = h.get("state")
+        if state == "half_open":
+            eligible = True
+        elif state == "open":
+            cd = h.get("cooldown_until")
+            try:
+                eligible = (not cd) or float(cd) <= now
+            except (TypeError, ValueError):
+                eligible = True  # unparseable cooldown: heal rather than strand
+        else:
+            continue
+        if eligible:
             # parse source:unit from "circuit:{source}:{unit}"
             parts = key.split(":", 2)
             if len(parts) == 3:

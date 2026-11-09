@@ -136,3 +136,47 @@ def test_probe_recovers_the_whole_group(session, fake_redis):
 
     for row in (a, b):
         assert circuit.is_selectable("fred", pool.circuit_unit(row)) is True
+
+
+# ─── the probe scan must not strand a circuit ───────────────────────────────
+
+def test_half_open_is_probe_eligible(session, fake_redis):
+    """manual_reset parks a circuit in HALF_OPEN and its docstring says the
+    probe owns it — but is_selectable() excludes HALF_OPEN, so if the scan
+    skipped it too the proxy would be unusable forever (keys have no TTL).
+    A manual_reset_by=redteam-cleanup pair from 2026-10-26 was still HALF_OPEN
+    twelve days later, which is what prompted this test."""
+    _addr(session, 30081)
+    fake_redis.hset(f"circuit:fred:{EXIT_A}", mapping={
+        "state": "half_open", "permanent": "0",
+        "manual_reset_by": "redteam-cleanup"})
+
+    assert ("fred", EXIT_A) in circuit.open_for_probe()
+
+
+def test_open_without_cooldown_is_probe_eligible(session, fake_redis):
+    """The state machine always writes OPEN together with a cooldown, so an
+    OPEN key with none is legacy/incomplete state. Nothing else rewrites it:
+    left alone it is never probed and never selectable."""
+    _addr(session, 30081)
+    fake_redis.hset(f"circuit:fred:{EXIT_A}", mapping={
+        "state": "open", "permanent": "0", "open_cycles": "0"})
+
+    assert ("fred", EXIT_A) in circuit.open_for_probe()
+
+
+def test_open_before_cooldown_is_not_yet_eligible(session, fake_redis):
+    """A cooldown that has not elapsed must still hold the circuit back."""
+    _addr(session, 30081)
+    fake_redis.hset(f"circuit:fred:{EXIT_A}", mapping={
+        "state": "open", "permanent": "0", "cooldown_until": str(9_999_999_999)})
+
+    assert ("fred", EXIT_A) not in circuit.open_for_probe()
+
+
+def test_permanent_is_never_probed(session, fake_redis):
+    _addr(session, 30081)
+    fake_redis.hset(f"circuit:fred:{EXIT_A}", mapping={
+        "state": "half_open", "permanent": "1"})
+
+    assert ("fred", EXIT_A) not in circuit.open_for_probe()
