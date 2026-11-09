@@ -193,6 +193,37 @@ def test_series_points_carry_source_and_caliber_caveats():
     assert "2024Q3" in joined                       # 已停更
 
 
+def test_series_caps_the_payload_and_says_how_to_get_more():
+    """harden-fleet-tool-face-and-queue 3.1: one call must not dump 354 points.
+
+    Live 2026-11-09: a 354-point series produced a 43 KB tool/result, and three
+    such calls pushed a 128k-window model into `context pressure (6
+    compactions)` — the turn then timed out with no audit trail at all.
+    """
+    concept = {"id": 1, "code": "hotel.cn.star_rated.occupancy.all.quarterly",
+               "name_zh": "平均出租率", "name_en": "occupancy", "unit": "%",
+               "frequency": "quarter", "entity_type": "region", "category": "行业经营"}
+    rows = [
+        {"date": f"{2000 + i}-01-01", "value": float(i), "unit": "%",
+         "entity_type": "region", "entity_id": 1, "granularity": "quarter",
+         "source_used": "mct-star-hotel", "fetched_at": "2026-11-08T00:00:00Z"}
+        for i in range(120)
+    ]
+    tools = _tools(_FakeSession(concept=concept, observations=rows))
+
+    capped = tools["hotel_series"](code=concept["code"])
+    assert capped["count"] == 60, "默认只返回最近 60 点"
+    assert capped["total_count"] == 120
+    assert capped["truncated"]["total"] == 120
+    assert "how_to_get_more" in capped["truncated"]
+    assert capped["as_of"] == "2119-01-01", "保留的是最近的点，不是最早的"
+
+    # 显式提高上限即取全量（窗口/limit 是取全量的正路）。
+    full = tools["hotel_series"](code=concept["code"], limit=500)
+    assert full["count"] == 120
+    assert "truncated" not in full
+
+
 def test_series_read_requires_the_row_to_belong_to_its_entity():
     """A row's declared class must be the class of the entity it hangs off.
 

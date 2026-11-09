@@ -62,6 +62,13 @@ SEGMENT_UNAVAILABLE = {
 }
 
 #: 星级饭店口径的定谳（板面与工具面同源，逐字）
+#: 单次 hotel_series 返回的点数上限（harden-fleet-tool-face-and-queue 3.1）。
+#: 一个概念一次吐 354 点会把单条 tool/result 推到 40 KB 以上，叠加 30 个 MCP
+#: server 的工具面与技能清单后，小窗口模型三四步就进压缩风暴（实测
+#: `context pressure (5-6 compactions)`）。默认只给最近 60 点，够画近三年季度线；
+#: 需要更早期次就传更窄的 start/end 窗口或显式提高 limit。
+HOTEL_SERIES_MAX_POINTS = 60
+
 CALIBER_STAR_ONLY = (
     "星级旅游饭店口径（文旅部）：与全行业酒店（中国饭店协会 37.5 万家）不是同一宇宙，"
     "不得据此外推全行业景气"
@@ -186,6 +193,9 @@ def register_hotel_tools(mcp: FastMCP) -> None:
         code: str,
         source_used: str | None = None,
         entity_id: int | None = None,
+        start: str | None = None,
+        end: str | None = None,
+        limit: int = HOTEL_SERIES_MAX_POINTS,
     ) -> dict:
         """Read one hotel series by concept code (read-only).
 
@@ -251,6 +261,14 @@ def register_hotel_tools(mcp: FastMCP) -> None:
             if entity_id is not None:
                 where.append("o.entity_id = :eid")
                 params["eid"] = entity_id
+            # 窗口参数与体积上限同批（3.1）：只给「最近 N 点」时调用方无法取更早
+            # 期次，窗口就是取全量的正路。
+            if start:
+                where.append("o.date >= :dstart")
+                params["dstart"] = str(start)
+            if end:
+                where.append("o.date <= :dend")
+                params["dend"] = str(end)
             rows = s.execute(
                 text(
                     "SELECT o.date, o.value::float8 AS value, o.unit,"
@@ -278,21 +296,41 @@ def register_hotel_tools(mcp: FastMCP) -> None:
             caveats = []
             if str(concept["code"]).startswith("hotel.cn.star_rated"):
                 caveats.extend([CALIBER_STAR_ONLY, CALIBER_50CITY, CALIBER_DISCONTINUED])
-            return {
+            total = len(points)
+            cap = max(1, int(limit or HOTEL_SERIES_MAX_POINTS))
+            truncated = total > cap
+            # 体积上限（harden-fleet-tool-face-and-queue 3.1）：一个概念一次吐 354
+            # 点会让单条 tool/result 到 40 KB 以上，小窗口模型三四步就进压缩风暴。
+            # 默认只返回最近 cap 点并说明如何取全量；显式传更大的 limit 或更窄的
+            # start/end 窗口仍可取到全部。
+            shown = points[-cap:] if truncated else points
+            out = {
                 "code": concept["code"],
                 "concept": dict(concept),
                 "sources": sorted({r["source_used"] for r in rows if r["source_used"]}),
-                "count": len(points),
-                "start": points[0]["date"],
-                "end": points[-1]["date"],
-                "as_of": points[-1]["date"],
-                "points": points,
+                "count": len(shown),
+                "total_count": total,
+                "start": shown[0]["date"],
+                "end": shown[-1]["date"],
+                "as_of": shown[-1]["date"],
+                "points": shown,
                 "caveats": caveats,
                 "notes": [
                     "期数 <24 的序列只作水平对照，不得画趋势线",
                     "分省/按星级/城市/全国是不同实体；未传 entity_id 时本返回可能混合多实体",
                 ],
             }
+            if truncated:
+                out["truncated"] = {
+                    "returned": len(shown),
+                    "total": total,
+                    "how_to_get_more": "传更窄的 start/end 窗口，或显式提高 limit（上限内）",
+                }
+                out["notes"].append(
+                    f"已按体积上限只返回最近 {len(shown)} 点（共 {total} 点）："
+                    "需要更早的期次请缩小 start/end 窗口"
+                )
+            return out
         except Exception as exc:  # noqa: BLE001
             return _session_failure(exc)
         finally:
