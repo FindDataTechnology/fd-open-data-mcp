@@ -44,6 +44,24 @@ from fd_open_data_mcp.models import Concept, ConceptBinding, Function
 from fd_open_data_mcp.ranking.scorer import rank_sources_for_concept, record_fetch_outcome
 from fd_open_data_mcp.semantic.bindings import dispatch_candidates, promote_on_sample
 
+
+def _write_granularity(frequency: str | None) -> str:
+    """概念频率 → 写入用的 granularity 标签（day|month|year）。
+
+    必须与 `crawl/planner._granularity_for` 同义：读路径与爬虫路径若用不同标签
+    标同一个数据点，去重键 `(date, granularity)` 会把它们当两行——月度概念在
+    爬虫行 TTL 过期后被 read 一次，就会并排出 day 行，`read_series` 于是同一
+    日期返回两次，求和/连乘双计。
+
+    刻意不 import planner：planner 属 crawl 层，fetch 层反向依赖会把整个抓取
+    调度拉进读路径。两处实现同义由 `tests/test_write_granularity.py` 对着断言。
+    """
+    if frequency == "yearly":
+        return "year"
+    if frequency == "monthly":
+        return "month"
+    return "day"
+
 THRESHOLD = 0.6
 logger = logging.getLogger(__name__)
 
@@ -234,7 +252,8 @@ def dispatch_one(
                 record_fetch_outcome(session, cand_source, concept_id, "ok", latency)
                 promote_on_sample(session, fn.id, returned_columns(result))
                 write_cache(session, concept_id, entity_type, entity_id, date,
-                            str(value), concept.unit, cand_source)
+                            str(value), concept.unit, cand_source,
+                            granularity=_write_granularity(concept.frequency))
                 return {"date": date, "value": value, "unit": concept.unit,
                         "source_used": cand_source, "real_source_used": real_source, "from_cache": False}
 
@@ -529,6 +548,7 @@ def _read_range_one(
                 write_cache_range(
                     session, concept_id, entity_type, entity_id,
                     series, concept.unit, source,
+                    granularity=_write_granularity(concept.frequency),
                 )
                 return [
                     {"date": d, "value": v, "unit": concept.unit, "source_used": source}
