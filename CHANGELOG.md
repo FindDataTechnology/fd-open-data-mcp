@@ -2,6 +2,15 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.57] - 2026-11-09
+- **fix(reconciler)**: `no_op` / `redundant` 的 run 现在**记录跳过原因**。过去这两种"合法跳过"
+  关账时 `detail=NULL`、`plan_cells=0`，在账本上和"健康但没数"完全一样 —— 2026-11-09 巡检发现
+  **四个 enabled 策略连续 7–8 轮全是跳过、零出数**（`wbgapi-wdi-probe`、`country-macro-yearly`、
+  `fund-etl-lof-ohlcv`、`macro-cn-money-monthly`），而库里查不出它们"为什么"跳过，只能人工猜。
+  现在关账时按计数写死因：空计划 → "plan was empty — watermark already current"；
+  抓了但全重复 → "fetched, but every key was already stored"。原因由 run 行上已有的计数派生，
+  不增加任何查询。
+
 ## [0.5.56] - 2026-11-09
 - **fix(seed)**: `seed_all` 不再因为“集群不存在”整个事务失败。`EGRESS_PODS` 里 aliyun 写死
   `cluster_id=3`，而当前 `clusters` 表只有 1/4/6/9 —— 插入撞

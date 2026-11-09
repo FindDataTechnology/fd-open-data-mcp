@@ -29,7 +29,7 @@ import os
 import subprocess
 import urllib.parse
 import urllib.request
-from typing import Protocol
+from typing import Optional, Protocol
 
 from croniter import croniter
 from sqlalchemy import func
@@ -1284,6 +1284,12 @@ def classify_yield(run: PolicyRun) -> str:
     rows_new reported incrementally per flush); the verdict is derived HERE,
     at run closure, because a SIGKILLed pod must not be able to withhold one:
     a job that succeeded with no counters ever written is itself zero_yield.
+
+    ``no_op`` and ``redundant`` are legitimate outcomes, but on their own they
+    are indistinguishable from a policy that has been silently spinning: four
+    enabled policies sat at 7-8 all-skip rounds with ``detail`` NULL on
+    2026-11-09, and nothing in the ledger could say why. The caller records a
+    reason via :func:`_skip_detail`; keep the two in step.
     """
     if run.plan_cells == 0:
         # checked before the counters-absent branch: an empty plan never
@@ -1297,6 +1303,26 @@ def classify_yield(run: PolicyRun) -> str:
     if run.rows_new == 0:
         return "redundant"    # fetched, but the window was already complete
     return "success"
+
+
+def _skip_detail(run: PolicyRun) -> Optional[str]:
+    """Why a ``no_op`` / ``redundant`` run produced nothing.
+
+    Every skip used to close with ``detail=NULL`` and ``plan_cells=0``, which
+    makes an empty round indistinguishable from a healthy one at the ledger
+    level — the 2026-11-09 audit found four enabled policies at 7-8 consecutive
+    all-skip rounds and could not tell why from the data. The reason is derived
+    from counters already on the run row, so this costs nothing at close time.
+    """
+    if run.status == "no_op":
+        if run.plan_cells == 0:
+            return ("no_op: the plan was empty — the policy's watermark is "
+                    "already current for its date policy (nothing due)")
+        return "no_op: nothing to do"
+    if run.status == "redundant":
+        return ("redundant: fetched, but every key was already stored — the "
+                "window was complete before this run")
+    return None
 
 
 def _frozen_window(policy: CrawlPolicy, local_today: dt.date) -> str | None:
@@ -1421,6 +1447,12 @@ def reconcile_once(
                 # is never re-synthesized or overwritten here. detail feeds
                 # policy_runs.detail AND the crawl_runs.error_head mirror.
                 run.detail = _synthesize_failure_detail(launcher, run.job_ref)
+            if run.status in ("no_op", "redundant") and not run.detail:
+                # A skip that records no reason is indistinguishable from a
+                # healthy round at the ledger level: four enabled policies sat
+                # at 7-8 consecutive all-skip rounds (2026-11-09) and the data
+                # could not say why. Always name the reason.
+                run.detail = _skip_detail(run)
             run.finished_at = now
             summary["probed_closed"] += 1
             closed.append(run)
