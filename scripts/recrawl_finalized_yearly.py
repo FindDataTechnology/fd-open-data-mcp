@@ -73,13 +73,19 @@ def _parse_args(argv=None):
     return p.parse_args(argv)
 
 
-def find_affected(session, *, max_years: int):
-    """找出「被旧规则过早定型」的概念与待重取年份。
+def find_affected(session, *, max_years: int = 5):
+    """找出「被旧规则过早定型」的 (概念, 实体) 与其重取年份。
 
     旧规则：年度观测在**次年 1 月 1 日**即定型。
     新规则：在**次年末**定型（次年整年可修订）。
 
-    因此受影响的是 date.year == 上一年 的那些行——旧规则已定型，新规则仍可修订。
+    因此受影响的**只有 prev_year 这一年**（今天 2026-11-10 → 2025）：
+    旧规则在 2026-01-01 已把 2025 判为定型，新规则要到 2026-12-31 才定型。
+
+    更早的年份在两种规则下都已定型，重取它们既无意义也不该动——把 ranges 设成
+    「整段历史」会让 --apply 对每一对重抓五年，把上游压垮（实测：整段是 13,990 对
+    / 62,470 行，而真正受影响的是 ~8,700 行，差 7 倍）。
+    `max_years` 仅用于回看窗口上限，不参与重取范围。
     """
     from sqlalchemy import text
 
@@ -94,11 +100,12 @@ def find_affected(session, *, max_years: int):
         JOIN concepts c ON c.id = o.concept_id
         WHERE LOWER(COALESCE(c.frequency, '')) IN ('yearly', 'annual', 'year')
           AND o.granularity = 'year'
-          AND o.date >= :lo
+          -- 只取受影响的那一年：旧规则已定型、新规则仍可修订
+          AND o.date >= :lo AND o.date <= :hi
         GROUP BY c.id, c.code, c.frequency, o.entity_type, o.entity_id
         ORDER BY n DESC
         """
-    ), {"lo": f"{prev_year - max_years}-01-01"}).all()
+    ), {"lo": f"{prev_year}-01-01", "hi": f"{prev_year}-12-31"}).all()
     return [dict(r._mapping) for r in rows], prev_year
 
 
