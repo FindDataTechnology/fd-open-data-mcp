@@ -288,6 +288,20 @@ class Database:
             if db_path:
                 Path(db_path).parent.mkdir(parents=True, exist_ok=True)
 
+        # Pool sizing: SQLAlchemy's defaults (5 + 10 overflow = 15) are below this
+        # service's concurrency. The HTTP transport runs a large thread pool, and a
+        # cold read holds its connection across the whole upstream dispatch (ranked
+        # failover × retries), so the 16th concurrent read waits out pool_timeout
+        # and then raises QueuePool limit. Sizing it to match the worker count is
+        # the cheap half of the fix; the structural half (releasing the session
+        # during network I/O) is a dispatch-layer change and is tracked separately.
+        pool_kwargs: dict = {}
+        if not self._database_url.startswith("sqlite"):
+            pool_kwargs = {
+                "pool_size": int(os.environ.get("FD_DB_POOL_SIZE", "20")),
+                "max_overflow": int(os.environ.get("FD_DB_MAX_OVERFLOW", "20")),
+                "pool_timeout": int(os.environ.get("FD_DB_POOL_TIMEOUT", "30")),
+            }
         self._engine = create_engine(
             self._database_url,
             echo=False,
@@ -296,6 +310,7 @@ class Database:
                 if self._database_url.startswith("sqlite")
                 else {}
             ),
+            **pool_kwargs,
         )
 
         if self._database_url.startswith("sqlite"):
