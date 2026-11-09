@@ -9,11 +9,14 @@ concurrency). New sources declare their own ban signals here at onboarding.
 """
 from __future__ import annotations
 
+import logging
 import os
 
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.models import BanRule, Proxy, SourceProbe, SourceRateLimit
+
+logger = logging.getLogger(__name__)
 
 # (rule_type, pattern, classification, streak_min, priority) per source.
 BAN_RULES: dict[str, list[tuple]] = {
@@ -236,7 +239,19 @@ def register_egress_pod(session: Session, name: str, host: str, port: int,
     server's own IP — decoupled from the worker's node. Idempotent: re-running
     updates host/port/auth in place (so an IP rotation is just a re-seed).
     """
+    from fd_open_data_mcp.models import Cluster
+
     label = f"gost-{name}"
+    if cluster_id is not None and session.get(Cluster, cluster_id) is None:
+        # EGRESS_PODS pins cluster ids from the original deployment. On a fleet
+        # whose clusters table has been rebuilt (it holds 1/4/6/9 today, with
+        # aliyun's id 3 gone) the insert dies on proxies_cluster_id_fkey and —
+        # because seed_all runs in one transaction — takes the ban_rules /
+        # rate_limits / probes seeding down with it. A missing cluster just means
+        # "no per-cluster tag"; the address itself is still valid.
+        logger.warning("egress pod %s: cluster_id=%s not in clusters; "
+                       "seeding without the cluster tag", name, cluster_id)
+        cluster_id = None
     row = session.query(Proxy).filter_by(label=label).first()
     if row is None:
         session.add(Proxy(scheme="http", ip=host, port=port, auth=auth,

@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.56] - 2026-11-09
+- **fix(seed)**: `seed_all` 不再因为“集群不存在”整个事务失败。`EGRESS_PODS` 里 aliyun 写死
+  `cluster_id=3`，而当前 `clusters` 表只有 1/4/6/9 —— 插入撞
+  `proxies_cluster_id_fkey`，连带把 ban_rules / rate_limits / probes 的种子一起回滚，
+  等于**这套库上 `seed-proxy-health` 完全不可用**。现在缺集群只降级为“不带 cluster 标签”
+  并打 warning，地址照常登记。回归测试两条（缺集群不炸 / 有集群仍带标签）。
+
 ## [0.5.55] - 2026-11-09
 - **fix(nbs)**: 让 NBS 这条线**可被探针验证、可被判 ban**。`nbs` 的 20 条电路键用的
   real_source 是 `nbs`（行业脚本上报的名字），而适配器/清单叫 `nbs-gdp`，探针又是**按电路键的
