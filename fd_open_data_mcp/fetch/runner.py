@@ -281,6 +281,13 @@ RUNNERS: dict[str, Any] = {
     "edgar": run_edgar,
     "wbgapi": run_wbgapi,
     "nbs-gdp": _run_nbs_gdp,
+    # The industry scripts report ``real_source="nbs"`` (that is the name in
+    # fetch_log and in every circuit key), while the manifest/runner is called
+    # ``nbs-gdp``. Probe rows are looked up by the *circuit's* source name, so
+    # without this alias the probe could never dial an ``nbs`` circuit — it
+    # found no runner and, worse, no probe row at all, and silently assumed
+    # healthy. Same adapter, two names.
+    "nbs": _run_nbs_gdp,
     "polygon": _run_polygon,
     "datacommons": _run_datacommons,
 }

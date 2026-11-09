@@ -68,6 +68,21 @@ BAN_RULES: dict[str, list[tuple]] = {
         ("error", "ConnectionError", "ban", 3, 80),
         ("error", "timeout", "transient", 0, 70),
     ],
+    # The industry scripts report ``real_source="nbs"`` — that is what lands in
+    # fetch_log and in every circuit key — while the adapter/manifest is
+    # ``nbs-gdp``. Without this entry an NBS ban classified as plain
+    # ``transient`` (the default for a 4xx), i.e. "healthy", so a genuinely
+    # banned egress was closed again on the next probe cycle. Same rules as
+    # nbs-gdp: one adapter, two names.
+    "nbs": [
+        ("status", "429", "ban", 0, 100),
+        ("status", "403", "ban", 0, 100),
+        ("status", "404", "transient", 0, 95),
+        ("status", "5xx", "transient", 0, 90),
+        ("error", "RemoteDisconnected", "ban", 3, 80),
+        ("error", "ConnectionError", "ban", 3, 80),
+        ("error", "timeout", "transient", 0, 70),
+    ],
 }
 
 # source -> (max_qps, max_concurrent). Conservative for IP-rate-limited sources.
@@ -93,6 +108,12 @@ PROBES: dict[str, tuple[str, dict]] = {
     }),
     "yfinance": ("ticker_history", {"symbol": "AAPL", "period": "1d"}),
     "nbs-gdp": ("get_gdp_quarterly", {"start_year": 2024}),
+    # Keyed by the name the CIRCUITS use ("nbs" = the industry scripts'
+    # real_source), not the adapter's. _probe_one() looks the row up by the
+    # circuit's source and dials run_upstream(source, …), so both the row and
+    # the runner alias must exist under this name or the probe silently
+    # assumed the egress was healthy.
+    "nbs": ("get_gdp_quarterly", {"start_year": 2024}),
 }
 
 

@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.55] - 2026-11-09
+- **fix(nbs)**: 让 NBS 这条线**可被探针验证、可被判 ban**。`nbs` 的 20 条电路键用的
+  real_source 是 `nbs`（行业脚本上报的名字），而适配器/清单叫 `nbs-gdp`，探针又是**按电路键的
+  source 名**去查 `source_probes` 并 `run_upstream(source, …)`，于是：
+  - 查不到 `nbs` 的探针行 → `_probe_one` 直接 `return True`（"assume healthy; can't probe"）
+    → **假愈合**：真被封的出口在下个周期被无条件关闭；
+  - 即使有行，`RUNNERS` 里也没有 `nbs`，`run_upstream` 会抛 "no runner for source nbs"；
+  - `ban_rules` 也没有 `nbs`，4xx 走默认分支 → `transient`（=健康），二次假绿。
+  现在：`RUNNERS["nbs"]` 别名指向同一适配器、`BAN_RULES["nbs"]` 与 `PROBES["nbs"]` 与
+  `nbs-gdp` 同规则同探针（`RATE_LIMITS` 亦同）。一行数据 + 一行别名，避免 real_source 与
+  适配器名不一致时静默退化成"永远健康"。
+
 ## [0.5.54] - 2026-11-09
 - **fix(circuit)**: 探针扫描不再漏掉两类"卡死"状态。`open_for_probe()` 原来只认
   `state == "open"` 且必须有未到期的 `cooldown_until`，于是：
