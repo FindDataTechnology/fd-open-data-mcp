@@ -53,6 +53,7 @@ from __future__ import annotations
 import argparse
 import datetime
 import logging
+import os
 import signal
 import socket
 import sys
@@ -354,8 +355,11 @@ def ingest(engine, ids, done_ids, bs_c, ps_c, cf_c, shard):
 
 def main() -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db-url",
-                    default="postgresql+psycopg2://postgres:admin123@127.0.0.1:55432/postgres")
+    # No localhost default: this script used to fall back to a dev DSN
+    # (postgres:admin123@127.0.0.1:55432) and, after the launcher stopped
+    # passing --db-url, every Job died on connection-refused instead of saying
+    # why. Resolve from the env the launcher sets, or refuse loudly.
+    ap.add_argument("--db-url")
     ap.add_argument("--limit", type=int, default=None, help="cap stocks per shard (testing)")
     ap.add_argument("--shard", type=int, default=0, help="0-indexed shard id")
     ap.add_argument("--num-shards", type=int, default=1, help="total shard count")
@@ -363,7 +367,12 @@ def main() -> int:
     ap.add_argument("--dry-run", action="store_true")
     args = ap.parse_args()
 
-    engine = create_engine(args.db_url)
+    db_url = args.db_url or os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL")
+    if not db_url:
+        ap.error("no database URL: pass --db-url or set "
+                 "FD_OPEN_DATA_MCP_DATABASE_URL (launched Jobs use the latter)")
+
+    engine = create_engine(db_url)
     ids = load_stock_identifiers(engine)
     log.info("A-share identifier map: %d stocks", len(ids))
     if not ids:

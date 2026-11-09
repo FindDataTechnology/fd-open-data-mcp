@@ -43,6 +43,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import os
 import signal
 import socket
 import sys
@@ -286,15 +287,23 @@ def quarter_dates(start_year: int, end_year: int) -> list[str]:
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser()
-    ap.add_argument("--db-url",
-                    default="postgresql+psycopg2://postgres:admin123@127.0.0.1:55432/postgres")
+    # No localhost default: this script used to fall back to a dev DSN
+    # (postgres:admin123@127.0.0.1:55432) and, after the launcher stopped
+    # passing --db-url, every Job died on connection-refused instead of saying
+    # why. Resolve from the env the launcher sets, or refuse loudly.
+    ap.add_argument("--db-url")
     ap.add_argument("--start-year", type=int, default=2015)
     ap.add_argument("--end-year", type=int, default=2026)
     args = ap.parse_args()
 
+    db_url = args.db_url or os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL")
+    if not db_url:
+        ap.error("no database URL: pass --db-url or set "
+                 "FD_OPEN_DATA_MCP_DATABASE_URL (launched Jobs use the latter)")
+
     socket.setdefaulttimeout(SOCKET_TIMEOUT)
 
-    engine = create_engine(args.db_url,
+    engine = create_engine(db_url,
                            connect_args={"connect_timeout": 10},
                            pool_pre_ping=True,
                            pool_recycle=300)

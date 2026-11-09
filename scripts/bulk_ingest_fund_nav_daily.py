@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import datetime
 import logging
+import os
 import re
 import signal
 import socket
@@ -268,11 +269,16 @@ def main() -> int:
 
     if args.selfcheck:
         return selfcheck()
-    if not args.db_url:
-        ap.error("--db-url is required unless --selfcheck")
+    # The DSN normally arrives in the environment: the launcher stopped putting
+    # it on the command line (it leaked into the pod spec and /proc/cmdline).
+    # --db-url stays supported for deliberate local runs and backfills.
+    db_url = args.db_url or os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL")
+    if not db_url:
+        ap.error("no database URL: pass --db-url or set "
+                 "FD_OPEN_DATA_MCP_DATABASE_URL (launched Jobs use the latter)")
 
     socket.setdefaulttimeout(SOCKET_TIMEOUT)
-    engine = create_engine(args.db_url, connect_args={"connect_timeout": 10},
+    engine = create_engine(db_url, connect_args={"connect_timeout": 10},
                            pool_pre_ping=True, pool_recycle=300)
 
     code_map = load_code_map(engine)
