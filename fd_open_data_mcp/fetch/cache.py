@@ -738,6 +738,12 @@ def write_cache_range(
     """
     if not rows:
         return 0
+    # 留存契约闸门（establish-data-retention-principle R1/R2）。
+    # 默认 off（零开销）；warn 只报警；enforce 缺契约即拒写。放在"定型写闸"之前：
+    # 契约回答的是"这个源该不该有数据"，比"这一行能不能改"更前置。
+    from fd_open_data_mcp.fetch.retention import check_write_allowed
+
+    check_write_allowed(session, concept_id=concept_id, source=source_used)
     existing = {
         obs.date: obs
         for obs in _read_base_range(

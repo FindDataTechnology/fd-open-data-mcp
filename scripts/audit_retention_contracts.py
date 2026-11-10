@@ -85,15 +85,49 @@ class Contract:
     budget_mb: int
 
 
-def resolve_contract(source: str | None, family: str | None) -> Contract | None:
-    """按 (source, family) 找契约：先精确匹配，再退到该源的 `*` 族，最后全源 `*`。"""
+def resolve_contract(source: str | None, family: str | None, db_contracts=None) -> Contract | None:
+    """按 (source, family) 找契约：**先库表，再 bootstrap 常量**。
+
+    优先级不能反：`data_retention_contracts` 是制度落点（有人可以改它、also 有 note 字段），
+    而 `DEFAULT_CONTRACTS` 只是 seed 之前的引导值。若反过来读，DBA 在库里改的契约会被
+    代码常量静默覆盖——那是"改了配置没生效"的经典坑。
+    """
     s = source or "(null)"
     f = family or "(null)"
     for cand in ((s, f), (s, "*"), ("*", "*")):
+        if db_contracts:
+            for key, c in db_contracts.items():
+                if key == cand:
+                    return c
         for src, fam, cls, win, refetch, mut, budget in DEFAULT_CONTRACTS:
             if (src, fam) == cand:
                 return Contract(s, f, cls, win, refetch, mut, budget)
     return None
+
+
+def load_db_contracts(conn) -> dict:
+    """从 `data_retention_contracts` 读契约；表不存在时返回空（迁移未跑也要能审）。"""
+    from sqlalchemy import text
+
+    try:
+        rows = conn.execute(text("""
+            SELECT source, family, retention_class, retention_window_days,
+                   re_fetchable, upstream_history_mutable, volume_budget_mb
+              FROM data_retention_contracts
+        """)).all()
+    except Exception:  # noqa: BLE001 — 表还没建：退到 bootstrap 常量
+        return {}
+    out = {}
+    for r in rows:
+        m = r._mapping
+        if not m["retention_class"]:
+            continue   # class 为空的契约等于未声明，不参与解析
+        out[(m["source"], m["family"])] = Contract(
+            m["source"], m["family"], m["retention_class"],
+            m["retention_window_days"], m["re_fetchable"],
+            m["upstream_history_mutable"], m["volume_budget_mb"] or 0,
+        )
+    return out
 
 
 def classify_violations(contract: Contract | None, *, rows: int, over_window: int,
@@ -157,6 +191,7 @@ def main(argv=None) -> int:
     eng = create_engine(a.db_url)
     try:
         with eng.connect() as c:
+            db_contracts = load_db_contracts(c)
             rows = c.execute(text("""
                 SELECT o.source_used AS src,
                        split_part(co.code, '.', 1) AS fam,
@@ -197,7 +232,7 @@ def main(argv=None) -> int:
     report, capacity, gaps = [], 0, 0
     for r in rows:
         m = r._mapping
-        contract = resolve_contract(m["src"], m["fam"])
+        contract = resolve_contract(m["src"], m["fam"], db_contracts)
         pe = per_entity.get((m["src"], m["fam"]), 0.0)
         ov = over5.get((m["src"], m["fam"]), 0) or 0
         v = classify_violations(contract, rows=m["n"], over_window=ov,

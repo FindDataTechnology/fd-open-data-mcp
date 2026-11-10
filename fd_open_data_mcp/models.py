@@ -1794,3 +1794,45 @@ class PriceEmptyInterval(Base):
             "start": self.start, "end": self.end,
             "probed_at": self.probed_at.isoformat() if self.probed_at else None,
         }
+
+
+class DataRetentionContract(Base):
+    """留存契约：某源在某概念族上"留多久、能不能再取"的声明（源 × 族）。
+
+    `establish-data-retention-principle` R1 要求每个源接入时声明它。本表是该声明的
+    唯一落点——写入闸门与巡检都读它，**不再读代码里的常量**（常量只作为 bootstrap）。
+
+    为什么挂在族上而不是源上：同一个源内部差异极大。实测 akshare 的 `financials`
+    要全历史（退市公司历史用于去幸存者偏差），而 `tenure_days` 只该留当期
+    （"今天 − 任职起始日"，逐日重存纯浪费）。挂在源上会把这两件事混成一个决定。
+
+    `family='*'` 表示该源的默认契约，未单列的族回落到它。
+    五字段可空：`NULL` = 未声明（进待补清单），与"声明为永久保留"不是一回事。
+    """
+
+    __tablename__ = "data_retention_contracts"
+    __table_args__ = (
+        UniqueConstraint("source", "family", name="uq_retention_contract_scope"),
+        Index("ix_retention_contracts_scope", "source", "family"),
+    )
+
+    id = Column(Integer, primary_key=True)
+    source = Column(String(64), nullable=False)
+    family = Column(String(64), nullable=False)
+    retention_class = Column(String(8))          # P 永久 / F 全历史 / W 滚动窗口 / T 只留当期
+    retention_window_days = Column(Integer)
+    re_fetchable = Column(Boolean)
+    upstream_history_mutable = Column(Boolean)
+    volume_budget_mb = Column(Integer)
+    note = Column(Text)
+    created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+    updated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
+
+    def to_dict(self) -> dict:
+        return {
+            "source": self.source, "family": self.family,
+            "class": self.retention_class, "window_days": self.retention_window_days,
+            "re_fetchable": self.re_fetchable,
+            "upstream_history_mutable": self.upstream_history_mutable,
+            "budget_mb": self.volume_budget_mb,
+        }
