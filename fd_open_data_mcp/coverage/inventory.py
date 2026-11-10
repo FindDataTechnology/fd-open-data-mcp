@@ -259,11 +259,31 @@ def coverage_summary(session: Session) -> dict:
                 for k in ("routable", "covered", "never_attempted")}
             for s in surfaces}
     legacy_covered = sum(a["covered"] for a in per_type.values())
+    total_concepts = session.query(func.count(Concept.id)).scalar() or 0
+
+    # Measurement state (knowledge-surface-integrity R1, 「未探测时申报不可得」).
+    #
+    # An empty catalog is NOT "0% covered": it means the probe had nothing to
+    # measure — imports were never run, or the catalog table was rebuilt. Both
+    # render as zeros in the counters below, and a zero reads as a verdict while
+    # an empty catalog is an absence of evidence. Callers get an explicit state
+    # so they can say "not measurable, catalog is empty" instead of "0%".
+    if total_concepts == 0:
+        state = {"state": "not_measurable",
+                 "reason": "catalog holds no concepts (import-catalog has not run here)",
+                 "missing": ["catalog"]}
+    elif not per_type:
+        # Concepts exist but none are routable: a real measurement with a real
+        # (bad) result — 0% routable is the honest answer, not "unknown".
+        state = {"state": "measured", "reason": None, "missing": []}
+    else:
+        state = {"state": "measured", "reason": None, "missing": []}
     return {
         # A number without its caliber is unusable: state both dimensions.
         "granularity": "surface",
         "class_dimension": "entity_type",
-        "total_concepts": session.query(func.count(Concept.id)).scalar(),
+        **state,
+        "total_concepts": total_concepts,
         "routable": sum(a["routable"] for a in per_type.values()),
         "covered": legacy_covered,
         "gap": sum(a["never_crawled"] for a in per_type.values()),

@@ -412,3 +412,32 @@ def test_three_coverage_states_are_mutually_distinguishable():
     assert unknown.fetchable != probed_empty.fetchable, "未取过与取过为空必须可区分"
     assert probed_empty.known_empty and not unknown.known_empty
     assert complete.complete is True and unknown.complete is False
+
+
+# --- R1：未探测时申报「不可得」，不得用 0 代替 ----------------------------------
+
+
+def test_empty_catalog_is_not_measurable_not_zero_percent(session):
+    """目录空 = 没有可测的东西，不是「0% 覆盖」。
+
+    两者在计数器上都是 0，但一个是「探过了，结果很差」，另一个是「根本没得探」。
+    R1 要求前者报数字、后者报不可得并说明缺什么。
+    """
+    from fd_open_data_mcp.coverage.inventory import coverage_summary
+
+    summary = coverage_summary(session)
+    assert summary["total_concepts"] == 0
+    assert summary["state"] == "not_measurable",         "空目录必须申报不可得，不能用 0% 代替"
+    assert summary["missing"], "不可得必须说明缺什么"
+    assert "catalog" in summary["missing"][0]
+
+
+def test_populated_catalog_is_measured_even_when_nothing_is_routable(session):
+    """有概念但一个都不可路由 = 真实测得的 0%，不是「不可得」。"""
+    from fd_open_data_mcp.coverage.inventory import coverage_summary
+
+    _concept(session, code="unbound_concept")   # 无绑定 → 不可路由
+    summary = coverage_summary(session)
+    assert summary["total_concepts"] == 1
+    assert summary["state"] == "measured", "有目录就是能测，哪怕结果是 0"
+    assert summary["routable"] == 0
