@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.61] - 2026-11-10
+- **fix(akshare): 按「已安装签名」过滤 kwargs，`timeout` 不再打死四条抓取路径。**
+  akshare 1.20 把原生 `timeout` 参数从 `fund_individual_basic_info_xq` / `stock_zh_a_hist` /
+  `stock_zh_a_hist_tx` / `fund_individual_achievement_xq` 移除了，而四个 adapter 仍声明 `_TIMEOUT`
+  （对 1.19 是正确的）。于是新版库下每次调用都抛 `TypeError: ... unexpected keyword argument
+  'timeout'`，重试循环把它包成通用的 upstream FetchError —— 账本里看不到真因。实证：策略 2
+  （`fund-pilot-aum`）于 2026-11-08 06:37:04 从 cluster 1（akshare 1.19.1）落到 cluster 9
+  （akshare 1.20.36）；函数 475 最后一笔 ok 是 11-07 06:37:48、首笔 error 是 11-08 06:37:23；
+  此后每次运行都以 `zero_yield` 收盘且计数器为 NULL（两天 ok=0 / error=4326），`aum` 冻结在 11-07。
+  现在 `_AkshareBase.call` 在调用前用 `inspect.signature` 过滤 kwargs（缓存键=函数对象本身）：
+  不支持的键丢弃并打 debug 日志；`**kwargs` 与签名不可读（C 内建）一律直通，不会误删在用的参数。
+  一次覆盖所有 adapter（含未来新增），不需要钉库版本。
+- **test(nbs)**: `test_nbs_gdp_runner` 在缺 `[data]` extra 的 venv 上改为 skip（原先 fail），
+  因为它是"单测里的集成检查"（要 akshare + 活的 data.stats.gov.cn）；镜像内实测 runner 正常
+  （7 行，2020Q1=209671.1）。
+
 ## [0.5.60] - 2026-11-10
 - **fix(reconciler): 窗口只覆盖「尚未结束的周期」时不再发车。** `_next_period_start` 只把水位加一个
   周期，执行器再把窗口展开成**周期末**；于是 yearly 概念在水位已是上一个完整年度后，会发出
