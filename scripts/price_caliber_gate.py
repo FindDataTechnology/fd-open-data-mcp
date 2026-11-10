@@ -26,10 +26,13 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import json
+import logging
 import os
 import sys
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger("price_caliber_gate")
 from typing import Any, Sequence
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -101,6 +104,80 @@ def _env_source(names: Sequence[str]) -> str | None:
 # ---------------------------------------------------------------- 判据一
 
 
+def _shard_watermark(decl, today: dt.date) -> "tuple[str | None, str | None]":
+    """注册表水位不可得时，直接从**该源自己的库**问最后一根 bar 是哪天。
+
+    ## 为什么必须有这一步
+
+    `derive_watermarks` 查的是**本体库**（get_database() → fd_open_data）。而
+    `access.kind=federated_view` 的源，价格行在**分片库**里：本体库自 2025-10-06
+    起没有价格观测。生产实测 `astock_daily` 的注册表水位恒为 `no_data`，
+    于是判据一永远报 `WATERMARK_UNAVAILABLE`——而分片里明明有到 2026-11-09 的 bar。
+
+    这就是「读不到 ≠ 不存在」：把"我查的库没有"当成"源没有数据"，
+    会让一条本该绿的判据长期红着，最后没人再看它。
+
+    返回 ``(as_of, method)``；问不到返回 ``(None, None)``，**不编造**。
+    """
+    access = getattr(decl, "access", None)
+    dsn_env = getattr(access, "dsn_env", None) if access is not None else None
+    kind = getattr(access, "kind", None) if access is not None else None
+    if kind != "federated_view" or not dsn_env:
+        return None, None
+    dsn = os.environ.get(dsn_env, "")
+    if not dsn:
+        return None, None
+
+    probe = getattr(decl, "watermark_probe", None)
+    codes = list(getattr(probe, "concept_codes", ()) or ())
+    basket = list(getattr(probe, "reference_basket", ()) or ())
+    etype = getattr(probe, "entity_type", None)
+    db_source = getattr(decl, "db_source", None) or getattr(decl, "source_id", None)
+
+    try:
+        import psycopg2
+
+        with psycopg2.connect(dsn, connect_timeout=15) as conn:
+            with conn.cursor() as cur:
+                # 与 derive_watermark 同一组条件，只换库：源 + 实体类型 + 概念码。
+                # 不加参照篮（篮是本体库的 entity_id，分片里未必同 id）。
+                # **按 entity+concept 定位，不按 source_used 扫全表**。实测：
+                # `where source_used = …` 单条件在这张视图上 25s 都跑不完（无该列索引），
+                # 而 (entity_id, concept_id) 有索引、1.5s 内出结果。
+                # 另外 `date` 列是 varchar（既有事实），所以只取 max(date) 字符串比较，
+                # 不拿它跟 timestamptz 比——那会直接类型报错。
+                row = None
+                for code in codes:
+                    cur.execute(
+                        "select o.concept_id from semantic_observations_all o "
+                        "join concepts c on c.id = o.concept_id "
+                        "where c.code = %s and c.entity_type = %s "
+                        "and o.source_used = %s "
+                        "and o.entity_id = (select id from entities where code = %s limit 1) "
+                        "limit 1",
+                        (code, etype, db_source, basket[0] if basket else "600036"),
+                    )
+                    hit = cur.fetchone()
+                    if not hit:
+                        continue
+                    cur.execute(
+                        "select max(date) from semantic_observations_all "
+                        "where entity_id = (select id from entities where code = %s limit 1) "
+                        "and concept_id = %s and source_used = %s",
+                        (basket[0] if basket else "600036", hit[0], db_source),
+                    )
+                    row = cur.fetchone()
+                    if row and row[0]:
+                        break
+    except Exception:  # noqa: BLE001 - 探针只读，连不上就是"问不到"
+        logger.warning("shard watermark probe failed for %s", db_source, exc_info=True)
+        return None, None
+
+    if not row or row[0] is None:
+        return None, None
+    as_of = row[0].isoformat() if hasattr(row[0], "isoformat") else str(row[0])[:10]
+    return as_of, "provider_max_date"
+
 def judge_three_paths(reg, session, paths: dict[str, str | None], today: dt.date) -> tuple[list[Violation], dict]:
     from fd_open_data_mcp.price_sources.watermark import derive_watermarks
 
@@ -147,6 +224,22 @@ def judge_three_paths(reg, session, paths: dict[str, str | None], today: dt.date
         if sid in marks:
             resolved[path]["as_of"] = marks[sid].as_of
             resolved[path]["watermark_status"] = marks[sid].status
+
+    # 本体库给不出 → 问该源自己的库（2026-11-10 生产实测的必要性，见 _shard_watermark）。
+    # 来路必须可分：registry 与自证不能长得一样。
+    for sid, decl in decls.items():
+        mark = marks.get(sid)
+        if mark is not None and mark.status == "ok":
+            continue
+        as_of, method = _shard_watermark(decl, today)
+        if not as_of:
+            continue
+        for path, v in resolved.items():
+            if v.get("source_id") == sid:
+                v["as_of"] = as_of
+                v["watermark_status"] = "ok"
+                v["watermark_method"] = method
+                v["watermark_registry_status"] = getattr(mark, "status", None)
 
     ids = {v.get("source_id") for v in resolved.values() if v.get("source_id")}
     if len(ids) > 1:
@@ -269,6 +362,63 @@ def judge_index(session, reg, today: dt.date) -> tuple[list[Violation], dict]:
 # ---------------------------------------------------------------- 判据三
 
 
+def _shard_series(decl, codes, basket, since: str) -> "dict[tuple[str, str], float]":
+    """从**该源自己的库**取参照篮的 (symbol, date) → value。
+
+    判据三原先只查本体库，而 `federated_view` 源的行在分片库里——生产实测
+    本体库 `astock_daily` 是 **0 行**（akshare 有 981 万行），于是"两源无同日重叠"
+    成了必然结论：空比对被读成"没法判"，而真相是"我只查了一个库"。
+
+    查询形状与 `_shard_watermark` 一致：按 entity+concept 走索引（该列组合有索引），
+    不按 source_used 扫全表（实测无索引、25s 超时）；`date` 是 varchar，只做字符串比较。
+    """
+    access = getattr(decl, "access", None)
+    if getattr(access, "kind", None) != "federated_view":
+        return {}
+    dsn_env = getattr(access, "dsn_env", None)
+    dsn = os.environ.get(dsn_env, "") if dsn_env else ""
+    if not dsn:
+        return {}
+    db_source = getattr(decl, "db_source", None) or getattr(decl, "source_id", None)
+
+    out: dict[tuple[str, str], float] = {}
+    try:
+        import psycopg2
+
+        with psycopg2.connect(dsn, connect_timeout=10,
+                              options="-c statement_timeout=20000") as conn:
+            with conn.cursor() as cur:
+                for symbol in basket:
+                    cur.execute(
+                        "select o.concept_id from semantic_observations_all o "
+                        "join concepts c on c.id = o.concept_id "
+                        "where c.code = %s and c.entity_type = 'stock' "
+                        "and o.source_used = %s "
+                        "and o.entity_id = (select id from entities where code = %s limit 1) "
+                        "limit 1",
+                        (codes[0], db_source, symbol),
+                    )
+                    hit = cur.fetchone()
+                    if not hit:
+                        continue
+                    cur.execute(
+                        "select date, value from semantic_observations_all "
+                        "where entity_id = (select id from entities where code = %s limit 1) "
+                        "and concept_id = %s and source_used = %s and date >= %s",
+                        (symbol, hit[0], db_source, since),
+                    )
+                    for date_s, value in cur.fetchall():
+                        try:
+                            out[(symbol, str(date_s)[:10])] = float(value)
+                        except (TypeError, ValueError):
+                            continue
+    except Exception:  # noqa: BLE001 - 探针只读，连不上就是"取不到"
+        logger.warning("shard series probe failed for %s", db_source, exc_info=True)
+        # 抛出去让调用方区分"没读到"与"真无重叠"——这两件事在报告上必须不同形。
+        raise
+    return out
+
+
 def judge_divergence(session, reg, today: dt.date, threshold_pct: float) -> tuple[list[Violation], dict]:
     from fd_open_data_mcp.models import Concept, Entity, SemanticObservation
     from sqlalchemy import select
@@ -286,6 +436,7 @@ def judge_divergence(session, reg, today: dt.date, threshold_pct: float) -> tupl
             )
         ], {}
 
+    owner_decl = reg.get(family_owner)
     candidates = [
         d for d in reg.sources.values()
         if "stock" in d.instrument_types and d.source_id != family_owner
@@ -293,7 +444,26 @@ def judge_divergence(session, reg, today: dt.date, threshold_pct: float) -> tupl
     if not candidates:
         return [], {"note": "only one stock source registered; nothing to cross-check"}
 
-    owner = reg.get(family_owner)
+    # ── 只比**同锚点**的源（2026-11-10 生产实测）────────────────────────
+    #
+    # 两源都声明 qfq，但锚点不同：astock_daily 锚在 "2026-07-10"，akshare 是 per_fetch。
+    # 前复权序列的绝对值依赖锚点日，异锚两条序列**本就不可直接比**——实测同一标的
+    # 的比值在一周内从 1.00415 漂到 1.02172（不是恒定缩放，是按日期变的），
+    # 于是 0.5% 阈值会连报 64 天"分歧"，而那不是数据错，是拿两种口径当一种比。
+    #
+    # 处置：异锚的源不进比对，单独报一条 `CROSS_SOURCE_ANCHOR_MISMATCH`（点名两侧锚点）。
+    # 「不可比」要明说，不能既不算分歧也不算通过。
+    owner_anchor = getattr(owner_decl, "adjustment_anchor", None)
+    comparable, anchor_mismatch = [], []
+    for cand in candidates:
+        cand_anchor = getattr(cand, "adjustment_anchor", None)
+        same_caliber = (
+            getattr(cand, "adjustment", None) == getattr(owner_decl, "adjustment", None)
+            and cand_anchor == owner_anchor
+        )
+        (comparable if same_caliber else anchor_mismatch).append(cand)
+
+    owner = owner_decl
     basket = owner.watermark_probe.reference_basket
     codes = list(owner.watermark_probe.concept_codes)
 
@@ -313,6 +483,12 @@ def judge_divergence(session, reg, today: dt.date, threshold_pct: float) -> tupl
             Entity.entity_type == "stock",
             Entity.code.in_(list(basket)),
             SemanticObservation.date >= (today - dt.timedelta(days=owner.watermark_probe.lookback_days)).isoformat(),
+            # 只取**可比源**的行：异锚源即便本体库里有行，也不能掺进 pivot——
+            # 否则"锚点不同不可比"会被下游的价差判定覆盖成一条 CALIBER_DIVERGENCE。
+            # 实测（prod 声明）：akshare 锚 per_fetch，会报 600036@2026-07-10 差 2.72%。
+            SemanticObservation.source_used.in_(
+                [family_owner, *[c.source_id for c in comparable]]
+            ),
         )
     ).all()
 
@@ -323,7 +499,35 @@ def judge_divergence(session, reg, today: dt.date, threshold_pct: float) -> tupl
             fv = float(value)
         except (TypeError, ValueError):
             continue
-        pivot.setdefault((symbol, date), {})[source] = fv
+        pivot.setdefault((symbol, str(date)[:10]), {})[source] = fv
+
+    # 本体库给不出行的源（access.kind=federated_view）→ 从它**自己的库**补齐再比对。
+    #
+    # 生产实测：本体库里 astock_daily 是 **0 行**、akshare 有 981 万行，于是
+    # "两源无同日重叠"成了必然结论——`NO_CROSS_SOURCE_OVERLAP` 被读成"没法判"，
+    # 而真相是"我只查了一个库"。空比对不是通过，也不该是一条长期红着的噪音。
+    # 跨源比对只需要若干重叠日，不必扫满 lookback 窗：实测 400 天窗会在分片上
+    # 撞 20s 语句超时（该视图的 (date) 侧没有可用索引），90 天稳定在秒级。
+    since = (today - dt.timedelta(days=90)).isoformat()
+    shard_filled: dict[str, int] = {}
+    shard_unreadable: list[str] = []
+
+    # **没有可比源就根本不取数**：锚点把候选全排掉时（生产现状：akshare 异锚），
+    # 再去读分片只会白付一次超时，还把结论污染成 CROSS_SOURCE_UNREADABLE。
+    # 判据三此时该说的只有一句"无可比源"，而不是"读不到"。
+    fill_targets = [owner, *comparable] if comparable else []
+    for cand in fill_targets:
+        try:
+            extra = _shard_series(cand, codes, basket, since)
+        except Exception:  # noqa: BLE001 - 读不到 ≠ 没有
+            shard_unreadable.append(cand.source_id)
+            continue
+        if not extra:
+            continue
+        shard_filled[cand.source_id] = len(extra)
+        for (symbol, date), value in extra.items():
+            pivot.setdefault((symbol, date), {})[cand.source_id] = value
+
 
     out: list[Violation] = []
     compared = 0
@@ -367,20 +571,71 @@ def judge_divergence(session, reg, today: dt.date, threshold_pct: float) -> tupl
                     )
                 )
 
+    if anchor_mismatch:
+        out.append(
+            Violation(
+                code="CROSS_SOURCE_ANCHOR_MISMATCH",
+                judgment="cross_source",
+                detail=(
+                    f"以下源与首选源 {family_owner} 的复权锚点不同，价差不可直接比较（已从比对中排除）："
+                    + ", ".join(
+                        f"{c.source_id}(anchor={getattr(c, 'adjustment_anchor', None)!r})"
+                        for c in anchor_mismatch
+                    )
+                ),
+                fix=(
+                    f"把两源锚点对齐（首选源锚点={owner_anchor!r}）后再比对；"
+                    "或确认这里本就该比两种口径——那属于口径决策，不是数据修数"
+                ),
+                evidence={
+                    "family_owner": family_owner, "family_owner_anchor": owner_anchor,
+                    "excluded": {
+                        c.source_id: getattr(c, "adjustment_anchor", None) for c in anchor_mismatch
+                    },
+                },
+            )
+        )
+
     checked = {
         "family_owner": family_owner,
+        "family_owner_anchor": owner_anchor,
+        "compared_sources": [c.source_id for c in comparable],
+        "excluded_anchor_mismatch": {
+            c.source_id: getattr(c, "adjustment_anchor", None) for c in anchor_mismatch
+        },
         "compared_pairs": compared,
         "threshold_pct": threshold_pct,
         "worst": worst or None,
+        # 哪些源是从自己的库补的行、补了多少。没这一项，"compared==0"就分不清
+        # "两源真的没有同日数据"与"我压根没读到那一源"。
+        "shard_filled": shard_filled,
+        "shard_unreadable": shard_unreadable,
     }
-    if compared == 0:
+    if not comparable:
+        # 唯一候选被锚点排除 → 已在上面报 ANCHOR_MISMATCH，这里不再补第二条。
+        pass
+    elif compared == 0 and shard_unreadable:
+        # 读不到 ≠ 没有重叠：这条必须报"判不了"，不能报"无重叠"。
+        out.append(
+            Violation(
+                code="CROSS_SOURCE_UNREADABLE",
+                judgment="cross_source",
+                detail=(
+                    "跨源判定无法成立：以下源在自己的库里读不到参照篮数据（超时/不可达）："
+                    + ", ".join(shard_unreadable)
+                ),
+                fix="确认该源的分片库可达且 source_used 有行；这是读面问题，不是口径问题",
+                evidence={"unreadable": shard_unreadable, "shard_filled": shard_filled},
+            )
+        )
+    elif compared == 0:
         out.append(
             Violation(
                 code="NO_CROSS_SOURCE_OVERLAP",
                 judgment="cross_source",
                 detail=(
                     f"首选源 {family_owner} 与 "
-                    f"{', '.join(c.source_id for c in candidates)} 在参照篮内没有同日重叠，"
+                    f"{', '.join(c.source_id for c in comparable)} 在参照篮内没有同日重叠，"
                     "跨源判定无法成立（空比对不是通过）"
                 ),
                 fix="确认两源的参照篮与概念码重合；若某一源确实无数据，这是一条真实的缺口",
@@ -443,13 +698,25 @@ def selfcheck() -> int:
 
     # 场景 A：三路同源 + 指数有观测 + 两源同值 → 应全绿
     s = _fresh_session()
+    reg_same = _reg_for_selfcheck(SourceDeclaration, WatermarkProbe, same_anchor=True)
     _seed(s, with_index=True, akshare_value="36.73")
     v1, _ = judge_three_paths(reg, s, {"trading": "astock_daily", "research": "astock_daily",
                                        "settle": "astock_daily"}, dt.date.today())
     v2, _ = judge_index(s, reg, dt.date.today())
-    v3, _ = judge_divergence(s, reg, dt.date.today(), DEFAULT_THRESHOLD_PCT)
+    v3, _ = judge_divergence(s, reg_same, dt.date.today(), DEFAULT_THRESHOLD_PCT)
     s.close()
     checks.append(("全绿场景无违规", not (v1 or v2 or v3)))
+
+    # 场景 A2：两源锚点不同 → 判据三必须报"不可比"，既不算分歧也不算通过。
+    # **必须用不同的价**（37.73 vs 36.73）：同价时即便不过滤也产不出价差，
+    # 那条断言就变成恒真——恒真的判据等于没有判据（本轮实测到过）。
+    s2 = _fresh_session()
+    _seed(s2, with_index=True, akshare_value="37.73")
+    v3b, _ = judge_divergence(s2, reg, dt.date.today(), DEFAULT_THRESHOLD_PCT)
+    s2.close()
+    checks.append(("异锚报不可比（不冒充通过）",
+                   any(v.code == "CROSS_SOURCE_ANCHOR_MISMATCH" for v in v3b)
+                   and not any(v.code == "CALIBER_DIVERGENCE" for v in v3b)))
 
     # 场景 B：指数零观测 + 两源价差超阈 + 研究路换源 → 三条判据都必须失败
     s = _fresh_session()
@@ -457,7 +724,9 @@ def selfcheck() -> int:
     w1, _ = judge_three_paths(reg, s, {"trading": "astock_daily", "research": "akshare",
                                        "settle": "astock_daily"}, dt.date.today())
     w2, _ = judge_index(s, reg, dt.date.today())
-    w3, _ = judge_divergence(s, reg, dt.date.today(), DEFAULT_THRESHOLD_PCT)
+    # 判据三"能红"必须用**同锚**注册表：异锚下正确结论是不可比（见场景 A2），
+    # 拿异锚验"能红"会把两件事混成一件——这正是它在这里一直假绿/假红的原因。
+    w3, _ = judge_divergence(s, reg_same, dt.date.today(), DEFAULT_THRESHOLD_PCT)
     s.close()
     checks.append(("判据一能红", any(v.judgment == "three_paths" for v in w1)))
     checks.append(("判据二能红", any(v.code == "INDEX_SERIES_ABSENT" for v in w2)))
@@ -502,8 +771,13 @@ def selfcheck() -> int:
     return 0
 
 
-def _reg_for_selfcheck(SourceDeclaration, WatermarkProbe):
-    """自检用的最小注册表：两条存量源 + 指数种子，形状与生产声明一致。"""
+def _reg_for_selfcheck(SourceDeclaration, WatermarkProbe, *, same_anchor: bool = False):
+    """自检用的最小注册表：两条存量源 + 指数种子，形状与生产声明一致。
+
+    ``same_anchor=True`` 让 akshare 与首选源同锚——自检的"全绿"场景必须用它：
+    生产里两源锚点不同（2026-07-10 vs per_fetch），那种情况下判据三**本就该**
+    报 `CROSS_SOURCE_ANCHOR_MISMATCH`（不可比要明说），不该被当成全绿。
+    """
     from fd_open_data_mcp.price_sources.declarations import SourceRegistry
 
     def decl(sid, *, etype, adjustment, anchor, preferred=()):
@@ -523,7 +797,8 @@ def _reg_for_selfcheck(SourceDeclaration, WatermarkProbe):
     srcs = {
         "astock_daily": decl("astock_daily", etype="stock", adjustment="qfq",
                              anchor="2026-07-10", preferred=("price.stock.daily",)),
-        "akshare": decl("akshare", etype="stock", adjustment="qfq", anchor="per_fetch"),
+        "akshare": decl("akshare", etype="stock", adjustment="qfq",
+                        anchor="2026-07-10" if same_anchor else "per_fetch"),
         "index-seed": decl("index-seed", etype="index", adjustment="not_applicable",
                            anchor=None, preferred=("price.index.daily",)),
     }

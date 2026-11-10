@@ -10,6 +10,7 @@
 from __future__ import annotations
 
 import os
+from pathlib import Path
 
 import pytest
 
@@ -95,13 +96,44 @@ def test_index_absence_is_red(store):
     assert "INDEX_SERIES_ABSENT" in out
 
 
-def test_caliber_divergence_is_red(store):
+PACK_DECLARATIONS = (Path(__file__).resolve().parents[1]
+                     / "fd_open_data_mcp/price_sources/declarations.yaml")
+
+
+def test_caliber_divergence_is_red(store, tmp_path):
+    """判据三能红的证据：**同锚**两源同日差 2.7% → 必红。
+
+    必须用同锚声明：生产声明里 akshare 锚 per_fetch ≠ 首选源 2026-07-10，
+    那种情况下的正确结论是「不可比」（CROSS_SOURCE_ANCHOR_MISMATCH），
+    不该报价差；拿异锚声明验"能红"会把两条判据混成一件事。
+    另测 `test_anchor_mismatch_is_reported_not_compared` 钉住异锚那半边。
+    """
+    decl = _same_anchor_registry(tmp_path, PACK_DECLARATIONS.read_text())
     out = _run(
         "--trading", "astock_daily", "--research", "astock_daily", "--settle", "astock_daily",
+        "--declarations", str(decl),
         expect=1,
     )
     assert "CALIBER_DIVERGENCE" in out
     assert "36.73" in out and "37.73" in out
+
+
+
+
+def _same_anchor_registry(tmp_path, base_yaml):
+    """产出一份"两源同锚"的声明副本。
+
+    生产声明里 akshare 锚 per_fetch、首选源锚 2026-07-10 —— 异锚不可比，
+    判据三会（正确地）报 CROSS_SOURCE_ANCHOR_MISMATCH。下面两条用例要验的是
+    "空比对不等于通过"与"全绿"，前提必须是**可比**，所以这里把 akshare 的锚对齐。
+    """
+    import re
+    # 声明是 **顶层键**（`akshare:` 不是 `source_id: akshare`），只改它的 adjustment_anchor
+    text = re.sub(r"(\n  akshare:[\s\S]*?\n    adjustment_anchor: )per_fetch",
+                  r'\1"2026-07-10"', base_yaml, count=1)
+    out = tmp_path / "declarations-same-anchor.yaml"
+    out.write_text(text)
+    return out
 
 
 def test_empty_overlap_is_not_a_pass(session, monkeypatch, tmp_path):
@@ -118,8 +150,10 @@ def test_empty_overlap_is_not_a_pass(session, monkeypatch, tmp_path):
         )
     )
     session.commit()
+    decl = _same_anchor_registry(tmp_path, PACK_DECLARATIONS.read_text())
     out = _run(
         "--trading", "astock_daily", "--research", "astock_daily", "--settle", "astock_daily",
+        "--declarations", str(decl),
         expect=1,
     )
     assert "NO_CROSS_SOURCE_OVERLAP" in out
@@ -160,8 +194,10 @@ def test_green_when_everything_converges(session, monkeypatch, tmp_path):
         ]
     )
     session.commit()
+    decl = _same_anchor_registry(tmp_path, PACK_DECLARATIONS.read_text())
     out = _run(
         "--trading", "astock_daily", "--research", "astock_daily", "--settle", "astock_daily",
+        "--declarations", str(decl),
         expect=0,
     )
     assert '"ok": true' in out
@@ -244,3 +280,19 @@ def test_enforcement_violation_is_visible_even_when_db_is_unreachable(monkeypatc
         rc = main(["--today", "2026-07-20"])
     assert rc == 2  # 库确实跑不起来
     assert "ENFORCEMENT_STILL_WARN" in err.getvalue()
+
+
+def test_anchor_mismatch_is_reported_not_compared(store):
+    """异锚两源不可直接比价：必须报 ANCHOR_MISMATCH，且**不许**报价差分歧。
+
+    生产实测依据：akshare 锚 `per_fetch`、首选源锚 `2026-07-10`；同一标的比值一周内
+    从 1.00415 漂到 1.02172（不是恒定缩放）。按 0.5% 阈值比会连报 64 天"分歧"，
+    而那 64 条没人能处置——正确结论是"两种口径不可比"。
+    """
+    out = _run(
+        "--trading", "astock_daily", "--research", "astock_daily", "--settle", "astock_daily",
+        expect=1,   # 用产线真实声明（异锚）
+    )
+    assert "CROSS_SOURCE_ANCHOR_MISMATCH" in out
+    assert "per_fetch" in out          # 点名两侧锚点，别只说"不可比"
+    assert "CALIBER_DIVERGENCE" not in out
