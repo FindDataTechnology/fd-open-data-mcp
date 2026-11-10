@@ -132,3 +132,28 @@ def test_concept_grace_override_widens_the_partition():
     plan_default = _plan_range_read([], yearly_concept(), f"{Y0 - 6}-01-01", f"{Y0}-12-31")
 
     assert plan_wide["cutoff"] < plan_default["cutoff"]
+
+def test_force_refetch_bypasses_ttl_but_not_finalization():
+    """补救性重抓要能绕过 TTL，但**不得**绕过定型。
+
+    绕过 TTL：窗口已放开、但 300 天 TTL 未到，正常读命中缓存永不回源，
+    那样跑一万次也补不回修订。
+    不绕过定型：已定型段若也去抓，写闸会拒绝，抓了也白抓。
+    """
+    fresh_2025 = row(f"{Y0 - 1}-12-31", fetched_days_ago=1)   # 未定型、但新鲜
+    plan = _plan_range_read([fresh_2025], yearly_concept(),
+                            f"{Y0 - 1}-01-01", f"{Y0 - 1}-12-31")
+    assert plan["need_fetch"] is False, "TTL 内默认不回源"
+
+    forced = _plan_range_read([fresh_2025], yearly_concept(),
+                              f"{Y0 - 1}-01-01", f"{Y0 - 1}-12-31",
+                              force_refetch=True)
+    assert forced["need_fetch"] is True
+    assert forced["stale_count"] == 1
+
+    # 已定型段：即使 force 也不发起抓取
+    finalized = row(f"{Y0 - 3}-12-31", fetched_days_ago=1)
+    forced2 = _plan_range_read([finalized], yearly_concept(),
+                               f"{Y0 - 3}-01-01", f"{Y0 - 3}-12-31",
+                               force_refetch=True)
+    assert forced2["need_fetch"] is False, "定型段不得因 force 而被抓"

@@ -162,6 +162,9 @@ def main(argv=None) -> int:
                     row["entity_type"], row["entity_id"],
                     row["min_date"], row["max_date"],
                     revision_reason=REVISION_REASON,
+                    # 补救的意义就是"不等 TTL"：这些行是新鲜的（300 天没到），
+                    # 正常读会直接命中缓存、永不回源——那样跑一万次也补不回修订。
+                    force_refetch=True,
                 )
                 processed += 1
             except Exception as exc:  # noqa: BLE001

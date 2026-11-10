@@ -619,6 +619,7 @@ def read_range_with_coverage(
 def read_range(
     session: Session, concept_ids: list[int], entity_type: str, entity_id: int,
     start: str, end: str, revision_reason: str | None = None,
+    force_refetch: bool = False,
 ) -> dict[int, list[dict]]:
     """Bulk read a list of concepts for an entity over ``[start, end]``.
 
@@ -644,7 +645,7 @@ def read_range(
     for concept_id in concept_ids:
         out[concept_id] = _read_range_one_ex(
             session, concept_id, entity_type, entity_id, start, end,
-            revision_reason=revision_reason,
+            revision_reason=revision_reason, force_refetch=force_refetch,
         )["values"]
     return out
 
@@ -660,7 +661,8 @@ def _coerce_value(value):
         return value
 
 
-def _plan_range_read(cached, concept, start: str, end: str) -> dict:
+def _plan_range_read(cached, concept, start: str, end: str,
+                     force_refetch: bool = False) -> dict:
     """把区间读拆成「缓存可服务」与「需要回源」两段。
 
     纯函数（不碰库、不发请求），因此可以脱离数据库单测——这是"放宽定型窗口不会
@@ -679,7 +681,11 @@ def _plan_range_read(cached, concept, start: str, end: str) -> dict:
 
     finalized = [r for r in cached if r.date < cutoff]
     mutable_tail = [r for r in cached if r.date >= cutoff]
-    tail_stale = [r for r in mutable_tail if is_stale(r, getattr(concept, "frequency", None))]
+    # `force_refetch` 只绕过 TTL（用于补救性重抓：窗口已放开但 TTL 未到，正常读不会回源），
+    # **不绕过定型**——已定型段仍不发起抓取，否则写闸会拒绝，抓了也白抓。
+    tail_stale = (list(mutable_tail) if force_refetch
+                  else [r for r in mutable_tail
+                        if is_stale(r, getattr(concept, "frequency", None))])
 
     fetch_start = max(start, cutoff)
     need_fetch = fetch_start <= end and bool(tail_stale or not mutable_tail)
@@ -705,6 +711,7 @@ def _plan_range_read(cached, concept, start: str, end: str) -> dict:
 def _read_range_one_ex(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     start: str, end: str, revision_reason: str | None = None,
+    force_refetch: bool = False,
 ) -> dict:
     """``_read_range_one`` 加上本次读取的自证信息（change:
     define-ingest-revision-and-coverage）。
@@ -728,7 +735,7 @@ def _read_range_one_ex(
     cached = read_cache_range(session, concept_id, entity_type, entity_id, start, end)
 
     # 分区：已定型的行永不回源；只有未定型且过期的尾段才回源。
-    plan = _plan_range_read(cached, concept, start, end)
+    plan = _plan_range_read(cached, concept, start, end, force_refetch=force_refetch)
     finalized = plan["finalized"]
     mutable_tail = plan["mutable_tail"]
     stale_count = plan["stale_count"]
