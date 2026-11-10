@@ -95,18 +95,30 @@ def find_affected(session, *, max_years: int = 5):
         """
         SELECT c.id AS concept_id, c.code, c.frequency,
                o.entity_type, o.entity_id,
-               MIN(o.date) AS min_date, MAX(o.date) AS max_date, COUNT(*) AS n
+               COUNT(*) AS n
         FROM semantic_observations o
         JOIN concepts c ON c.id = o.concept_id
         WHERE LOWER(COALESCE(c.frequency, '')) IN ('yearly', 'annual', 'year')
           AND o.granularity = 'year'
-          -- 只取受影响的那一年：旧规则已定型、新规则仍可修订
-          AND o.date >= :lo AND o.date <= :hi
+          -- 用**前缀**而不是日期区间：库里同一概念混着 `2025`（bare year）与
+          -- `2025-09-27` 两种形状，而字符串比较下 '2025' < '2025-01-01'，
+          -- 用 >= '2025-01-01' 会把 bare-year 行静默漏掉（实测漏 53 行）。
+          AND o.date LIKE :yprefix
         GROUP BY c.id, c.code, c.frequency, o.entity_type, o.entity_id
         ORDER BY n DESC
         """
-    ), {"lo": f"{prev_year}-01-01", "hi": f"{prev_year}-12-31"}).all()
-    return [dict(r._mapping) for r in rows], prev_year
+    ), {"yprefix": f"{prev_year}%"}).all()
+    out = []
+    for r in rows:
+        d = dict(r._mapping)
+        # 重取范围 = **整年**，不是"数据点的最小到最大"。
+        # 年频概念的上游返回带的是年内日期/年末日期；若按单点窗口去要
+        # （如 max=min=2025-09-27），`_extract_series` 会因为返回值超出窗口而
+        # 丢掉全部点 —— 那样抓了也写不进任何东西（实测 rows 只回缓存）。
+        d["min_date"] = f"{prev_year}-01-01"
+        d["max_date"] = f"{prev_year}-12-31"
+        out.append(d)
+    return out, prev_year
 
 
 def main(argv=None) -> int:
