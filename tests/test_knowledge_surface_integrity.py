@@ -246,6 +246,29 @@ def test_retired_concept_stays_resolvable_with_successor(session):
     assert not isinstance(ei2.value, ConceptDeprecated), "未找到与已退役必须可区分"
 
 
+def test_retirement_without_dependents_succeeds_without_force(session):
+    """R2 场景三：无依赖时退役 SHALL 正常完成——不需要 force，且事后仍可解析。
+
+    前面几条用例都带在役策略，走的是「被拒绝」或「force 越过」的路径；
+    无依赖是**另一条路径**：不该需要 force，退役本身就该成功。
+    """
+    from fd_open_data_mcp.coverage.retirement import retire_concept
+    from fd_open_data_mcp.entities.resolver import ConceptDeprecated, check_applicability
+
+    lonely = _concept(session, code="nobody_uses_me")
+    col = _column(session, _function(session, _source(session, "src-l"), "fn-l"), "v")
+    _bind(session, lonely, col, confidence=0.9, provenance="auto")
+    session.flush()
+
+    out = retire_concept(session, lonely.id)          # 注意：不传 force
+    assert out["deprecated"] is True
+    assert out["dependents"]["policies"] == []
+
+    # 事后仍可解析为「已退役」，不是「不存在」
+    with pytest.raises(ConceptDeprecated):
+        check_applicability(session, lonely.id, "stock")
+
+
 def test_retired_concept_is_not_a_crawl_gap(session):
     """退役概念留在清单里，但不得进入抓取缺口集——否则会去爬一个退役指标。"""
     from fd_open_data_mcp.coverage.inventory import gap_set
