@@ -387,12 +387,109 @@ def test_adapter_call_raises_fetcherror_after_exhausting_retries(monkeypatch):
     assert len(fake.calls) == 3
 
 
+# --- V1/V2: a kwarg the INSTALLED akshare does not accept must be dropped ------
+# 2026-11-08: akshare 1.20 removed the native ``timeout`` kwarg from
+# fund_individual_basic_info_xq / stock_zh_a_hist / stock_zh_a_hist_tx /
+# fund_individual_achievement_xq while these adapters still declared it (correct
+# for 1.19). Every call raised TypeError, the retry loop surfaced it as a generic
+# upstream FetchError, and policy 2 (aum) went zero_yield with empty counters for
+# three days. ``_supported_kwargs`` filters against the real signature instead of
+# pinning the library.
+
+class _FakeAkshareNoTimeout:
+    """akshare >= 1.20 shape: the callable does NOT accept ``timeout``."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def stock_zh_a_hist(self, symbol, period, start_date, end_date, adjust):
+        self.calls.append({
+            "symbol": symbol, "period": period, "start_date": start_date,
+            "end_date": end_date, "adjust": adjust,
+        })
+        return "OK"
+
+
+def test_call_drops_kwarg_the_installed_signature_lacks(monkeypatch):
+    import sys
+
+    fake = _FakeAkshareNoTimeout()
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+    a = StockZhAHistAdapter()
+    a._RETRIES = 0
+    params = a.build_params(None, "600000", "2024-07-26", None)
+    assert params["timeout"] == 30.0          # the adapter still declares it (1.19 contract)
+
+    # Negative control: passing it straight through is what used to blow up.
+    with pytest.raises(TypeError):
+        fake.stock_zh_a_hist(**params)
+
+    assert a.call("stock_zh_a_hist", params) == "OK"
+    assert "timeout" not in fake.calls[-1]    # dropped, not forwarded
+    assert fake.calls[-1]["symbol"] == "600000"
+
+
+class _FakeAkshareKwargs:
+    """A callable that takes ``**kwargs``: nothing may be dropped for it."""
+
+    def __init__(self):
+        self.calls: list[dict] = []
+
+    def stock_zh_a_hist(self, **params):
+        self.calls.append(params)
+        return "OK"
+
+
+def test_call_keeps_kwargs_the_signature_accepts(monkeypatch):
+    import sys
+
+    fake = _FakeAkshareKwargs()
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+    a = StockZhAHistAdapter()
+    a._RETRIES = 0
+
+    assert a.call("stock_zh_a_hist", a.build_params(None, "600000", "2024-07-26", None)) == "OK"
+    assert fake.calls[-1]["timeout"] == 30.0   # preserved: the signature accepts it
+
+
+def test_call_passes_through_when_signature_is_unreadable(monkeypatch):
+    """A C builtin has no introspectable signature — do not silently drop params."""
+    import sys
+
+    class _FakeOpaque:
+        def __init__(self):
+            self.calls: list[dict] = []
+
+        def stock_zh_a_hist(self, **params):
+            self.calls.append(params)
+            return "OK"
+
+    fake = _FakeOpaque()
+    monkeypatch.setitem(sys.modules, "akshare", fake)
+    a = StockZhAHistAdapter()
+    a._RETRIES = 0
+
+    import inspect as _inspect
+
+    def _boom(_):
+        raise ValueError("no signature")
+
+    monkeypatch.setattr(_inspect, "signature", _boom)
+    from fd_open_data_mcp.adapters import akshare as _ak_mod
+
+    _ak_mod._CALL_SIG_CACHE.clear()
+    try:
+        assert a.call("stock_zh_a_hist", a.build_params(None, "600000", "2024-07-26", None)) == "OK"
+        assert fake.calls[-1]["timeout"] == 30.0
+    finally:
+        _ak_mod._CALL_SIG_CACHE.clear()
+
+
 def test_run_upstream_delegates_to_adapter_call(monkeypatch):
     """run_akshare opts into the adapter's call() (retry) when one is registered."""
     import sys
 
     from fd_open_data_mcp.fetch.runner import run_upstream
-
     fake = _FakeAkshare([RuntimeError("transient"), "OK-DATAFRAME"])
     monkeypatch.setitem(sys.modules, "akshare", fake)
     a = StockZhAHistAdapter()

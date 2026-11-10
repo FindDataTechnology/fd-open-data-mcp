@@ -30,6 +30,7 @@ flaky-upstream notes (task 2.3 - what scraw-akshare actually had):
 """
 from __future__ import annotations
 
+import inspect
 import logging
 from datetime import date, datetime, timezone
 from typing import Any, Optional
@@ -42,6 +43,58 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT: float = 30.0   # seconds; passed as akshare's native ``timeout`` kwarg
 DEFAULT_RETRIES: int = 0        # single attempt; the instrumented-fetch loop is the sole retry
 DEFAULT_RETRY_DELAY: float = 1.0  # seconds between retries
+
+# Signature cache for the kwarg filter below, keyed by the upstream callable
+# itself (not by command name: the same command string can resolve to different
+# functions across library versions, and an odd callable must never poison
+# another entry). A ``None`` value records "signature unreadable — pass through".
+_CALL_SIG_CACHE: dict[Any, Optional[inspect.Signature]] = {}
+_MISS = object()
+
+
+def _supported_kwargs(fn, command: str, params: dict) -> dict:
+    """Drop kwargs the installed upstream signature cannot accept.
+
+    akshare 1.20 removed the native ``timeout`` kwarg from
+    ``fund_individual_basic_info_xq``, ``stock_zh_a_hist``,
+    ``stock_zh_a_hist_tx`` and ``fund_individual_achievement_xq``, while the
+    adapters for them still declare ``_TIMEOUT`` (correct for 1.19, which did
+    accept it). Passing it then raised ``TypeError: ... unexpected keyword
+    argument 'timeout'`` on EVERY call; ``call`` surfaced that as a generic
+    upstream FetchError, so policy 2 (aum) went ``zero_yield`` with empty
+    counters from 2026-11-08 and nothing in the ledger said why.
+
+    Filtering here fixes it for every adapter — including ones added later —
+    without pinning the library version. ``**kwargs`` callables pass through
+    untouched; a callable whose signature cannot be read (C builtins) also
+    passes through rather than silently dropping parameters.
+    """
+    try:
+        sig = _CALL_SIG_CACHE.get(fn, _MISS)
+    except TypeError:  # unhashable callable — no cache, no filtering
+        return params
+    if sig is _MISS:
+        try:
+            sig = inspect.signature(fn)
+        except (TypeError, ValueError):
+            sig = None
+        try:
+            _CALL_SIG_CACHE[fn] = sig
+        except TypeError:
+            pass
+    if sig is None:
+        return params
+    if any(p.kind is inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()):
+        return params
+    allowed = sig.parameters.keys()
+    dropped = [k for k in params if k not in allowed]
+    if not dropped:
+        return params
+    logger.debug(
+        "akshare %s: dropping kwarg(s) %s the installed signature lacks",
+        command, dropped,
+    )
+    return {k: v for k, v in params.items() if k in allowed}
 
 
 # --- date helpers (akshare returns date objects OR 'YYYY-MM-DD' / 'YYYYMMDD' str) --
@@ -230,6 +283,11 @@ class _AkshareBase:
         ``call`` method). ``build_params`` already injects the ``timeout`` kwarg
         for functions that support one (``_TIMEOUT`` is not None), so the legacy
         direct-call path also gets the timeout even without this retry wrapper.
+
+        The kwargs are filtered against the INSTALLED callable's signature
+        (``_supported_kwargs``) before the call: a kwarg this library version
+        does not accept is dropped with a debug line instead of raising
+        ``TypeError`` on every attempt.
         """
         import time
 
@@ -240,10 +298,11 @@ class _AkshareBase:
         fn = getattr(ak, command, None)
         if fn is None or not callable(fn):
             raise FetchError(f"akshare has no callable {command}")
+        kwargs = _supported_kwargs(fn, command, params)
         last_exc: Exception | None = None
         for attempt in range(self._RETRIES + 1):
             try:
-                return fn(**params)
+                return fn(**kwargs)
             except Exception as exc:  # noqa: BLE001 - retry any transient upstream error
                 last_exc = exc
                 if attempt < self._RETRIES:
