@@ -1246,6 +1246,24 @@ def launch_policy(
         return {"policy": policy.name, "status": "refused",
                 "reason": refused_detail}
 
+    # A window whose only period has not finished cannot be answered by any
+    # source; launching it charges every egress with a guaranteed failure.
+    # See _unfinished_period_detail.
+    unfinished_detail = _unfinished_period_detail(
+        getattr(plan.date_range, "frequency", None) or policy.frequency, plan.date_range,
+        local_today,
+    )
+    if unfinished_detail is not None:
+        logger.info("policy %s %s", policy.name, unfinished_detail)
+        session.add(PolicyRun(policy_id=policy.id, status="no_op",
+                              plan_json=plan.model_dump(mode="json"),
+                              plan_cells=plan.plan_cells, started_at=now,
+                              finished_at=now, detail=unfinished_detail))
+        policy.last_run_at = now
+        session.commit()
+        return {"policy": policy.name, "status": "skipped",
+                "reason": unfinished_detail}
+
     # leasing execution model (add-data-stream-engine task 4.1/4.3): a policy
     # that opts into leasing splits the plan into work items and enqueues them
     # to a per-run lease queue instead of launching one Job. The guardrail
@@ -1380,6 +1398,71 @@ def _all_refused_detail(concept_ids, unroutable) -> Optional[str]:
     extra = len(unroutable) - 3
     tail = f" (+{extra} more)" if extra > 0 else ""
     return f"refused: every requested concept is unroutable — {shown}{tail}"
+
+
+def _last_completed_period_end(frequency: str | None, today: dt.date) -> Optional[dt.date]:
+    """End date of the most recent period that has fully elapsed at ``today``.
+
+    Periods are the ones the executor expands to (`yearly -> 12-31`,
+    `monthly -> 01` at the start, `quarter/semiannual` likewise). A period that
+    has not ended yet cannot have data, so it is not "due" at all.
+    """
+    f = (frequency or "").strip().lower()
+    if f in ("yearly", "annual"):
+        return dt.date(today.year - 1, 12, 31)
+    if f in ("quarter", "quarterly"):
+        # last completed quarter end: the day before the current quarter starts
+        q_start_month = ((today.month - 1) // 3) * 3 + 1
+        return dt.date(today.year, q_start_month, 1) - dt.timedelta(days=1)
+    if f == "semiannual":
+        h_start_month = 1 if today.month <= 6 else 7
+        return dt.date(today.year, h_start_month, 1) - dt.timedelta(days=1)
+    if f == "monthly":
+        return dt.date(today.year, today.month, 1) - dt.timedelta(days=1)
+    if f == "weekly":
+        return today - dt.timedelta(days=today.weekday() + 1)
+    return None  # daily / static / irregular: every day is a period
+
+
+def _unfinished_period_detail(
+    frequency: str | None, date_range, local_today: dt.date,
+) -> Optional[str]:
+    """Why a window that only covers an UNFINISHED period must not launch.
+
+    ``_next_period_start`` advances a watermark by exactly one period, and the
+    executor expands the window to that period's END date. For a yearly concept
+    whose watermark is already the last completed year, that end is 12-31 of the
+    CURRENT year — a period that has not finished, so no source can answer it.
+
+    This is not a harmless extra request. wbgapi returns an empty frame for a
+    future year and `run_wbgapi` raises on it, so EVERY cell fails and the
+    failure is charged to the egress: on 2026-11-10 policy 4 sent 49 requests
+    for `date=2026-12-31` and left seven `circuit:wbgapi:*` keys OPEN, while the
+    pool itself was healthy (direct 200, mihomo-kr01 200 in 0.30s). The pod's
+    logs then read "all proxies OPEN" — a proxy outage that never existed.
+
+    Returns the skip detail when the window's start is past the last completed
+    period, else None. Explicit windows (a backfill of a past range) and
+    day-granularity cadences are never affected.
+    """
+    last_end = _last_completed_period_end(frequency, local_today)
+    if last_end is None:
+        return None
+    start = getattr(date_range, "start", None)
+    if not start:
+        return None
+    try:
+        start_d = dt.date.fromisoformat(str(start)[:10])
+    except ValueError:
+        return None
+    if start_d <= last_end:
+        return None
+    return (
+        f"no_op: the next period has not finished — the window starts "
+        f"{start_d} but the last completed {frequency} period ended {last_end} "
+        f"(local today {local_today}); a period still in progress cannot have "
+        f"data, so requesting it only burns egress and opens circuits"
+    )
 
 
 def _frozen_window(policy: CrawlPolicy, local_today: dt.date) -> str | None:

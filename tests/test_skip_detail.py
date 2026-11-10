@@ -1,7 +1,8 @@
 """A skipped run must say why (2026-11-09: four policies spun at 0 yield with detail NULL)."""
 from fd_open_data_mcp.models import PolicyRun
 from fd_open_data_mcp.refresh.reconciler import (
-    _all_refused_detail, _skip_detail, classify_yield,
+    _all_refused_detail, _last_completed_period_end, _skip_detail,
+    _unfinished_period_detail, classify_yield,
 )
 
 
@@ -77,3 +78,51 @@ def test_long_refusal_list_is_truncated_but_counted():
     detail = _all_refused_detail(ids, _unroutable(*[(i, f"c{i}") for i in ids]))
     assert detail is not None and "(+2 more)" in detail
     assert detail.count("concept is deprecated") == 3
+
+
+# ─── a window that only covers an unfinished period must not launch ─────────
+# 2026-11-10: policy 4 planned 264 cells, every one of them date=2026-12-31 —
+# a year that has not ended. wbgapi answers those with an empty frame, so every
+# cell failed and seven `circuit:wbgapi:*` keys ended up OPEN while the pool
+# itself was healthy (direct 200, mihomo-kr01 200 in 0.30s).
+
+import datetime as _dt
+
+from fd_open_data_mcp.crawl.plan import DateRange
+
+
+def test_yearly_window_in_the_current_year_is_not_due():
+    today = _dt.date(2026, 11, 10)
+    dr = DateRange(start="2026-01-01", end="2026-11-10", frequency="yearly")
+    detail = _unfinished_period_detail("yearly", dr, today)
+    assert detail is not None
+    assert "has not finished" in detail and "2025-12-31" in detail
+
+
+def test_yearly_window_covering_the_last_completed_year_runs():
+    today = _dt.date(2026, 11, 10)
+    dr = DateRange(start="2025-01-01", end="2026-11-10", frequency="yearly")
+    assert _unfinished_period_detail("yearly", dr, today) is None
+
+
+def test_monthly_window_for_the_month_just_ended_runs():
+    today = _dt.date(2026, 11, 10)
+    dr = DateRange(start="2026-10-01", end="2026-11-10", frequency="monthly")
+    assert _unfinished_period_detail("monthly", dr, today) is None
+    # ... but one that starts inside the current, unfinished month does not
+    dr2 = DateRange(start="2026-11-01", end="2026-11-10", frequency="monthly")
+    assert _unfinished_period_detail("monthly", dr2, today) is not None
+
+
+def test_daily_cadences_are_never_clamped():
+    today = _dt.date(2026, 11, 10)
+    dr = DateRange(start="2026-11-06", end="2026-11-10", frequency="daily")
+    assert _unfinished_period_detail("daily", dr, today) is None
+
+
+def test_period_end_helpers():
+    today = _dt.date(2026, 11, 10)
+    assert _last_completed_period_end("yearly", today) == _dt.date(2025, 12, 31)
+    assert _last_completed_period_end("monthly", today) == _dt.date(2026, 10, 31)
+    assert _last_completed_period_end("quarterly", today) == _dt.date(2026, 9, 30)
+    assert _last_completed_period_end("semiannual", today) == _dt.date(2026, 6, 30)

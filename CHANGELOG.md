@@ -2,6 +2,18 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.60] - 2026-11-10
+- **fix(reconciler): 窗口只覆盖「尚未结束的周期」时不再发车。** `_next_period_start` 只把水位加一个
+  周期，执行器再把窗口展开成**周期末**；于是 yearly 概念在水位已是上一个完整年度后，会发出
+  `date=<今年>-12-31` —— 今年还没过完，任何源都不可能有这个数。这不是"多试一次"：wbgapi 对未来年份
+  返回空帧，`run_wbgapi` 据此抛错，**每一格都失败且失败记账到出口上**。2026-11-10 实测策略 4 发了
+  49 次 `date=2026-12-31`，把 7 条 `circuit:wbgapi:*` 打成 OPEN，而池子本身是健康的（直连 200，
+  经 mihomo-kr01 200 / 0.30 秒）——pod 日志只写 `all proxies OPEN`，看起来像代理故障。
+  现在按频率算出"最近一个已结束周期"（yearly→去年 12-31，quarter→上季末，semiannual→上个半年末，
+  monthly→上月末，weekly→上周日），窗口起点晚于它就记 `no_op` 并写明原因、不起 pod；
+  daily/static 与显式 start/end 的回填不受影响（`_last_completed_period_end` +
+  `_unfinished_period_detail`，纯函数，5 条回归测试）。真实计划回放：策略 4/6 拦下，1/5/2487/2658 照常。
+
 ## [0.5.59] - 2026-11-10
 - **feat(price-sources): 行情源注册表 + 口径探针（add-price-supply-and-caliber 前段）。**
   源成为声明对象（覆盖/复权口径与锚点/许可/访问协议按 kind 不按源名）；水位由数据派生
