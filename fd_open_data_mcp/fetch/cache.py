@@ -31,6 +31,7 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Union
+from uuid import uuid4
 
 from sqlalchemy import or_, text
 from sqlalchemy.exc import IntegrityError
@@ -643,6 +644,11 @@ def write_cache(
         inserted, touched = [], [date]
     bump_rollups(session, concept_id, entity_type, entity_id, source_used,
                  inserted, touched, now, granularity=granularity)
+    # 单点写入同样要执行 T 语义：经 fetch(点) 写入的快照也会累积，
+    # 只在 range 路径合并会留一条后门（实测 tenure_days 就是逐点写出来的）。
+    if _retention_snapshot_class(session, concept_id, source_used) == "T":
+        _snapshot_consolidate(session, concept_id, entity_type, entity_id,
+                              granularity, source_used, date, reason)
     session.commit()
     return obs
 
@@ -702,6 +708,64 @@ def write_cache_range_new_only(
                  inserted, touched, now, granularity=granularity)
     session.commit()
     return len(inserted)
+
+
+def _retention_snapshot_class(session: Session, concept_id: int,
+                              source_used: str) -> Optional[str]:
+    """该 (概念, 源) 的留存类别；读不到契约时返回 None（= 不额外处理）。
+
+    为什么要单独包一层而不是直接查表：``write_cache_range`` 是热路径，每次写都查
+    一次契约会多一次往返；``retention.resolve_contract`` 已按 session 记忆，这里
+    只是把"取到 concept.code → 族 → 契约"这段拼起来，并让调用点读起来是一句话。
+    """
+    from fd_open_data_mcp.fetch.retention import family_of, resolve_contract
+
+    concept = session.get(_Concept, concept_id)
+    if concept is None:
+        return None
+    contract = resolve_contract(session, source_used, family_of(concept.code))
+    return contract.retention_class if contract is not None else None
+
+
+def _snapshot_consolidate(    session: Session, concept_id: int, entity_type: str, entity_id: int,
+    granularity: str, source_used: str, keep_date: str,
+    revision_reason: Optional[str],
+) -> int:
+    """T 类（只留当期）写完后把旧快照并掉：只留 ``keep_date`` 那一条。
+
+    为什么是"并"而不是"写完再删"：``bump_rollups`` 按行数记账，删行会让
+    ``concept_source_stats`` 的计数单向漂高。这里**原地搬**——把旧行删除前记一条
+    batch 修订（区间 + 点数 + 原因），行数净变化只有"多出来的那几条"。
+
+    实测背景（2026-11-11）：``tenure_days`` 这类派生快照每天写一条，近 7 天每实体
+    47 行；契约写的是"只留当期"，但写路径没有任何东西在执行它——于是清理过后
+    几个月又长回来。本函数就是那条缺失的执行。
+    """
+    from fd_open_data_mcp.models import ObservationRevision as _Rev
+
+    older = (session.query(SemanticObservation)
+             .filter(SemanticObservation.concept_id == concept_id,
+                     SemanticObservation.entity_type == entity_type,
+                     SemanticObservation.entity_id == entity_id,
+                     SemanticObservation.granularity == granularity,
+                     SemanticObservation.source_used == source_used,
+                     SemanticObservation.date < keep_date)
+             .all())
+    if not older:
+        return 0
+    dates = sorted(o.date for o in older)
+    session.add(_Rev(
+        concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
+        date=max(dates), granularity=granularity, source_used=source_used,
+        revision_kind="batch",
+        batch_id=f"snapshot-consolidate-{uuid4().hex[:12]}",
+        range_start=dates[0], range_end=dates[-1], point_count=len(dates),
+        reason=revision_reason or "T 类只留当期：合并旧的快照行",
+        revised_at=datetime.now(timezone.utc),
+    ))
+    for o in older:
+        session.delete(o)
+    return len(older)
 
 
 def write_cache_range(
@@ -801,5 +865,10 @@ def write_cache_range(
         ))
     bump_rollups(session, concept_id, entity_type, entity_id, source_used,
                  inserted, touched, now, granularity=granularity)
+    # T 类（只留当期）在这里执行契约：把当天之前的快照并掉，只留最新一条。
+    # 放在 bump_rollups 之后、commit 之前——同事务内，失败则整体回滚，不会半途。
+    if _retention_snapshot_class(session, concept_id, source_used) == "T":
+        _snapshot_consolidate(session, concept_id, entity_type, entity_id,
+                              granularity, source_used, max(rows), revision_reason)
     session.commit()
     return len(rows)
