@@ -52,21 +52,51 @@ def read_verified_entries(session: Session) -> list[dict[str, Any]]:
     existence check) yields ``[]`` plus a single log line — never an
     exception, so catalog callers keep their pre-registry behavior.
     """
+    entries, _state = read_verified_entries_state(session)
+    return entries
+
+
+#: Read states for :func:`read_verified_entries_state` — knowledge-surface-integrity R3.
+#: Three facts used to collapse into one ``[]``: "the registry was never wired here",
+#: "the registry is unreadable right now" and "the registry is genuinely empty".
+#: Only the first is a legitimate degradation; the second is an upstream failure the
+#: caller must be able to tell apart, and the third is an ordinary no-match.
+REGISTRY_OK = "ok"
+REGISTRY_NOT_WIRED = "not_wired"
+REGISTRY_UNAVAILABLE = "unavailable"
+
+
+def read_verified_entries_state(session: Session) -> tuple[list[dict[str, Any]], str]:
+    """Verified registry entries plus the READ STATE that produced them.
+
+    Same fail-soft data contract as :func:`read_verified_entries` (never raises,
+    ``[]`` when there is nothing to serve), but the second element makes the
+    three cases distinguishable — R3 forbids reporting "couldn't read" as "empty".
+
+    ``not_wired``     the table does not exist (SQLite dev DBs, pre-registry
+                      deployments) — a supported configuration, not a failure.
+    ``unavailable``   the table exists but could not be read — transient, the
+                      caller should say so rather than show an empty catalog.
+    ``ok``            read succeeded; an empty list here means genuinely no rows.
+    """
     try:
         if not registry_table_exists(session):
             logger.info(
                 "unified registry table %r not present; catalog serves "
                 "native concepts only", REGISTRY_TABLE,
             )
-            return []
+            return [], REGISTRY_NOT_WIRED
         rows = session.execute(_SELECT_VERIFIED_SQL).mappings().all()
     except (OperationalError, ProgrammingError) as exc:
-        logger.info(
+        # Was ``return []`` — indistinguishable from "no rows". Now the caller
+        # gets a state it can surface instead of silently showing an empty tail.
+        logger.warning(
             "unified registry %r unreadable (%s); catalog serves native "
-            "concepts only", REGISTRY_TABLE, exc,
+            "concepts only, and this degradation is reported to the caller",
+            REGISTRY_TABLE, exc,
         )
-        return []
-    return [dict(row) for row in rows]
+        return [], REGISTRY_UNAVAILABLE
+    return [dict(row) for row in rows], REGISTRY_OK
 
 
 # ─── Full-registry enumeration (indicator-caliber-unification D2) ────────────

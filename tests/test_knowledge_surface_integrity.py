@@ -295,3 +295,75 @@ def test_legacy_class_level_figure_is_kept_and_labelled(session):
     assert summary["legacy"]["covered"] == summary["covered"]
     assert summary["legacy"]["granularity"] == "concept"
     assert "do not read as surface-level" in summary["legacy"]["note"]
+
+
+# --- R3：注册表读路径的三态（未接线 / 上游不可用 / 空）必须可分辨 ----------
+
+
+def test_registry_read_reports_not_wired_when_table_absent(session):
+    """表不存在 = 未接线，是受支持的部署形态，不是故障。"""
+    from fd_open_data_mcp.semantic.registry_catalog import (
+        REGISTRY_NOT_WIRED, read_verified_entries_state,
+    )
+
+    entries, state = read_verified_entries_state(session)
+    assert entries == []
+    assert state == REGISTRY_NOT_WIRED, f"缺表应报未接线，实际 {state}"
+
+
+def test_registry_read_reports_unavailable_on_read_error(session, monkeypatch):
+    """表在但读不了 = 上游不可用——此前与「表是空的」共用同一个 []。"""
+    from fd_open_data_mcp.semantic.registry_catalog import (
+        REGISTRY_UNAVAILABLE, read_verified_entries_state,
+    )
+    from sqlalchemy.exc import OperationalError
+
+    monkeypatch.setattr(
+        "fd_open_data_mcp.semantic.registry_catalog.registry_table_exists",
+        lambda _s: True,
+    )
+
+    class Boom:
+        def execute(self, *_a, **_k):
+            raise OperationalError("select", {}, Exception("db gone"))
+
+    entries, state = read_verified_entries_state(Boom())
+    assert entries == []
+    assert state == REGISTRY_UNAVAILABLE, f"读失败应报不可用，实际 {state}"
+
+
+def test_registry_read_distinguishes_empty_from_unavailable(session, monkeypatch):
+    """同样是空列表，状态必须不同——R3「MUST NOT 共用同一形状」。
+
+    直接造两种现实：表在但读失败 vs 表在且确实没有行。两者 entries 都是 []，
+    唯一能区分的就是 state。这条断言正是那个区分本身。
+    """
+    from fd_open_data_mcp.semantic import registry_catalog as rc
+    from sqlalchemy.exc import OperationalError
+
+    monkeypatch.setattr(rc, "registry_table_exists", lambda _s: True)
+
+    class Boom:
+        def execute(self, *_a, **_k):
+            raise OperationalError("select", {}, Exception("db gone"))
+
+    empty_entries, empty_state = rc.read_verified_entries_state(Boom())
+
+    class Empty:
+        class _Res:
+            @staticmethod
+            def mappings():
+                class _M:
+                    @staticmethod
+                    def all():
+                        return []
+                return _M()
+        def execute(self, *_a, **_k):
+            return self._Res()
+
+    real_entries, real_state = rc.read_verified_entries_state(Empty())
+
+    assert empty_entries == real_entries == []
+    assert empty_state == rc.REGISTRY_UNAVAILABLE
+    assert real_state == rc.REGISTRY_OK
+    assert empty_state != real_state, "读失败与真的没数据必须可分辨"
