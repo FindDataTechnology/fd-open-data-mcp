@@ -120,7 +120,8 @@ def main(argv=None) -> int:
     from fd_open_data_mcp.fetch.dispatch import read_range
 
     db = Database(args.db_url)
-    session = db.session()
+    session = db.get_session()
+    
     try:
         affected, prev_year = find_affected(session, max_years=args.max_years)
         n_concepts = len({r["concept_id"] for r in affected})
