@@ -22,7 +22,7 @@ unavailable），不是把不确定伪装成确定。这个方向是可接受的
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, Sequence
 
 DEFAULT_BATCH_SIZE = 5000
 
@@ -31,6 +31,7 @@ def prune_revisions(
     session,
     *,
     older_than_days: Optional[int] = None,
+    granularities: Optional[Sequence[str]] = None,
     include_batch: bool = False,
     dry_run: bool = True,
     batch_size: int = DEFAULT_BATCH_SIZE,
@@ -40,6 +41,10 @@ def prune_revisions(
 
     Input:
       older_than_days —— 保留窗口（天）。**必填才生效**；`None` 表示不清理任何东西。
+      granularities —— 只清理这些粒度的修订（如 `("day",)`）。**这是推荐形态**：
+        日频序列产出绝大多数修订行，但它们的 as-of 回放价值最低（一天的价格谁也不会
+        拿来重放两年）；年/月频序列修订行少、历史价值高。全局 TTL 会把珍贵的年度
+        修订一起删掉，只为压掉日频的量——那是拿贵的换便宜的。默认清全部粒度。
       include_batch —— 是否连 `batch` 行一起删（默认否，见模块 docstring）。
       dry_run —— 默认 True，只统计不删。
       batch_size —— 单次 DELETE 的行数上限，避免长事务与长时间持锁。
@@ -72,13 +77,16 @@ def prune_revisions(
     cutoff = base_now - timedelta(days=older_than_days)
     result["cutoff"] = cutoff.isoformat(sep=" ")
 
-    counts = {
-        kind: session.query(func.count(ObservationRevision.id))
-        .filter(ObservationRevision.revised_at < cutoff,
-                ObservationRevision.revision_kind == kind)
-        .scalar()
-        for kind in ("overwrite", "batch")
-    }
+    def _q(kind):
+        q = session.query(func.count(ObservationRevision.id)).filter(
+            ObservationRevision.revised_at < cutoff,
+            ObservationRevision.revision_kind == kind,
+        )
+        if granularities:
+            q = q.filter(ObservationRevision.granularity.in_(list(granularities)))
+        return q
+
+    counts = {kind: _q(kind).scalar() for kind in ("overwrite", "batch")}
     result["candidates"] = {"overwrite": int(counts["overwrite"]),
                             "batch": int(counts["batch"])}
     if not include_batch:
@@ -90,15 +98,15 @@ def prune_revisions(
     kinds = ["overwrite"] + (["batch"] if include_batch else [])
     total = 0
     while True:
-        ids = [
-            row[0] for row in
+        q = (
             session.query(ObservationRevision.id)
             .filter(ObservationRevision.revised_at < cutoff,
                     ObservationRevision.revision_kind.in_(kinds))
-            .order_by(ObservationRevision.id)
-            .limit(batch_size)
-            .all()
-        ]
+        )
+        if granularities:
+            q = q.filter(ObservationRevision.granularity.in_(list(granularities)))
+        ids = [row[0] for row in q.order_by(ObservationRevision.id)
+               .limit(batch_size).all()]
         if not ids:
             break
         total += (
