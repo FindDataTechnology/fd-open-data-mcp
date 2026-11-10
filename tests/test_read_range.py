@@ -23,6 +23,7 @@ from fd_open_data_mcp.models import (
     EntitySourceIdentifier,
     Function,
     FunctionColumn,
+    ObservationRevision,
     SemanticObservation,
     Source,
 )
@@ -218,3 +219,48 @@ def test_empty_and_degenerate_ranges(session, catalog, monkeypatch):
 def test_entity_type_mismatch_raises(session, catalog):
     with pytest.raises(Exception, match="entity_type"):
         read_range(session, [catalog.id], "fund", ENTITY_ID, START, END)
+
+
+# --- 写入准入门（admit_series） -------------------------------------------
+#
+# 为什么必须有这一层：``write_cache_range`` 内部自己 commit，写得进去就撤不回来，
+# 所以"先写再校验再回滚"不存在。实测事故（concept 258 / stock 2859）：一次范围重取
+# 把四个季度末点写成 `granularity='year'`，并把真正的年报值 67605246103.24 覆写成
+# 2.6719（营收 → 每股指标）。这些不是修订，是口径错误。
+
+
+def test_admit_series_refusal_writes_nothing(session, catalog, monkeypatch):
+    """准入驳回时：既不留观测行，也不留修订行，状态单独标 write_refused。"""
+    calls: list = []
+    monkeypatch.setattr(dispatch_mod, "instrumented_fetch", _fake_fetch_ok(calls))
+
+    ex = dispatch_mod._read_range_one_ex(
+        session, catalog.id, ENTITY_TYPE, ENTITY_ID, START, END,
+        force_refetch=True,
+        admit_series=lambda series, source: (False, "scale_mismatch：6.8e10 → 2.67"),
+    )
+
+    assert ex["served_from"] == "write_refused"
+    assert ex["refusal_reason"].startswith("scale_mismatch")
+    # 抓取确实发生（fetch_log 侧记 ok），被拒的是"能不能当修订"；
+    # 拒写不终止本次读取——按排序继续试下一个 real_source（eastmoney → tencent）。
+    assert [c["real_source"] for c in calls] == ["eastmoney", "tencent"]
+    assert session.query(SemanticObservation).filter_by(concept_id=catalog.id).count() == 0
+    assert session.query(ObservationRevision).filter_by(concept_id=catalog.id).count() == 0
+
+
+def test_admit_series_acceptance_still_writes(session, catalog, monkeypatch):
+    """准入放行时行为与原来一致——守卫不是把写路径关掉。"""
+    calls: list = []
+    monkeypatch.setattr(dispatch_mod, "instrumented_fetch", _fake_fetch_ok(calls))
+
+    ex = dispatch_mod._read_range_one_ex(
+        session, catalog.id, ENTITY_TYPE, ENTITY_ID, START, END,
+        force_refetch=True,
+        admit_series=lambda series, source: (True, None),
+    )
+
+    assert ex["served_from"] == "fetch"
+    assert "refusal_reason" not in ex
+    assert session.query(SemanticObservation).filter_by(concept_id=catalog.id).count() == 5
+

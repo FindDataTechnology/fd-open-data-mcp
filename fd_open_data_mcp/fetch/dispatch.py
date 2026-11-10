@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy.orm import Session
 
@@ -620,6 +620,7 @@ def read_range(
     session: Session, concept_ids: list[int], entity_type: str, entity_id: int,
     start: str, end: str, revision_reason: str | None = None,
     force_refetch: bool = False,
+    admit_series: Callable[[dict, str], tuple[bool, str | None]] | None = None,
 ) -> dict[int, list[dict]]:
     """Bulk read a list of concepts for an entity over ``[start, end]``.
 
@@ -646,6 +647,7 @@ def read_range(
         out[concept_id] = _read_range_one_ex(
             session, concept_id, entity_type, entity_id, start, end,
             revision_reason=revision_reason, force_refetch=force_refetch,
+            admit_series=admit_series,
         )["values"]
     return out
 
@@ -712,6 +714,7 @@ def _read_range_one_ex(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     start: str, end: str, revision_reason: str | None = None,
     force_refetch: bool = False,
+    admit_series: Callable[[dict, str], tuple[bool, str | None]] | None = None,
 ) -> dict:
     """``_read_range_one`` 加上本次读取的自证信息（change:
     define-ingest-revision-and-coverage）。
@@ -719,12 +722,21 @@ def _read_range_one_ex(
     返回值形状：
       ``values``        行列表（与旧 ``_read_range_one`` 完全同形）
       ``served_from``   ``"cache"``（命中且无陈旧）| ``"fetch"``（回源后返回）
-                        | ``"cache_degraded"``（回源全失败、退回缓存）| ``"none"``
+                        | ``"cache_degraded"``（回源全失败、退回缓存）
+                        | ``"write_refused"``（取到了，但不许写）| ``"none"``
       ``sources_failed`` 尝试过但失败/无数据的来源（去重后按尝试顺序）
       ``stale_in_window`` 窗口内读到但被判陈旧的缓存行数
+      ``refusal_reason`` 仅 ``served_from == "write_refused"`` 时出现
 
     把"回源失败后退回缓存"标成 ``cache_degraded`` 是关键：旧实现里它与"缓存
     本来就新鲜"返回同一个空/旧结果，调用方无法区分"没有数据"和"取不到数据"。
+
+    ``admit_series(series, source) -> (ok, reason)`` 是**写入前的准入钩子**。
+    为什么必须在写之前：``write_cache_range`` 内部自己 commit，写得进去就撤不回来，
+    所以"先写再校验再回滚"这条路不存在。补救性重抓用它拦掉两件事——上游返回了比
+    概念粒度更细的日期（把季报当年度值写进来），以及数值量级跳了两个数量级
+    （同一个位置换了个指标）。这两件事都不是"修订"，是口径错误，写进去就污染了
+    序列（实测：yearly 概念被写入四个季度末点，6.8e10 变成 2.67）。
     """
     concept = session.get(Concept, concept_id)
     if concept is None:
@@ -754,6 +766,7 @@ def _read_range_one_ex(
         }
 
     failed: list[str] = []
+    refused_reason: str | None = None
 
     # Fetch path: ranked sources, one upstream range call per (source, binding).
     for cand in rank_sources_for_concept(session, concept_id, None):
@@ -807,6 +820,13 @@ def _read_range_one_ex(
                         "concept says %r — storing the source's unit",
                         concept_id, source, declared, concept.unit,
                     )
+                if admit_series is not None:
+                    allowed, why = admit_series(series, str(real_source or source))
+                    if not allowed:
+                        # 抓取是成功的（fetch_log 记 ok），被拒的是"这批返回值能不能
+                        # 当修订"。不写、不记 error，记住原因继续试下一个来源。
+                        refused_reason = why or "refused"
+                        continue
                 write_cache_range(
                     session, concept_id, entity_type, entity_id,
                     series, declared or concept.unit, source,
@@ -836,6 +856,21 @@ def _read_range_one_ex(
 
     # 回源全部失败：退回缓存（若有）并标记降级。旧实现这里直接 return []，
     # 让"取不到数据"和"没有数据"长得一模一样。
+    if refused_reason is not None:
+        # 取到了但拒写：比分不清"没取到"和"没有"更要紧的是让调用方知道
+        # "这条序列的返回值与既有口径不符"，所以单独一个状态，不混进 degraded。
+        return {
+            "values": [
+                {"date": r.date, "value": _coerce_value(r.value), "unit": r.unit,
+                 "source_used": r.source_used}
+                for r in sorted(cached, key=lambda r: r.date)
+            ],
+            "served_from": "write_refused",
+            "refusal_reason": refused_reason,
+            "sources_failed": failed,
+            "stale_in_window": stale_count,
+            "cold": not cached,
+        }
     if cached:
         return {
             "values": [

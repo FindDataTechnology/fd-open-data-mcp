@@ -55,6 +55,99 @@ REVISION_REASON = (
     "导致官方修订未入账（make-observation-vintage-readable 6.x）"
 )
 
+#: 同一年的新旧值相差超过这个倍数，就不是"修订"而是"换了个指标/单位"。
+SCALE_TOLERANCE = 100.0
+
+
+def _as_float(value):
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def _year_of(date) -> str:
+    return str(date)[:4]
+
+
+def judge_series(series, before):
+    """上游这批返回值能不能当「修订」写回？纯函数，便于单测。
+
+    ``series``: 本次抓到的 ``{date: value}``；``before``: 库里现有的 year 粒度行。
+
+    两道门，都是实测踩出来的（2026-11-10，concept 258 / stock 2859）：
+
+    1. **粒度**：年频概念一年只该有一个点。上游若把季报/日报塞进来，
+       写回会造出「同一年里四个年末日期、粒度标 year」的假历史
+       （实测写入 2025-03-31/06-30/09-30/12-31 四个点）。
+    2. **量级**：同一年的新旧值差两个数量级以上，说明那个位置放的是另一个指标
+       （实测 67605246103.24 → 2.6719，把营收换成了每股指标）。
+
+    这两件事都不是修订。放行它们不是"补回修订"，是把序列改坏。
+    """
+    if not series:
+        return False, "empty_series"
+
+    per_year: dict[str, int] = {}
+    for d in series:
+        y = _year_of(d)
+        per_year[y] = per_year.get(y, 0) + 1
+    dense = {y: n for y, n in per_year.items() if n > 1}
+    if dense:
+        y, n = sorted(dense.items())[0]
+        return False, f"finer_granularity_returned：{y} 年返回 {n} 个点（年频概念应为 1 个）"
+
+    before_year: dict[str, list[float]] = {}
+    for d, v in (before or {}).items():
+        f = _as_float(v)
+        if f is not None:
+            before_year.setdefault(_year_of(d), []).append(f)
+
+    for d, new in series.items():
+        olds = before_year.get(_year_of(d))
+        nf = _as_float(new)
+        if not olds or nf is None:
+            continue
+        old = olds[0]
+        if not old:
+            continue
+        ratio = abs(nf / old)
+        if ratio > SCALE_TOLERANCE or ratio < 1.0 / SCALE_TOLERANCE:
+            # 报"大多少倍"永远取 >= 1 的那一侧：ratio<1 时直接打印会出现
+            # "差 0 倍"（实测 6.6021e+07 → 4.7755 打成"差 0 倍"），读的人无从判断。
+            factor = ratio if ratio >= 1 else 1.0 / ratio
+            direction = "缩" if ratio < 1 else "放"
+            return False, (
+                f"scale_mismatch：{d} {old:g} → {nf:g}"
+                f"（{direction}了 {factor:,.0f} 倍，疑似换了指标/单位）"
+            )
+    return True, None
+
+
+def _year_rows(session, concept_id, entity_type, entity_id, year):
+    """该对在目标年内的 year 粒度行 ``{date: value}``——写入前快照，用来判口径。
+
+    用 ``read_cache_range`` 而不是手写 ``date LIKE 'YYYY%'``。原因不是风格：
+    ``LIKE`` 用不上 btree 索引，规划器会把分区扫一遍，其中包括挂在**外部服务器**
+    ``shard_xinru3`` 上的那份；那个 server 一不可达，整条 session 就废了。
+    实测（2026-11-10 生产批次）：第一条报
+    ``OperationalError: could not connect to server "shard_xinru3"``，
+    其后每一条都变成 ``InFailedSqlTransaction``，40/40 全红——而真因只有一个。
+
+    ``read_cache_range`` 走 ``sql_bounds`` 的整年区间（可索引的范围条件）再按
+    ``observation_period`` 判期，所以 bare-year 的 ``'2025'`` 行同样在窗口内。
+    """
+    from fd_open_data_mcp.fetch.cache import read_cache_range
+
+    rows = read_cache_range(
+        session, concept_id, entity_type, entity_id, str(year), str(year),
+    )
+    return {
+        r.date: r.value
+        for r in rows
+        if getattr(r, "granularity", None) == "year"
+    }
+
 
 def _parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
@@ -86,6 +179,11 @@ def find_affected(session, *, max_years: int = 5):
     「整段历史」会让 --apply 对每一对重抓五年，把上游压垮（实测：整段是 13,990 对
     / 62,470 行，而真正受影响的是 ~8,700 行，差 7 倍）。
     `max_years` 仅用于回看窗口上限，不参与重取范围。
+
+    **排除 deprecated 概念**：写路径的 ``check_applicability`` 会直接抛
+    ``ConceptDeprecated``，重取这类概念必然失败、只是一遍遍污染计数。实测生产
+    2,584 个概念里 1,607 个已 deprecated——不排除的话，盘点表里一大半是永远补不动的
+    配对，真正的可补救项会被淹没。
     """
     from sqlalchemy import text
 
@@ -104,6 +202,9 @@ def find_affected(session, *, max_years: int = 5):
           -- `2025-09-27` 两种形状，而字符串比较下 '2025' < '2025-01-01'，
           -- 用 >= '2025-01-01' 会把 bare-year 行静默漏掉（实测漏 53 行）。
           AND o.date LIKE :yprefix
+          -- 废弃概念写不进去：写路径的 check_applicability 直接抛 ConceptDeprecated。
+          -- 它们的观测行仍留在库里，但重取只会得到异常，不该占盘点名额。
+          AND NOT c.deprecated
         GROUP BY c.id, c.code, c.frequency, o.entity_type, o.entity_id
         ORDER BY n DESC
         """
@@ -129,7 +230,7 @@ def main(argv=None) -> int:
     os.environ["FD_OPEN_DATA_MCP_DATABASE_URL"] = args.db_url
 
     from fd_open_data_mcp.db import Database
-    from fd_open_data_mcp.fetch.dispatch import read_range
+    from fd_open_data_mcp.fetch.dispatch import _read_range_one_ex
 
     db = Database(args.db_url)
     session = db.get_session()
@@ -165,32 +266,64 @@ def main(argv=None) -> int:
         if args.limit:
             todo = todo[: args.limit]
 
-        processed, failed = 0, 0
+        accepted = refused = unavailable = unchanged = failed = 0
         for i, row in enumerate(todo, 1):
             key = key_of(row)
             try:
-                read_range(
-                    session, [row["concept_id"]],
+                # 写入前快照：判断上游返回值能不能当修订。必须在写之前拿到，
+                # 因为 write_cache_range 内部自己 commit，写完就撤不回来了。
+                before = _year_rows(session, row["concept_id"],
+                                    row["entity_type"], row["entity_id"], prev_year)
+
+                def _admit(series, source, _before=before):
+                    return judge_series(series, _before)
+
+                ex = _read_range_one_ex(
+                    session, row["concept_id"],
                     row["entity_type"], row["entity_id"],
                     row["min_date"], row["max_date"],
                     revision_reason=REVISION_REASON,
                     # 补救的意义就是"不等 TTL"：这些行是新鲜的（300 天没到），
                     # 正常读会直接命中缓存、永不回源——那样跑一万次也补不回修订。
                     force_refetch=True,
+                    admit_series=_admit,
                 )
-                processed += 1
+                served = ex.get("served_from")
+                if served == "fetch":
+                    accepted += 1
+                    print(f"  [ok] {key} 已重取并留痕")
+                elif served == "write_refused":
+                    refused += 1
+                    print(f"  [refuse] {key}: {ex.get('refusal_reason')}")
+                elif served == "cache_degraded":
+                    unavailable += 1
+                    print(f"  [unavailable] {key}: 全部来源失败 "
+                          f"({', '.join(sorted(set(ex.get('sources_failed') or []))[:3])})")
+                else:
+                    unchanged += 1
             except Exception as exc:  # noqa: BLE001
                 failed += 1
+                # 一条配对失败不许毒化整个批次：不 rollback，后续每条都会
+                # 报 InFailedSqlTransaction（实测 40/40 全红，只有第一条是真因）。
+                try:
+                    session.rollback()
+                except Exception:  # noqa: BLE001
+                    pass
                 print(f"  [fail] {key}: {type(exc).__name__}: {exc}")
             if ckpt_path:
                 ckpt_path.write_text(json.dumps({"done": sorted(done | {key})}))
             if i % args.batch_size == 0:
-                print(f"  进度 {i}/{len(todo)}（成功 {processed} / 失败 {failed}），"
+                print(f"  进度 {i}/{len(todo)}（留痕 {accepted} / 拒写 {refused} / "
+                      f"取不到 {unavailable} / 无变化 {unchanged} / 失败 {failed}），"
                       f"暂停 {args.sleep_s}s")
                 time.sleep(args.sleep_s)
 
         print()
-        print(f"完成：处理 {processed} 个，失败 {failed} 个（共 {len(todo)} 个待处理）")
+        print(f"完成：留痕 {accepted} 个，拒写 {refused} 个，取不到 {unavailable} 个，"
+              f"无变化 {unchanged} 个，失败 {failed} 个（共 {len(todo)} 个待处理）")
+        if refused:
+            print("拒写＝上游返回的粒度/量级与既有序列不符，写进去会改坏数据；"
+                  "这些配对需要人工确认口径，不能靠重抓解决。")
         print("复核：用 change 的 evidence/README.md 里的核对 SQL 比对该源修订行数变化。")
         return 0 if failed == 0 else 1
     finally:
