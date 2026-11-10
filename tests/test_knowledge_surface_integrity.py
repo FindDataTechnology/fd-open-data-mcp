@@ -367,3 +367,48 @@ def test_registry_read_distinguishes_empty_from_unavailable(session, monkeypatch
     assert empty_state == rc.REGISTRY_UNAVAILABLE
     assert real_state == rc.REGISTRY_OK
     assert empty_state != real_state, "读失败与真的没数据必须可分辨"
+
+
+# --- R3：缓存未命中 ≠ 无数据（读穿透的覆盖申报必须三态可分辨）--------------
+
+
+def test_cold_series_reports_unknown_not_empty():
+    """没有任何点 = 什么都不知道 → 整个窗口可抓取，而不是「这里没有数据」。
+
+    这是 R3 的核心反例：把「还没取过」申报成「取过且确实没有」，下游就会
+    永久跳过这段。
+    """
+    from fd_open_data_mcp.fetch.coverage import coverage
+
+    cov = coverage([], "2026-01-01", "2026-01-31")
+    assert cov.cold is True, "无任何点应判为 cold"
+    assert cov.complete is False
+    assert cov.fetchable == (("2026-01-01", "2026-01-31"),), "整窗都应被视为可抓取"
+    assert cov.known_empty == (), "还没取过，不能声称「确实没有」"
+
+
+def test_probed_empty_is_not_refetched_but_is_reported():
+    """探过且确实为空（休市）→ 仍在 gaps 里被申报，但不进 fetchable。"""
+    from fd_open_data_mcp.fetch.coverage import coverage
+
+    # 整段都是休市：探过、为空
+    cov = coverage([], "2026-02-14", "2026-02-20", known_empty=[("2026-02-14", "2026-02-20")])
+    assert cov.known_empty == (("2026-02-14", "2026-02-20"),), "必须申报「探过为空」"
+    assert cov.fetchable == (), "探过为空的区间不得反复抓取"
+
+
+def test_three_coverage_states_are_mutually_distinguishable():
+    """未取过 / 取过确实没有 / 窗口完整 —— 三种事实必须可区分。"""
+    from fd_open_data_mcp.fetch.coverage import coverage
+
+    unknown = coverage([], "2026-01-01", "2026-01-10")          # 什么都没取过
+    probed_empty = coverage([], "2026-01-01", "2026-01-10",
+                            known_empty=[("2026-01-01", "2026-01-10")])  # 取过，确实没有
+    complete = coverage(
+        [f"2026-01-{d:02d}" for d in range(1, 11)], "2026-01-01", "2026-01-10"
+    )                                                            # 全都有
+
+    # 三者 gaps 形状相近，但 fetchable / known_empty / complete 各不相同
+    assert unknown.fetchable != probed_empty.fetchable, "未取过与取过为空必须可区分"
+    assert probed_empty.known_empty and not unknown.known_empty
+    assert complete.complete is True and unknown.complete is False
