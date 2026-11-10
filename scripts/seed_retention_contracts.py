@@ -112,7 +112,7 @@ BACKFILL: dict[tuple[str, str], str] = {
     ("zgdypf-boxoffice", "film"): "P",
     # —— 快照 / 近期窗口 → T、W
     ("akshare", "performance"): "T",
-    ("polygon", "employee_count"): "W",
+    ("polygon", "employee_count"): "W",   # 窗口 730 天见下
     ("polygon", "market_capitalization"): "W",
 }
 
