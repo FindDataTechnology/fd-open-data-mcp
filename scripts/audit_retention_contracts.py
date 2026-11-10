@@ -148,8 +148,11 @@ def classify_violations(contract: Contract | None, *, rows: int, over_window: in
                    f"{rows_per_entity_recent:.1f} 行——仍在逐日堆积历史")
     if contract.cls in (W, T) and over_window > 0:
         out.append(f"over_window：{over_window} 行超出 {contract.window_days} 天窗口，应淘汰或给出豁免")
-    if contract.cls == P and over_window > 0:
-        out.append("P_class_over_window：P 类不可回收，窗口字段应留空——契约自相矛盾")
+    if contract.cls == P and contract.window_days is not None:
+        # 矛盾在**契约本身**：P 是不可回收，声明窗口即自相矛盾。
+        # 不能拿 over_window 判——P 类有五年以上的老行恰恰是对的。2026-11-11 实测：
+        # 旧判据把 7 个 P 族（gleif-lei、openalex-works、openfda…）全误报成"自相矛盾"。
+        out.append("P_class_has_window：P 类不可回收，不应声明窗口字段")
     return out
 
 

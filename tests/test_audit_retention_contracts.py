@@ -71,12 +71,26 @@ def test_over_window_on_windowed_class_is_flagged():
 
 
 def test_permanent_class_must_not_carry_a_window():
-    """P 类不可回收，若被标了窗口就是契约自相矛盾。"""
+    """P 类不可回收，若**契约里**被标了窗口就是自相矛盾。
+
+    注意判据是 contract.window_days，不是 over_window——P 类有五年以上的老行
+    恰恰是对的。旧实现用 over_window 判，把 7 个正常 P 族误报成违规
+    （2026-11-11 实测：gleif-lei / openalex-works / openfda …）。
+    """
     mod = load()
     c = mod.Contract("x", "crawl", "P", 365, False, True, 64)
     v = mod.classify_violations(c, rows=10, over_window=5,
                                 rows_per_entity_recent=0.0, family="crawl")
-    assert any(x.startswith("P_class_over_window") for x in v)
+    assert any(x.startswith("P_class_has_window") for x in v)
+
+
+def test_permanent_class_with_old_rows_is_fine():
+    """反向守卫：P 类有大量超五年老行不算违规——它就是该一直留着。"""
+    mod = load()
+    c = mod.Contract("gleif-lei", "entities", "P", None, False, True, 64)
+    v = mod.classify_violations(c, rows=81, over_window=81,
+                                rows_per_entity_recent=0.0, family="entities")
+    assert v == []
 
 
 def test_over_budget_is_flagged():
