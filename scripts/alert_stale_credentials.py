@@ -26,13 +26,30 @@ from __future__ import annotations
 
 import argparse
 import sys
+from pathlib import Path
 
-from fd_open_data_mcp.visibility.credentials import (
-    DEFAULT_KUBECONFIGS_DIR,
-    describe_lifetime,
-    lifetime_problems,
-    read_lifetimes,
-)
+# `sys.path[0]` 是脚本所在目录（scripts/），所以裸 `import fd_open_data_mcp` 会去解析
+# **环境里装的那个包**——CI runner 上常常根本没有（没跑 pip install），开发机上则可能是
+# 另一个检出。repo 根在 sys.path 里时本仓版本优先，脚本才和它所在的代码一致。
+# 在 ConfigMap 副本场景（/opt/credential-alert/）下 parents[1] 是 `/`，不满足条件，
+# 于是照旧解析镜像里的包——两种部署都得到正确结果。
+_ROOT = Path(__file__).resolve().parents[1]
+if (_ROOT / "fd_open_data_mcp").is_dir() and str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+try:
+    from fd_open_data_mcp.visibility.credentials import (
+        DEFAULT_KUBECONFIGS_DIR,
+        describe_lifetime,
+        lifetime_problems,
+        read_lifetimes,
+    )
+except ImportError as exc:  # 镜像里的包比脚本旧：说清楚，别让它变成一个裸 traceback
+    print(f"ERROR 当前的 fd_open_data_mcp 缺少 visibility.credentials（{exc}）。\n"
+          f"      本脚本需要 fd-open-data-mcp >= 0.5.62。在镜像更新前**不要**重新生成\n"
+          f"      ConfigMap credential-alert-scripts——在跑的旧 Job 会因此变成 ImportError，\n"
+          f"      也就是把到期告警本身弄哑。", file=sys.stderr)
+    raise SystemExit(2) from exc
 
 DEFAULT_DIR = DEFAULT_KUBECONFIGS_DIR
 
