@@ -477,10 +477,11 @@ def test_launch_refusal_does_not_pause_wave(session):
     attempt: the chunk reads as unlaunched and retries when capacity frees
     instead of feeding the early-pause gate (found live: wave 27 paused on
     15 launch refusals while america was merely full)."""
+    cid = _seed(session)          # f43a77b 起"概念不可路由"会在到 launcher 之前就拒绝
     pids = []
     for i in range(2):
         p = CrawlPolicy(name=f"covexp-w97-p{i + 1}", enabled=False,
-                        concept_ids=[1], entity_type="stock",
+                        concept_ids=[cid], entity_type="stock",
                         date_policy={"mode": "trailing", "days": 90},
                         frequency="daily", mode="per_date",
                         cron_expr="0 0 31 2 *", timezone="UTC")
@@ -488,7 +489,7 @@ def test_launch_refusal_does_not_pause_wave(session):
         session.flush()
         pids.append(p.id)
     w = CoverageWave(entity_type="stock", frequency_bucket="daily",
-                     coverage_state="never", concept_ids=[1],
+                     coverage_state="never", concept_ids=[cid],
                      date_policy={"mode": "trailing", "days": 90},
                      status="running", policy_ids=pids, concepts_before=0)
     session.add(w)
@@ -497,17 +498,26 @@ def test_launch_refusal_does_not_pause_wave(session):
                         namespace="scraw", capacity=4, enabled=True))
     session.commit()
 
+    attempts: list[str] = []
+
     class _NoCluster:
         def launch(self, plan, policy):
+            attempts.append(policy.name)
             raise RuntimeError("no eligible worker cluster for plan "
                                "(check clusters table: tags/capacity)")
         def poll(self, job_ref):
             return "unknown"
 
     for _ in range(2):  # two full ticks of refusals
+        before = len(attempts)
         result = expander.expand_once(session, launcher=_NoCluster())
         res = next(x for x in result["waves"] if x["wave"] == w.id)
         assert res["status"] == "running"   # the bug made this "paused"
+        # 一个"没有集群能接"的拒绝是本轮结论，不是某一块的结论：同 tick 里
+        # 剩下的块不必再各自编译一遍计划去撞同一面墙（wave 27 烧了 15 块）。
+        # 这条断言才真的守住那个 break——去掉 break 时它变红（2 次而非 1 次）。
+        assert len(attempts) - before == 1, (
+            f"同一 tick 内应只尝试一次就停手，实际试了 {len(attempts) - before} 次")
     assert session.get(CoverageWave, w.id).status == "running"
 
     good = _FakeLauncher()
