@@ -43,7 +43,10 @@ def test_undeclared_is_pending_not_invalid(tmp_path):
     assert decl.missing_fields == ["revision_policy", "coverage_capability"]
     assert decl.invalid == {}
     rep = inspect([decl])
-    assert rep["counts"] == {"declared": 0, "pending": 1, "invalid": 0}
+    # finalize_window 是 2026-11-10 定型窗口那轮新增的第三个待补轴：
+    # 它不进 missing_fields（不是必填声明），但巡检要单独计数。
+    assert rep["counts"] == {"declared": 0, "pending": 1, "invalid": 0,
+                             "pending_finalize_window": 1}
 
 
 def test_declared_source_passes(tmp_path):

@@ -16,6 +16,7 @@ from datetime import datetime, timezone
 import pytest
 
 from fd_open_data_mcp.fetch.cache import write_cache, write_cache_range
+from fd_open_data_mcp.errors import FinalizedObservationError
 from fd_open_data_mcp.models import Concept, ConceptCoverage, ConceptSourceStats
 from fd_open_data_mcp.visibility.coverage import (
     bump_rollups,
@@ -46,9 +47,14 @@ def test_hook_maintains_rows_and_dates(session, concept):
     assert cov.sources == 1
     assert cov.last_fetch is not None
 
-    # A second fetch of an existing point: value refresh moves last_fetch,
-    # row count unchanged.
-    write_cache(session, concept.id, "country", 1, "2023-12-31", "9", "CNY", "src_a")
+    # A second fetch of an existing point refreshes the value, row count
+    # unchanged. 2023-12-31 早已定型（make-observation-vintage-readable 的定型
+    # 写闸，2026-11-10 起），所以**不带 reason 的覆写必须被拒**，带 correction
+    # 才允许——这是新契约，不是本用例要放宽的断言。
+    with pytest.raises(FinalizedObservationError):
+        write_cache(session, concept.id, "country", 1, "2023-12-31", "9", "CNY", "src_a")
+    write_cache(session, concept.id, "country", 1, "2023-12-31", "9", "CNY", "src_a",
+                correction=True, reason="上游修订旧值，回填更正")
     cov = _cov(session, concept.id)
     assert cov.rows == 2
     assert cov.latest_date == "2024-12-31"

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import pytest
 
+from fd_open_data_mcp.errors import FinalizedObservationError
 from fd_open_data_mcp.fetch.cache import (
     read_cache_range,
     write_cache_range,
@@ -90,9 +91,17 @@ def test_other_source_rows_are_untouched(session, cid) -> None:
 
 
 def test_the_upsert_variant_still_refreshes(session, cid) -> None:
-    """Contrast case: the first-fetch path *does* update (today's cell needs it)."""
+    """Contrast case: the first-fetch path *does* update —但已定型的点要带 reason。
+
+    2026-11-10 起有定型写闸（make-observation-vintage-readable）：无理由覆写已定型
+    观测会被拒。`write_cache_range` 的通路是**非空 revision_reason 即按 correction 放行**，
+    所以这里带上 reason；不带 reason 必须被拒这条另有断言守着。
+    """
     write_cache_range(session, cid, T, EID, {"2026-01-05": 10.0}, "currency", SRC)
-    write_cache_range(session, cid, T, EID, {"2026-01-05": 12.0}, "currency", SRC)
+    with pytest.raises(FinalizedObservationError):
+        write_cache_range(session, cid, T, EID, {"2026-01-05": 12.0}, "currency", SRC)
+    write_cache_range(session, cid, T, EID, {"2026-01-05": 12.0}, "currency", SRC,
+                      revision_reason="上游修订旧值：分红前复权")
     assert _stored(session, cid) == {"2026-01-05": "12.0"}
 
 

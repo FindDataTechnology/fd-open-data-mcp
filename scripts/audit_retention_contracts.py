@@ -146,7 +146,10 @@ def classify_violations(contract: Contract | None, *, rows: int, over_window: in
     if contract.cls == T and rows_per_entity_recent > 1.5:
         out.append(f"T_class_accruing_history：T 类声明只留当期，但近 7 天每实体平均 "
                    f"{rows_per_entity_recent:.1f} 行——仍在逐日堆积历史")
-    if contract.cls in (W, T) and over_window > 0:
+    if contract.cls == W and over_window > 0:
+        # 只对 W 判超窗。T 类每实体只留唯一一条快照，这条即使比窗口旧也**不能删**：
+        # 删掉等于把"陈旧"变成"没有"，而未知与空是两件事（这正是本仓反复踩的坑）。
+        # T 类的窗口含义是"快照多快该刷新"，属于取数覆盖问题，不是容量问题。
         out.append(f"over_window：{over_window} 行超出 {contract.window_days} 天窗口，应淘汰或给出豁免")
     if contract.cls == P and contract.window_days is not None:
         # 矛盾在**契约本身**：P 是不可回收，声明窗口即自相矛盾。
@@ -209,20 +212,32 @@ def main(argv=None) -> int:
             recent = c.execute(text("""
                 SELECT o.source_used AS src,
                        split_part(co.code, '.', 1) AS fam,
-                       count(*)::float / GREATEST(count(DISTINCT (o.entity_type, o.entity_id)), 1) AS per_entity
+                       count(*)::float
+                         / GREATEST(count(DISTINCT (o.concept_id, o.entity_type, o.entity_id)), 1) AS per_entity
                   FROM semantic_observations o
                   JOIN concepts co ON co.id = o.concept_id
                  WHERE o.fetched_at > now() - interval '7 days'
                  GROUP BY 1, 2
             """)).all()
-            thresholds = c.execute(text("""
-                SELECT o.source_used AS src,
-                       split_part(co.code, '.', 1) AS fam,
-                       count(*) FILTER (WHERE o.date < to_char(now() - interval '1826 days', 'YYYY-MM-DD')) AS over_5y
-                  FROM semantic_observations o
-                  JOIN concepts co ON co.id = o.concept_id
-                 GROUP BY 1, 2
-            """)).all()
+            # over_window 必须按**契约自己的窗口**切，不能写死 1826（5 年）：
+            # 写死时 W/730 的族会漏报，报出来的行数又与文案里的窗口天数不一致。
+            # 窗口取值来自契约表，逐个窗口生成一列，避免为每个族单开一条查询。
+            windows = sorted({ct.window_days for ct in db_contracts.values()
+                              if ct.window_days})
+            if windows:
+                cols = ",\n                       ".join(
+                    f"count(*) FILTER (WHERE o.date < to_char(now() - interval '{w} days', 'YYYY-MM-DD')) AS o{w}"
+                    for w in windows)
+                thresholds = c.execute(text(f"""
+                    SELECT o.source_used AS src,
+                           split_part(co.code, '.', 1) AS fam,
+                           {cols}
+                      FROM semantic_observations o
+                      JOIN concepts co ON co.id = o.concept_id
+                     GROUP BY 1, 2
+                """)).all()
+            else:
+                thresholds = []
     except Exception as exc:  # noqa: BLE001
         print(f"UNKNOWN: 查询失败：{type(exc).__name__}: {exc}", file=sys.stderr)
         return 2
@@ -230,14 +245,19 @@ def main(argv=None) -> int:
         eng.dispose()
 
     per_entity = {(r._mapping["src"], r._mapping["fam"]): r._mapping["per_entity"] for r in recent}
-    over5 = {(r._mapping["src"], r._mapping["fam"]): r._mapping["over_5y"] for r in thresholds}
+    over_by_window = {}
+    for r in thresholds:
+        for k, val in r._mapping.items():
+            if k.startswith("o") and k[1:].isdigit():
+                over_by_window[(r._mapping["src"], r._mapping["fam"], int(k[1:]))] = val
 
     report, capacity, gaps = [], 0, 0
     for r in rows:
         m = r._mapping
         contract = resolve_contract(m["src"], m["fam"], db_contracts)
         pe = per_entity.get((m["src"], m["fam"]), 0.0)
-        ov = over5.get((m["src"], m["fam"]), 0) or 0
+        ov = over_by_window.get(
+            (m["src"], m["fam"], contract.window_days if contract else None), 0) or 0
         v = classify_violations(contract, rows=m["n"], over_window=ov,
                                rows_per_entity_recent=pe, family=m["fam"])
         sev = severity_of(v)
@@ -251,7 +271,7 @@ def main(argv=None) -> int:
             "entities": m["entities"], "span": f"{m['d0']}..{m['d1']}",
             "class": contract.cls if contract else None,
             "window_days": contract.window_days if contract else None,
-            "over_5y_rows": ov, "rows_per_entity_7d": round(pe, 2),
+            "over_window_rows": ov, "rows_per_entity_7d": round(pe, 2),
             "severity": sev, "violations": v,
         })
 

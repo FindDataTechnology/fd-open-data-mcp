@@ -129,3 +129,52 @@ def test_severity_is_not_constant():
     got = {mod.severity_of([]), mod.severity_of(["no_contract：a"]),
            mod.severity_of(["over_window：b"])}
     assert got == {"ok", "contract_gap", "capacity"}
+
+
+def test_recent_rows_denominator_is_per_concept_entity():
+    """判据的分母必须是 (概念, 实体)，不是 (实体)。
+
+    2026-11-11 实测：nav 族有 3 个概念、performance 有 4 个共用同一批实体。
+    按 (实体) 做分母时，T 类正确执行（每概念每实体 1 行）会被算成 2.84 / 2.02 行，
+    判成"仍在逐日堆积"——**数据是对的，判据错了**。这种假红会让人把闸门关掉。
+    """
+    src = SCRIPT.read_text()
+    assert "count(DISTINCT (o.concept_id, o.entity_type, o.entity_id))" in src, \
+        "近 7 天每实体行数的分母必须按 (概念, 实体) 计"
+    # 反向守卫：旧的 (实体) 分母不能再出现在 per_entity 的表达式里
+    assert "GREATEST(count(DISTINCT (o.entity_type, o.entity_id)), 1) AS per_entity" not in src
+
+
+def test_over_window_uses_contract_window_not_hardcoded_5y():
+    """超窗判据必须按契约自己的 window_days 切。
+
+    旧实现写死 `interval '1826 days'`（5 年），文案却打印契约的窗口天数：
+    W/730 的族会漏报，报出来的行数又与文案对不上。窗口取值改成从契约表生成。
+    """
+    src = SCRIPT.read_text()
+    assert "interval '1826 days'" not in src, \
+        "不得把 5 年窗口写死进 SQL；应按契约的 window_days 生成"
+    assert "for w in windows" in src
+
+
+def test_t_class_over_window_is_not_a_capacity_violation():
+    """T 类即使快照比窗口旧也不得判成超窗。
+
+    T 类每个 (概念, 实体) 只有一条快照；按窗口把它删掉，等于把"陈旧"变成"没有"，
+    而"未知 ≠ 空"是本仓反复踩的坑（读不到当成不存在）。陈旧是取数覆盖问题，
+    由巡检/覆盖度那侧报，不进容量违规——否则闸门永远红，最后被人关掉。
+    """
+    mod = load()
+    c = mod.Contract("akshare", "yield", "T", 30, True, False, 64)
+    v = mod.classify_violations(c, rows=998, over_window=898,
+                               rows_per_entity_recent=1.0, family="yield")
+    assert v == [], f"T 类不该因超窗报容量违规，实际 {v}"
+
+
+def test_w_class_over_window_still_flagged():
+    """反向守卫：W 类超窗必须继续报（这条不能被上面的放宽顺手带掉）。"""
+    mod = load()
+    c = mod.Contract("akshare", "aum", "W", 1826, True, True, 512)
+    v = mod.classify_violations(c, rows=407301, over_window=234,
+                               rows_per_entity_recent=7.0, family="aum")
+    assert any(x.startswith("over_window") for x in v)
