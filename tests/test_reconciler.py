@@ -759,3 +759,24 @@ def test_common_env_takes_credentials_from_the_secret(monkeypatch):
         assert ref["name"] == "fd-db-secret"
     assert env["FD_OPEN_DATA_MCP_DATABASE_URL"]["valueFrom"]["secretKeyRef"]["key"] == "DATABASE_URL"
     assert env["REDIS_URL"]["valueFrom"]["secretKeyRef"]["key"] == "REDIS_URL"
+
+
+def test_common_env_passes_the_retention_gate_through(monkeypatch):
+    """集群 Job 必须继承闸门档位——否则 enforce 只对服务端生效、爬虫侧永远 off。
+
+    这是"同一条规则在两处各有一套行为"的典型形态：`FD_RETENTION_GATE` 之前只在两份
+    服务端清单里配过，派出去的 Job 根本没有这个 env，于是大批量写观测的那一侧不受约束。
+    """
+    from types import SimpleNamespace
+    from fd_open_data_mcp.refresh.reconciler import MultiClusterLauncher
+
+    launcher = MultiClusterLauncher()
+    cluster = SimpleNamespace(id=9, name="cheap", runtime_hints=None)
+
+    monkeypatch.setenv("FD_RETENTION_GATE", "enforce")
+    env = {e["name"]: e for e in launcher._common_env(cluster)}
+    assert env.get("FD_RETENTION_GATE", {}).get("value") == "enforce"
+
+    monkeypatch.delenv("FD_RETENTION_GATE", raising=False)
+    env2 = {e["name"]: e for e in launcher._common_env(cluster)}
+    assert "FD_RETENTION_GATE" not in env2, "不设档位时不要凭空写一个值进去"

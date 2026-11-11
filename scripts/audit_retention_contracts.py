@@ -71,6 +71,13 @@ DEFAULT_CONTRACTS: tuple[tuple[str, str, str, int | None, bool, bool, int], ...]
     ("akshare", "rating", T, 30, True, False, 64),
     ("akshare", "yield", T, 30, True, False, 64),
     ("akshare", "nav", T, 30, True, False, 64),
+    # 2026-11-12 补的两条快照族（原先完全没有契约；形状实测：每实体一条记录）
+    ("clinicaltrials-cn", "trial", T, None, True, True, 256),
+    ("nrdl-national-catalog", "catalog", T, None, True, True, 64),
+    # 三条原先只缺 re_fetchable；T 只留当期、W 为订阅制接口，故均可重取
+    ("akshare", "performance", T, None, True, False, 64),
+    ("polygon", "employee_count", W, 730, True, True, 64),
+    ("polygon", "market_capitalization", W, 730, True, True, 64),
 )
 
 

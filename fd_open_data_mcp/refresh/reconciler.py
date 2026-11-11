@@ -806,6 +806,13 @@ class MultiClusterLauncher:
         dc_key = os.environ.get("DC_API_KEY")
         if dc_key:
             env.append({"name": "DC_API_KEY", "value": dc_key})
+        # 留存闸门档位必须跟着**写入口**走，不能只配在服务端：集群 Job 才是大批量写
+        # 观测的地方，此前它们根本没有这个 env，于是 enforce 只对服务端生效、爬虫侧
+        # 永远 off——"同一条规则在两处各有一套行为"正是本 change 反复在修的形态。
+        # 这里做**透传**（不写死档位）：控制面设成什么档，派出去的 Job 就是什么档。
+        gate = os.environ.get("FD_RETENTION_GATE")
+        if gate:
+            env.append({"name": "FD_RETENTION_GATE", "value": gate})
         return env
 
     @staticmethod
