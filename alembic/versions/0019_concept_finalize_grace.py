@@ -31,6 +31,15 @@ depends_on = None
 
 
 def upgrade() -> None:
+    # SQLite 上这张表根本不存在（0001 基线是 pg_dump 产物，见其 upgrade 开头的
+    # dialect 判断；sqlite 的测试库由显式 test builder 建表，不走迁移链）。
+    # 少了这道判断，整条 `alembic upgrade head` 在 sqlite 上死在这一步——
+    # tests/test_vector_migration_sql.py::test_alembic_upgrade_head_on_sqlite_is_guarded
+    # 正是这么红的（2026-11-12 实测）。
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+
     op.add_column(
         "concepts",
         sa.Column("finalize_grace_days", sa.Integer(), nullable=True),
@@ -45,5 +54,9 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        return
+
     op.drop_index("ix_concepts_finalize_grace", table_name="concepts")
     op.drop_column("concepts", "finalize_grace_days")
