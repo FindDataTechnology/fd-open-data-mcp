@@ -83,6 +83,27 @@ class Contract:
     re_fetchable: bool | None
     upstream_history_mutable: bool
     budget_mb: int
+    # 窗口之外的保留必须显式（spec: retention window is business-driven）。
+    # 三项成组：有 exempt_until 且未过期才算"保留"，否则回到"可淘汰"。
+    exempt_reason: str | None = None
+    exempt_owner: str | None = None
+    exempt_until: object = None      # datetime.date | None
+
+    def exemption(self, today=None):
+        """返回 ("active" | "expired" | "none", 说明)。纯函数，便于单测。"""
+        import datetime as _dt
+
+        if self.exempt_until is None:
+            return "none", ""
+        today = today or _dt.date.today()
+        d = self.exempt_until
+        if isinstance(d, str):
+            d = _dt.date.fromisoformat(d[:10])
+        who = f"，责任人 {self.exempt_owner}" if self.exempt_owner else "，责任人为空"
+        why = f"（{self.exempt_reason}）" if self.exempt_reason else "（理由为空）"
+        if d < today:
+            return "expired", f"豁免已于 {d} 到期{who}{why}"
+        return "active", f"豁免有效至 {d}{who}{why}"
 
 
 def resolve_contract(source: str | None, family: str | None, db_contracts=None) -> Contract | None:
@@ -109,14 +130,30 @@ def load_db_contracts(conn) -> dict:
     """从 `data_retention_contracts` 读契约；表不存在时返回空（迁移未跑也要能审）。"""
     from sqlalchemy import text
 
+    _COLS = ("source, family, retention_class, retention_window_days, "
+             "re_fetchable, upstream_history_mutable, volume_budget_mb")
+    # 先看列在不在，再决定 SELECT——**不用 try/except 兜**：Postgres 里一条失败的
+    # 语句会把整个事务打成 aborted，后续查询全报 InFailedSqlTransaction
+    # （2026-11-11 实测，审计直接变成 UNKNOWN）。而没有 0021 三列时更不能退到
+    # bootstrap 常量——那会让"读库"静默变成"读代码里的 seed"，口径悄悄换掉。
+    has_exempt = False
     try:
-        rows = conn.execute(text("""
-            SELECT source, family, retention_class, retention_window_days,
-                   re_fetchable, upstream_history_mutable, volume_budget_mb
+        has_exempt = conn.execute(text("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'data_retention_contracts'
+               AND column_name = 'exempt_until'
+        """)).first() is not None
+    except Exception:  # noqa: BLE001 — 非 Postgres（sqlite 测试）没有 information_schema
+        has_exempt = False
+    if has_exempt:
+        rows = conn.execute(text(f"""
+            SELECT {_COLS}, exempt_reason, exempt_owner, exempt_until
               FROM data_retention_contracts
         """)).all()
-    except Exception:  # noqa: BLE001 — 表还没建：退到 bootstrap 常量
-        return {}
+    else:
+        rows = conn.execute(text(
+            f"SELECT {_COLS}, NULL AS exempt_reason, NULL AS exempt_owner,"
+            f" NULL AS exempt_until FROM data_retention_contracts")).all()
     out = {}
     for r in rows:
         m = r._mapping
@@ -126,6 +163,7 @@ def load_db_contracts(conn) -> dict:
             m["source"], m["family"], m["retention_class"],
             m["retention_window_days"], m["re_fetchable"],
             m["upstream_history_mutable"], m["volume_budget_mb"] or 0,
+            m["exempt_reason"], m["exempt_owner"], m["exempt_until"],
         )
     return out
 
@@ -146,11 +184,17 @@ def classify_violations(contract: Contract | None, *, rows: int, over_window: in
     if contract.cls == T and rows_per_entity_recent > 1.5:
         out.append(f"T_class_accruing_history：T 类声明只留当期，但近 7 天每实体平均 "
                    f"{rows_per_entity_recent:.1f} 行——仍在逐日堆积历史")
-    if contract.cls == W and over_window > 0:
+    if contract.cls == W and over_window > 0 and contract.exemption()[0] != "active":
         # 只对 W 判超窗。T 类每实体只留唯一一条快照，这条即使比窗口旧也**不能删**：
         # 删掉等于把"陈旧"变成"没有"，而未知与空是两件事（这正是本仓反复踩的坑）。
         # T 类的窗口含义是"快照多快该刷新"，属于取数覆盖问题，不是容量问题。
-        out.append(f"over_window：{over_window} 行超出 {contract.window_days} 天窗口，应淘汰或给出豁免")
+        state, why = contract.exemption()
+        if state == "expired":
+            out.append(f"over_window：{over_window} 行超出 {contract.window_days} 天窗口；"
+                       f"{why}——豁免已失效，该部分数据回到可淘汰")
+        else:
+            out.append(f"over_window：{over_window} 行超出 {contract.window_days} 天窗口，"
+                       f"应淘汰或给出豁免")
     if contract.cls in (T, W) and contract.re_fetchable is None:
         # 未声明 ≠ 不可回收，也 ≠ 可回收。淘汰工具靠这个字段决定"删了能不能拿回来"，
         # 空着等于把判断留给下一个人。2026-11-11 实测：T/W 里显式 false 的 0 个、

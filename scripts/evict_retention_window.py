@@ -176,6 +176,14 @@ def main(argv=None) -> int:
                 # 但要把"没说清"这件事报出来——否则契约缺口永远没人补。
                 print(f"  提示 {m['src']}/{m['fam']}：re_fetchable 未声明——"
                       f"按类别 {ct.cls} 处理，建议补契约")
+            # 有效豁免 = 该族超窗数据标"保留"。只在报告里标而不在这里生效，
+            # 豁免就是一句装饰；spec 也写明"到期即回到可淘汰"（过期不拦）。
+            state, why = ct.exemption() if hasattr(ct, "exemption") else ("none", "")
+            if state == "active":
+                print(f"  跳过 {m['src']}/{m['fam']}：{why}——豁免期内不淘汰")
+                continue
+            if state == "expired":
+                print(f"  提示 {m['src']}/{m['fam']}：{why}——豁免已失效，按可淘汰处理")
             targets.append((m["src"], m["fam"], ct, m["n"]))
 
         if not targets:

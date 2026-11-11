@@ -34,6 +34,7 @@ from sqlalchemy import (
     Boolean,
     CheckConstraint,
     Column,
+    Date,
     DateTime,
     Float,
     ForeignKey,
@@ -1824,6 +1825,13 @@ class DataRetentionContract(Base):
     re_fetchable = Column(Boolean)
     upstream_history_mutable = Column(Boolean)
     volume_budget_mb = Column(Integer)
+    # ── 窗口之外的保留必须显式（spec R: "Retention window is business-driven"）──
+    # 三列成组：`exempt_until` 未过期 = 该族超窗数据标"保留"；过期或为空 = "可淘汰"。
+    # 理由与责任人不是装饰——没有它们就答不上"这条为什么还在"，豁免会变成另一种
+    # 沉默保留，正是这条要求要堵的东西。
+    exempt_reason = Column(Text)
+    exempt_owner = Column(String(128))
+    exempt_until = Column(Date)
     note = Column(Text)
     created_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
     updated_at = Column(DateTime(timezone=True), server_default=func.now(), nullable=False)
