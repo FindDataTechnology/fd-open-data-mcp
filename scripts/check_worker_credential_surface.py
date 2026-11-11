@@ -30,14 +30,21 @@ america/baidu/tencent/zihan 四组凭据，而 `clusters` 表里只有 cheap 是
 from __future__ import annotations
 
 import argparse
-import base64
 import json
 import os
 import sys
-import time
 from pathlib import Path
 
-DEFAULT_KUBECONFIGS_DIR = "/kubeconfigs"
+# 寿命判定住在包里（`fd_open_data_mcp.visibility.credentials`），因为
+# `python -m ...visibility.scan` 在运行时只装得到包、装不到 scripts/。
+# 这里**只 import，不复制**——同一条"剩余 < 寿命 1/3"出现两份，就是这个
+# change 一路在批的双真理：漂移后告警说健康、巡检说违规，没人分得清谁对。
+from fd_open_data_mcp.visibility.credentials import (
+    DEFAULT_KUBECONFIGS_DIR,
+    credential_lifetime,
+    describe_lifetime,
+    lifetime_problems,
+)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -116,96 +123,16 @@ def load_mounted_clusters(ns: argparse.Namespace) -> set[str]:
 
 
 # ─── 凭据剩余寿命（rotate-worker-cluster-credentials 3.2）────────────────────
-# bound token 会到期，而到期是**静默**的：派发在某天突然 401，之前没有任何征兆。
-# legacy token 反过来永不失效，所以"看不出寿命"本身就是它最大的风险。
-# 两种都要能一眼看出来，判据都来自 token 本身（JWT 的 iat/exp），不靠外部记账。
-
-def decode_jwt_payload(token: str) -> dict | None:
-    """读 JWT 的 claims，**不验签**。
-
-    只用来回答"它什么时候过期"。验签是 API server 的事；这里验了也没意义，
-    因为真要证明凭据有效只有打一次 API（见 rotate_worker_credential.py）。
-    """
-    parts = token.strip().split(".")
-    if len(parts) != 3:
-        return None
-    body = parts[1]
-    pad = "=" * (-len(body) % 4)
-    try:
-        raw = base64.urlsafe_b64decode(body + pad)
-        claims = json.loads(raw)
-    except (ValueError, json.JSONDecodeError):
-        return None
-    return claims if isinstance(claims, dict) else None
-
-
-def credential_lifetime(token: str, now: float | None = None) -> dict:
-    """返回 {kind, issued_at, expires_at, lifetime_s, remaining_s, stale}。
-
-    kind: bound（有 exp）/ legacy（JWT 但无 exp）/ unknown（不是可解 JWT）。
-    stale 用「剩余 < 寿命的 1/3」判定——与 3.3 要求的刷新节奏（间隔 ≤ 寿命 1/3）
-    是同一个刻度的两端：刷新正常时它永远不亮，刷新停了它先亮。
-    """
-    claims = decode_jwt_payload(token)
-    if claims is None:
-        return {"kind": "unknown", "issued_at": None, "expires_at": None,
-                "lifetime_s": None, "remaining_s": None, "stale": None}
-    iat = claims.get("iat")
-    exp = claims.get("exp")
-    if exp is None:
-        # 无 exp 的 JWT = legacy SA token：永不过期。这不是"健康"，是"没有兜底"。
-        return {"kind": "legacy", "issued_at": iat, "expires_at": None,
-                "lifetime_s": None, "remaining_s": None, "stale": None}
-
-    now = time.time() if now is None else now
-    lifetime = (exp - iat) if isinstance(iat, (int, float)) else None
-    remaining = exp - now
-    stale = bool(lifetime and remaining < lifetime / 3.0)
-    return {"kind": "bound", "issued_at": iat, "expires_at": exp,
-            "lifetime_s": lifetime, "remaining_s": remaining, "stale": stale}
-
-
-def _fmt_seconds(seconds: float | None) -> str:
-    if seconds is None:
-        return "-"
-    sign = "-" if seconds < 0 else ""
-    seconds = abs(seconds)
-    if seconds >= 86400:
-        return f"{sign}{seconds / 86400:.1f}d"
-    if seconds >= 3600:
-        return f"{sign}{seconds / 3600:.1f}h"
-    return f"{sign}{seconds / 60:.0f}m"
-
-
-def describe_lifetime(life: dict) -> str:
-    if life["kind"] == "unknown":
-        return "寿命未知（token 不是可解 JWT）"
-    if life["kind"] == "legacy":
-        return "永不过期（legacy，无 exp）"
-    life_s = _fmt_seconds(life["lifetime_s"])
-    rem = _fmt_seconds(life["remaining_s"])
-    flag = "  STALE" if life["stale"] else ""
-    if life["remaining_s"] is not None and life["remaining_s"] < 0:
-        flag = "  EXPIRED"
-    return f"bound 寿命 {life_s}，剩余 {rem}{flag}"
-
-
-def lifetime_problems(lifetimes: dict[str, dict]) -> list[str]:
-    """到期/刷新停摆算违规；legacy 不算违规（它是选择，不是故障）。"""
-    problems: list[str] = []
-    for name in sorted(lifetimes):
-        life = lifetimes[name]
-        if life["kind"] != "bound":
-            continue
-        rem = life["remaining_s"]
-        if rem is not None and rem < 0:
-            problems.append(
-                f"{name}: bound token 已过期（派发此刻就会 401）——刷新没在跑")
-        elif life["stale"]:
-            problems.append(
-                f"{name}: bound token 剩余 {_fmt_seconds(rem)} 已低于寿命的 1/3"
-                f"（刷新没在跑，或刷新间隔 > 寿命 1/3）")
-    return problems
+# 判定实现已搬进包里（`fd_open_data_mcp.visibility.credentials`），因为
+# `python -m ...visibility.scan` 在运行时只装得到包、装不到 scripts/。
+# 这里**只 import，不复制**——同一条"剩余 < 寿命 1/3"出现两份，就是这个
+# change 一路在批的双真理：漂移后告警说健康、巡检说违规，没人分得清谁对。
+from fd_open_data_mcp.visibility.credentials import (  # noqa: E402
+    DEFAULT_KUBECONFIGS_DIR,
+    credential_lifetime,
+    describe_lifetime,
+    lifetime_problems,
+)
 
 
 def check(clusters: dict[str, bool], mounted: set[str]) -> list[str]:

@@ -298,22 +298,43 @@
 - 口径提醒：这个 Job 只**告警**，从不刷新——刷新需要 `create serviceaccounts/token`，
   控制面凭据故意没有（见 `.github/workflows/refresh-worker-credentials.yml` 头部）。
 
-### 3.2 的递归问题（已知残留，写清楚免得当成"已经安全了"）
+### 3.2 的递归问题（已闭环：检查折进 scan，独立告警转为过渡）
 
-到期告警那条 CronJob（`fd-master/worker-credential-expiry`）**自己也无人监视**：
+到期告警原先是一条独立 CronJob（`fd-master/worker-credential-expiry`），而它**自己也无人监视**：
 
 - `ops-console` 的 `WATCH_CRONJOBS` 只读 **cheap-ts 的 `fd-prod`** 命名空间
   （`WATCH_NAMESPACE` 未设 → 默认 `fd-prod`，取 `/apis/batch/v1/namespaces/fd-prod/cronjobs`），
   而这条 CronJob 在 **xinru 的 `fd-master`**。所以**不能**把它加进 `WATCH_CRONJOBS`——
   加了它只会永远显示 `missing: true`，变成一条永久假红（比不监视更坏）。
-- 现状：它若连续失败，只有 `failedJobsHistoryLimit: 3` 里的 Job 记录，没人看。
-  也就是说这是一条**没人看的 dead-man switch**。
-- 但这是**净改进**而不是回归：在此之前根本没有任何到期提醒。它失败的结果等于"回到今天的样子"，
-  不会比现在更糟。
-- 真要闭环，下一步应二选一（都需要发版或跨集群监视）：
-  ① 把寿命检查折进 `visibility.scan`（`crawl-watcher-scan` 每 15 分钟、已有微信通道，
-     且是团队已经在看的告警路径）；② 给 xinru 侧加一个被监视的载体（如把心跳写进库，
-     由 coverage-expander/scan 检查"最近一次成功"）。
+
+也就是说它是一条**没人看的 dead-man switch**：告警自己到期时同样悄无声息。
+把它留在那儿只是把问题往旁边挪一格，所以按 ① 方案闭环了（方案 ②「另加一个被监视的载体」
+只会再造一条同型载体，同样的递归）：
+
+- **判定搬进包**：`fd_open_data_mcp/visibility/credentials.py`。
+  `stale = 剩余 < 寿命 1/3` 这条阈值**只此一处**（`lifetime_problem_for`），
+  巡检脚本与 scan 都调它——原先脚本与告警各写一份，正是本 change 一路在批的双真理。
+- **检查折进 `visibility.scan`**：每 15 分钟一跳，复用已有的去重集合与微信通道，
+  与失败/停滞**合并成一条消息**（不额外消耗 ServerChan 额度）。
+- 三个刻意选择：目录未挂载 → `credentials_checked=false` 静默跳过（未挂载是部署形态，不是风险）；
+  不可解 token → 不判定（不知道 ≠ 违规）；legacy（无 exp）→ 不告警（是选择不是故障）。
+- 去重窗口单独设 **24h**，不是失败告警的 7 天：失败是一次性事件，而"凭据正在滑向过期"
+  是持续为真的条件，7 天静默对一个 10 天跑道太长。
+
+**独立 CronJob 暂留，上线后退役**（写在 `scripts/alert_stale_credentials.py` 头部）：
+新代码要到 0.5.62 才进镜像，在那之前删掉它就是拆掉已有的安全网。0.5.62 部署并确认
+`crawl-watcher-scan` 的 `credentials_checked` 为真之后，按顺序退役：
+
+```bash
+kubectl --context xinru -n fd-master delete cronjob worker-credential-expiry
+# 然后删 k8s/fd-master/60-credential-expiry-alert.yaml、scripts/alert_stale_credentials.py
+# 与 ConfigMap credential-alert-scripts；check_worker_credential_surface.py 仍保留（离线巡检用）
+```
+
+仍存的残留（诚实记下）：scan **自身**失败时依旧没人看（递归的最后一格无法靠自己消掉）。
+这一格靠不住 scan，只能靠外部：`failedJobsHistoryLimit: 3` 留了 Job 记录，需要人去查。
+真正的解是跨集群监视（把 xinru 侧的 CronJob 状态汇到 cheap-ts 的 ops-console），那是一条**独立
+的基础设施改动**，不属于本 change。
 
 ### 上线路径已演练过（发版那天是机械操作，不是探索）
 

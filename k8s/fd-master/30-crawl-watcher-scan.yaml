@@ -9,7 +9,14 @@
 #   kubectl --context xinru -n fd-master get cronjob crawl-watcher-scan -o yaml
 #   # diff the `spec` block against this file
 #
-# Secret values are references only (secretKeyRef) — nothing sensitive is inlined.
+# Secret values are references only (secretKeyRef / secret volume) — nothing sensitive
+# is inlined.
+#
+# `worker-kubeconfigs` is mounted READ-ONLY at /kubeconfigs so this tick can also
+# check worker credential expiry (rotate-worker-cluster-credentials 3.2). It carries
+# the same tokens the control plane already holds; the scan only reads their JWT
+# `exp` claim and never touches a cluster. Without the mount the tick still works —
+# it just skips that one check ("not mounted" is a deployment shape, not a risk).
 apiVersion: batch/v1
 kind: CronJob
 metadata:
@@ -52,6 +59,8 @@ spec:
                   name: crawl-watcher-secret
             - name: SCRAW_STALE_MINUTES
               value: '90'
+            - name: SCRAW_KUBECONFIGS_DIR
+              value: /kubeconfigs
             - name: PYTHONUNBUFFERED
               value: '1'
             image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-416737f
@@ -66,6 +75,10 @@ spec:
                 memory: 128Mi
             terminationMessagePath: /dev/termination-log
             terminationMessagePolicy: File
+            volumeMounts:
+            - mountPath: /kubeconfigs
+              name: kubeconfigs
+              readOnly: true
           dnsPolicy: ClusterFirst
           imagePullSecrets:
           - name: fd-harbor-pull
@@ -73,6 +86,10 @@ spec:
           schedulerName: default-scheduler
           securityContext: {}
           terminationGracePeriodSeconds: 30
+          volumes:
+          - name: kubeconfigs
+            secret:
+              secretName: worker-kubeconfigs
   schedule: 10,25,40,55 * * * *
   successfulJobsHistoryLimit: 3
   suspend: false

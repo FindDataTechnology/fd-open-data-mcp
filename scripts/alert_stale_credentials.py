@@ -5,9 +5,15 @@
 这个脚本把那个判断接到集群里已有的告警通道上（`visibility.notifiers` → wechat/ServerChan，
 凭据在 `crawl-watcher-secret`），于是 bound token 快到期时是**推送**而不是等着某天派发 401。
 
-为什么不复用 `credential_lifetime()` 的实现：它就在隔壁
-`check_worker_credential_surface.py` 里，同一目录，直接 import——两处各写一份"剩余 < 寿命 1/3"
-正是这个 change 一路在批的那种双真理。
+判定本身不在这里，也不在隔壁脚本里：它在包内
+`fd_open_data_mcp.visibility.credentials`，`visibility.scan` 用的是同一份。
+这条"剩余 < 寿命 1/3"若有两份实现，漂移后告警说健康、巡检说违规，没人分得清谁对。
+
+**本脚本是过渡形态，会被 scan 取代（已定，见 tasks.md §3.2）。**
+`visibility.scan` 每 15 分钟跑一次、自己就有去重和推送通道，把这条检查折进去
+之后这条独立 CronJob 就是多余的。之所以先并存：新代码要到 0.5.62 才进镜像，
+在那之前删掉它就是**拆掉已有的安全网**。上线后跑一次 `kubectl delete cronjob`
+再删本文件即可。
 
 用法（在挂载了 `/kubeconfigs` 的 pod 里）：
     python3 alert_stale_credentials.py                # 有问题才推送，退出码 1
@@ -20,33 +26,20 @@ from __future__ import annotations
 
 import argparse
 import sys
-from pathlib import Path
 
-# 同目录的兄弟模块：脚本目录本身就是 sys.path[0]，所以直接 import 即可。
-from check_worker_credential_surface import (  # noqa: E402
-    credential_lifetime,
+from fd_open_data_mcp.visibility.credentials import (
+    DEFAULT_KUBECONFIGS_DIR,
     describe_lifetime,
     lifetime_problems,
+    read_lifetimes,
 )
 
-DEFAULT_DIR = "/kubeconfigs"
+DEFAULT_DIR = DEFAULT_KUBECONFIGS_DIR
 
 
 def scan(kubeconfigs_dir: str) -> tuple[dict[str, dict], list[str]]:
-    base = Path(kubeconfigs_dir)
-    if not base.is_dir():
-        raise FileNotFoundError(f"凭据目录不存在：{base}")
-    lifetimes: dict[str, dict] = {}
-    for entry in sorted(base.iterdir()):
-        if not (entry.name.endswith(".token") and entry.is_file()):
-            continue
-        name = entry.name[: -len(".token")]
-        try:
-            lifetimes[name] = credential_lifetime(entry.read_text(encoding="utf-8"))
-        except OSError as exc:  # 读不到也是信息，不能当成"健康"
-            lifetimes[name] = {"kind": "unknown", "issued_at": None, "expires_at": None,
-                               "lifetime_s": None, "remaining_s": None, "stale": None,
-                               "error": str(exc)}
+    """读挂载目录并给出问题清单。目录不存在 → FileNotFoundError（不是"健康"）。"""
+    lifetimes = read_lifetimes(kubeconfigs_dir)
     return lifetimes, lifetime_problems(lifetimes)
 
 
