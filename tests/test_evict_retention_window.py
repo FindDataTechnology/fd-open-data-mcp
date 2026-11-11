@@ -71,3 +71,55 @@ def test_batch_delete_is_by_id_not_by_predicate():
     """删除必须按已搬走的 id 列表做，不能再按原判据——否则并发写入会被误删。"""
     src = SCRIPT.read_text()
     assert "DELETE FROM semantic_observations WHERE id IN" in src
+
+
+def test_refuses_families_declared_not_re_fetchable():
+    """4.1：`re_fetchable is False` 才是"不可回收"，必须拒绝。
+
+    三态，不能写成 `if not ct.re_fetchable`：那会把 **未声明（NULL）** 也当成
+    "不可回收"。2026-11-11 实测：T/W 里显式 false 的一个都没有，未声明的有 3 个
+    （polygon/employee_count、polygon/market_capitalization、akshare/performance），
+    旧写法把这三族全拒了、还把文案说成"声明 false"——报出去的是一句假话。
+    """
+    src = SCRIPT.read_text()
+    assert "if ct.re_fetchable is False:" in src, "必须只对显式 false 拒绝"
+    assert "if not ct.re_fetchable:" not in src, "不得把 NULL 当成不可回收"
+    assert "不可回收层" in src
+    assert "re_fetchable 未声明" in src, "未声明要单独提示，不能沉默"
+
+
+def test_apply_asserts_row_count_invariant():
+    """4.2：搬运前后必须对账（观测 −N / 隔离 +N / 修订 ±0），对不上就抛。"""
+    mod = load()
+    before = {"semantic_observations": 100, "semantic_observations_quarantine": 10,
+              "observation_revisions": 5}
+    ok = {"semantic_observations": 90, "semantic_observations_quarantine": 20,
+          "observation_revisions": 5}
+    mod._assert_balanced(before, ok, 10)      # 不应抛
+
+    # 少删了一行（丢数据/漏处理）
+    bad_del = dict(ok, semantic_observations=91)
+    try:
+        mod._assert_balanced(before, bad_del, 10)
+    except RuntimeError as exc:
+        assert "观测减少" in str(exc)
+    else:
+        raise AssertionError("观测行数不符时必须抛")
+
+    # 隔离表没加上
+    bad_q = dict(ok, semantic_observations_quarantine=19)
+    try:
+        mod._assert_balanced(before, bad_q, 10)
+    except RuntimeError as exc:
+        assert "隔离表增加" in str(exc)
+    else:
+        raise AssertionError("隔离行数不符时必须抛")
+
+    # 修订表被动过
+    bad_rev = dict(ok, observation_revisions=6)
+    try:
+        mod._assert_balanced(before, bad_rev, 10)
+    except RuntimeError as exc:
+        assert "observation_revisions" in str(exc)
+    else:
+        raise AssertionError("修订表变化时必须抛")

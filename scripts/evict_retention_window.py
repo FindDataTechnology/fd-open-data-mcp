@@ -92,6 +92,47 @@ def _victims_sql(cls: str) -> str:
     raise ValueError(f"只支持 T/W，收到 {cls}")
 
 
+def _row_counts(conn) -> dict[str, int]:
+    """三张关键表的行数——用于"搬运前后必须对得上账"的不变式。"""
+    from sqlalchemy import text
+
+    out = {}
+    for name in ("semantic_observations", "semantic_observations_quarantine",
+                 "observation_revisions"):
+        try:
+            out[name] = conn.execute(text(f"SELECT count(*) FROM {name}")).scalar() or 0
+        except Exception:  # noqa: BLE001 - 隔离表可能不存在
+            out[name] = -1
+    return out
+
+
+def _assert_balanced(before: dict[str, int], after: dict[str, int],
+                     moved: int) -> None:
+    """4.2 不变式：观测恰减 moved、隔离恰加 moved、修订表一行不动。
+
+    这个工具是唯一会减少观测行数的地方；少一行是丢数据，多一行是漏处理，
+    两者都必须当场炸掉而不是打印一句"已搬 N 行"就算完。
+    """
+    d_obs = before["semantic_observations"] - after["semantic_observations"]
+    if d_obs != moved:
+        raise RuntimeError(
+            f"行数不变式失败：观测减少 {d_obs:,} 但声明搬运 {moved:,} 行"
+            f"（差额 {d_obs - moved:+,}）——事务已回滚，请查并发写入")
+    if after["semantic_observations_quarantine"] >= 0:
+        d_q = (after["semantic_observations_quarantine"]
+               - before["semantic_observations_quarantine"])
+        if d_q != moved:
+            raise RuntimeError(
+                f"行数不变式失败：隔离表增加 {d_q:,} 但声明搬运 {moved:,} 行"
+                f"（差额 {d_q - moved:+,}）——事务已回滚")
+    d_rev = after["observation_revisions"] - before["observation_revisions"]
+    if d_rev != 0:
+        raise RuntimeError(
+            f"行数不变式失败：observation_revisions 变化 {d_rev:+,} 行——"
+            "搬运不应产生或删除修订记录，事务已回滚")
+    print(f"  行数对账通过：观测 −{moved:,} / 隔离 +{moved:,} / 修订 ±0")
+
+
 def main(argv=None) -> int:
     a = _args(argv)
     if not a.db_url:
@@ -123,6 +164,18 @@ def main(argv=None) -> int:
             ct = audit.resolve_contract(m["src"], m["fam"], contracts)
             if ct is None or ct.cls not in ("T", "W"):
                 continue      # P / F / 无契约：一律不碰
+            if ct.re_fetchable is False:
+                # 4.1 硬闸：明确声明"取不回来"的层，一行都不许动。
+                # 契约自相矛盾（类写着 T/W 该删、可重取性写着 false 删了就没了）时，
+                # 唯一正确的动作是停下并交给人，不是替人挑一个。
+                print(f"  拒绝 {m['src']}/{m['fam']}：契约声明 re_fetchable=false"
+                      f"（不可回收层，淘汰不可逆）——策略不得触及，需人工改契约")
+                continue
+            if ct.re_fetchable is None:
+                # 未声明 ≠ 不可回收。淘汰与否仍由类别决定（T/W 本身就是"该删"的声明），
+                # 但要把"没说清"这件事报出来——否则契约缺口永远没人补。
+                print(f"  提示 {m['src']}/{m['fam']}：re_fetchable 未声明——"
+                      f"按类别 {ct.cls} 处理，建议补契约")
             targets.append((m["src"], m["fam"], ct, m["n"]))
 
         if not targets:
@@ -168,6 +221,11 @@ def main(argv=None) -> int:
 
         moved_total = 0
         with eng.begin() as c:
+            # 4.2 行数不变式：这个工具是本仓唯一会**减少** semantic_observations 的地方，
+            # 动手前后必须能对上账——观测减多少、隔离就该加多少，修订表一行不动。
+            # 对不上就抛，事务整体回滚（宁可这次白跑，也不留半搬的库）。
+            before = _row_counts(c)
+
             for src, fam, cls, cnt, total_rows, cutoff in plan:
                 batch_id = f"retention-{cls}-{src}-{fam}"
                 sql = _victims_sql(cls)
@@ -205,6 +263,9 @@ def main(argv=None) -> int:
                     remaining -= len(ids)
                 moved_total += moved
                 print(f"  已搬 {src}/{fam}: {moved:,} 行（batch_id={batch_id}）")
+
+            after = _row_counts(c)
+            _assert_balanced(before, after, moved_total)   # 对不上就抛，事务回滚
 
         print(f"\n已搬 {moved_total:,} 行 ≈ {moved_total * AVG_ROW_BYTES / 1024 / 1024:.1f}MB")
         print("回滚（按 batch_id 反向搬回，逐条执行）：")
