@@ -277,3 +277,23 @@
      但还没通电**：缺 secret 时它会明确报错，而不会静默。
      过渡期的实际刷新方式：手动跑 `rotate_worker_credential.py --cluster cheap --mode bound --apply`
      （本机已有 `cheap-ts` admin context），或先把 secret 配好。
+
+### 3.2 的落地版：到期前主动告警（2026-11-11 补做）
+
+3.2 的巡检脚本能算出"剩余 < 寿命 1/3"，但**没人会每天手动跑**。而 2.1 已把 cheap 换成
+720h 到期的 bound token——如果刷新没在跑，到期那天派发会**静默** 401。这条线补上了：
+
+- `scripts/alert_stale_credentials.py`：读挂载的凭据，寿命判定 **import**
+  `check_worker_credential_surface.credential_lifetime`（不重写一份），投递走已有的
+  `visibility.notifiers.get_notifier()`（缺 token 只记日志、不抛）。健康时退出 0 且不推送；
+  有风险退出 1 并推送，正文里带可直接执行的刷新命令。
+- `k8s/fd-master/60-credential-expiry-alert.yaml`：每日 01:00 UTC 的 CronJob，
+  挂 `worker-kubeconfigs` + `credential-alert-scripts`，复用 `crawl-watcher-secret`
+  里现成的 ServerChan 凭据（不新造凭据、不新造 secret）。
+- 验证：6 个用例（健康静默 / stale 点名 1/3 且给命令 / 过期 / legacy 不算到期风险 /
+  目录缺失 rc=2 / 凭据不可解不算健康）；反向验证把"健康"改成返回 1 → 三个用例真红。
+  线上真跑：`worker-credential-expiry` 的 manual Job → `Completed`、日志
+  `cheap: bound 寿命 30.0d，剩余 30.0d` / `OK 没有到期风险`、`succeeded=1`。
+  另用一个一次性 pod 确认投递通道已配置（`ServerChanNotifier token_len 34`），**没有真的发消息**。
+- 口径提醒：这个 Job 只**告警**，从不刷新——刷新需要 `create serviceaccounts/token`，
+  控制面凭据故意没有（见 `.github/workflows/refresh-worker-credentials.yml` 头部）。
