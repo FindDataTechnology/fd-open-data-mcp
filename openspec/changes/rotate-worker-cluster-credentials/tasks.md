@@ -1,0 +1,34 @@
+## 1. 止血：把禁用集群的凭据从挂载 Secret 摘掉
+
+- [ ] 1.1 从 `xinru/fd-mcp/worker-kubeconfigs` 移除 `america.*` / `baidu.*`（两者 `clusters.enabled=f`）——验证：`/kubeconfigs` 下不再出现这两组文件；`clusters` 表不变
+- [ ] 1.2 同步核对 `fd-master/worker-kubeconfigs` 只保留 `enabled=t` 的集群（当前仅 `cheap`）——验证：键集合与 `clusters` 表 `enabled=t` 的行一一对应
+- [ ] 1.3 写一条巡检：`enabled=f` 却在挂载 Secret 里出现的集群名，逐一点名——验证：故意留一个禁用集群的键，巡检必须报红
+
+## 2. 轮换脚本（签新 + 写回 + 实测）
+
+- [ ] 2.1 新增 `scripts/rotate_worker_credential.py`：对目标 worker 集群执行"签 bound token → 写回 `worker-kubeconfigs` → 探针实测"，其中"签"用 `kubectl create token <sa> --duration=<d>`——验证：对 `cheap` 跑一次，产出新值且与旧值不同
+- [ ] 2.2 脚本自带成对验收：旧值必须被拒、新值必须成功；任一不满足即 `exit != 0` 并打印实测响应——验证：把写回步骤替换为"写旧值"，脚本必须失败
+- [ ] 2.3 探针必须是**挂同一 Secret** 的 pod，打目标集群 `/api/v1/namespaces/<ns>/pods?limit=1`——验证：探针输出 `RESULT <cluster>: OK PodList`；把 token 文件截断后必须输出 `FAIL`
+- [ ] 2.4 脚本对"patch 报成功但值没变"的空操作判失败（读回比对）——验证：构造一次无变化的 patch，脚本必须报失败而不是完成
+
+## 3. 失效兜底：token 过期要可见
+
+- [ ] 3.1 派发失败且 HTTP 401 时，错误信息点名"worker 凭据可能已过期，运行 rotate_worker_credential"——验证：用过期 token 触发一次派发，日志出现该提示
+- [ ] 3.2 就绪/健康面暴露"凭据剩余寿命"（最近一次刷新时间 + `exp`）——验证：把刷新时间改早，看板/健康输出随之变化
+- [ ] 3.3 CronJob 刷新节奏写进部署清单，且与 `--duration` 有明确倍数关系（刷新间隔 ≤ 寿命的 1/3）——验证：清单里的两个数值能被脚本读出来并断言满足比例
+
+## 4. 文档与裁决
+
+- [ ] 4.1 在 `docs/` 记录 legacy 与 bound 两种 token 的取舍：legacy 不可撤销、bound 会到期；说明为何选 bound + 定期刷新
+- [ ] 4.2 记录"吊销＝换 SA UID"的操作步骤与代价（会同时打断全部派发，须与派新 token 同一操作内完成）——验证：按文档在测试集群走一遍，旧值 401 且新值 200
+- [ ] 4.3 把"不得以 Job `Complete` 作为凭据可用判据"写进验收口径（没活可派时它恒为真）——验证：文档中出现该反例
+
+## 5. 回归
+
+- [ ] 5.1 `clusters.enabled=t` 的集群全部派发一次成功——验证：故意触发一轮派发，`launched` 非空且对应 Job 在该 worker 集群上 `Complete`
+- [ ] 5.2 `enabled=f` 的集群不再被选中——验证：调度日志中不出现这些集群名
+- [ ] 5.3 `openspec validate rotate-worker-cluster-credentials --strict` 通过——验证：返回 valid
+
+## 6. 收口
+
+- [ ] 6.1 归档——验证：`openspec archive rotate-worker-cluster-credentials --yes --strict` 成功
