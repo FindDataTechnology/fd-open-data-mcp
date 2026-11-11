@@ -169,8 +169,113 @@ def main(argv=None) -> int:
             if params:
                 print(f"-- 绑定参数：{params}")
 
+        _contract_report(c, avg_row, only_source=a.source)
+
     eng.dispose()
     return 0
+
+
+def _contract_report(conn, avg_row: float, only_source=None) -> None:
+    """按留存契约报账：每个 (源, 族) 的行数 / 字节 / 广度 / 超窗 / 预算占用。
+
+    与前半段的 (source, granularity) 视角互补：粒度回答"多大"，契约回答"该不该留"。
+    只看行数会得出"akshare 占 98%"这种结论，但它没说清其中哪些是**本来就可以不存**的。
+
+    只读。不打印任何删除语句——淘汰一律走 `evict_retention_window.py`（先搬后删）。
+    """
+    from sqlalchemy import text
+
+    sql = """
+        SELECT o.source_used AS src, split_part(c.code, '.', 1) AS fam,
+               count(*) AS n,
+               count(DISTINCT o.concept_id) AS concepts,
+               count(DISTINCT (o.entity_type, o.entity_id)) AS entities,
+               min(o.date) AS d0, max(o.date) AS d1
+          FROM semantic_observations o JOIN concepts c ON c.id = o.concept_id
+         GROUP BY 1, 2
+    """
+    params = {}
+    if only_source:
+        sql = sql.replace("GROUP BY 1, 2",
+                          "WHERE o.source_used = ANY(:srcs) GROUP BY 1, 2")
+        params["srcs"] = list(only_source)
+    rows = conn.execute(text(sql), params).all()
+
+    contracts = {}
+    for r in conn.execute(text("""
+        SELECT source, family, retention_class, retention_window_days,
+               re_fetchable, volume_budget_mb
+          FROM data_retention_contracts
+    """)):
+        contracts[(r.source, r.family)] = r
+
+    print()
+    print("== 按留存契约报账（只读；『可释放』= 超出契约窗口的行）==")
+    print(f"{'源/族':<34}{'类':<3}{'窗口':>7}{'行数':>11}{'MB':>8}"
+          f"{'概念':>7}{'实体':>8}{'可释放':>10}{'占本族':>8}{'预算占用':>10}")
+    print("-" * 108)
+
+    total_rows = total_free = 0
+    free_mb = 0.0
+    over_budget = []
+    unclassified = []
+    for m in rows:
+        ct = contracts.get((m.src, m.fam)) or contracts.get((m.src, "*"))
+        if ct is None:
+            unclassified.append((m.src, m.fam, m.n))
+            continue
+        free = 0
+        if ct.retention_class == "T":
+            # T：每 (概念, 实体) 只该留一条，其余都是可释放的
+            dups = conn.execute(text("""
+                SELECT coalesce(sum(n - 1), 0) FROM (
+                  SELECT count(*) AS n FROM semantic_observations o
+                    JOIN concepts c ON c.id = o.concept_id
+                   WHERE o.source_used = :src AND split_part(c.code, '.', 1) = :fam
+                   GROUP BY o.concept_id, o.entity_type, o.entity_id
+                ) t
+            """), {"src": m.src, "fam": m.fam}).scalar() or 0
+            free = int(dups)
+        elif ct.retention_class == "W" and ct.retention_window_days:
+            free = conn.execute(text("""
+                SELECT count(*) FROM semantic_observations o
+                  JOIN concepts c ON c.id = o.concept_id
+                 WHERE o.source_used = :src AND split_part(c.code, '.', 1) = :fam
+                   AND o.date < to_char(now() - (:d || ' days')::interval, 'YYYY-MM-DD')
+            """), {"src": m.src, "fam": m.fam,
+                   "d": str(ct.retention_window_days)}).scalar() or 0
+            free = int(free)
+
+        mb = m.n * avg_row / 1024 / 1024
+        free_mb += free * avg_row / 1024 / 1024
+        total_rows += m.n
+        total_free += free
+        budget = ct.volume_budget_mb or 0
+        occ = (mb / budget * 100) if budget else 0.0
+        if budget and mb > budget:
+            over_budget.append((m.src, m.fam, mb, budget))
+        print(f"{m.src + '/' + m.fam:<34}{ct.retention_class:<3}"
+              f"{(str(ct.retention_window_days) + 'd' if ct.retention_window_days else '—'):>7}"
+              f"{m.n:>11,}{mb:>8.1f}{m.concepts:>7}{m.entities:>8}"
+              f"{free:>10,}{(100.0 * free / m.n if m.n else 0):>7.1f}%"
+              f"{(f'{occ:.0f}% / {budget}MB' if budget else '—'):>10}")
+
+    print("-" * 108)
+    print(f"{'合计':<44}{total_rows:>11,}{'':>8}{'':>7}{'':>8}{total_free:>10,}"
+          f"  ≈ 可释放 {free_mb:.1f}MB")
+
+    if over_budget:
+        print()
+        print("== 超预算（与磁盘余量无关；盘再空也算违规）==")
+        for src, fam, mb, budget in sorted(over_budget, key=lambda x: -x[2]):
+            print(f"  {src}/{fam}: {mb:.1f}MB > 预算 {budget}MB")
+
+    if unclassified:
+        print()
+        print(f"== 无契约的族 {len(unclassified)} 个（"
+              f"{sum(n for *_, n in unclassified):,} 行）——先补契约，再谈取舍 ==")
+        for src, fam, n in sorted(unclassified, key=lambda x: -x[2])[:10]:
+            print(f"  {src}/{fam}: {n:,} 行")
 
 
 if __name__ == "__main__":
