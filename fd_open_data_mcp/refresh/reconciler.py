@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional, Protocol
@@ -589,6 +590,31 @@ class K8sJobLauncher:
 # kubeconfig Secret; ClusterScheduler picks one per plan (tags cover the plan's
 # sources, egress not circuit-open, fewest open runs, < capacity).
 
+
+class WorkerCredentialError(RuntimeError):
+    """The mounted worker credential was rejected by the target cluster.
+
+    Distinct from a generic dispatch failure so the caller/log can say
+    "credential problem" instead of "launch failed" — the two need different
+    reactions (rotate the credential vs. fix the plan).
+    """
+
+
+def worker_credential_hint(cluster: str, status: int) -> str:
+    """Actionable one-liner for a 401/403 from a worker cluster API."""
+    where = f"$KUBECONFIG_DIR/{cluster}.token"
+    if status == 401:
+        return (
+            f"worker 集群 {cluster} 拒绝了挂载凭据（HTTP 401）：{where} 已失效或无资格。"
+            f" 常见原因：token 过期（bound）、SA 被重建（换了 UID）、或该集群凭据已被摘除。"
+            f" 处置：python3 scripts/rotate_worker_credential.py --cluster {cluster} --apply"
+        )
+    return (
+        f"worker 集群 {cluster} 拒绝该请求（HTTP 403）：凭据有效但 RBAC 不足，"
+        f" 或该集群已被禁用。查 clusters 表的 enabled 与该 SA 的 RoleBinding。"
+    )
+
+
 class ClusterK8sClient:
     """K8s API client for ONE worker cluster: api_server (from the DB row) + a
     bearer token + optional CA, read as flat files from the single mounted Secret
@@ -620,8 +646,18 @@ class ClusterK8sClient:
             data=json.dumps(body).encode() if body is not None else None,
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-            return json.load(r)
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                # A bare HTTPError here reads as "launch failed" upstream, which is
+                # indistinguishable from a broken plan. Name the real cause: the
+                # mounted credential is unusable (expired / revoked / pruned).
+                raise WorkerCredentialError(
+                    worker_credential_hint(self.cluster.name, e.code)
+                ) from e
+            raise
 
     def create(self, manifest: dict) -> dict:
         kind = manifest["kind"]
