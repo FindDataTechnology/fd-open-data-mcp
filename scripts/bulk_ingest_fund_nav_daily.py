@@ -128,6 +128,13 @@ def load_concepts(engine, codes: list[str]) -> dict[str, dict]:
 def upsert(engine, rows: list[dict]) -> int:
     if not rows:
         return 0
+    # 直写脚本也要执行留存契约：本脚本绕开 fetch.cache，nav 是 T 类（只留当期），
+    # 少了这一步每跑一次就多留一天的历史，正是审计里 T_class_accruing_history 的成因。
+    from fd_open_data_mcp.fetch.retention_bulk import (
+        apply_bulk_retention, check_bulk_contracts,
+    )
+
+    concept_ids = sorted({int(r["concept_id"]) for r in rows})
     cols = ["concept_id", "entity_type", "entity_id", "date", "value",
             "unit", "source_used", "fetched_at", "granularity"]
     upd = ("value=EXCLUDED.value, unit=EXCLUDED.unit, "
@@ -144,11 +151,15 @@ def upsert(engine, rows: list[dict]) -> int:
         for attempt in range(5):
             try:
                 with engine.begin() as conn:
+                    check_bulk_contracts(conn, source=SOURCE, concept_ids=concept_ids)
                     cur = conn.connection.driver_connection.cursor()
                     try:
                         execute_values(cur, sql, chunk, page_size=500)
                     finally:
                         cur.close()
+                    # 与写入同一事务：先提交再收尾会留下"写了没裁"的状态。
+                    apply_bulk_retention(conn, source=SOURCE, concept_ids=concept_ids,
+                                         reason="bulk_ingest_fund_nav_daily")
                 total += len(chunk)
                 break
             except Exception as e:  # noqa: BLE001

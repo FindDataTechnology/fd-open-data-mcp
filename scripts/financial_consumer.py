@@ -87,16 +87,26 @@ def execute_task(task):
             return 0
         
         # Write observations to DB
+        # 直写脚本绕开 fetch.cache，留存契约必须在同一事务里自己执行一遍（见
+        # fd_open_data_mcp.fetch.retention_bulk 的模块注释）。
+        from fd_open_data_mcp.fetch.retention_bulk import (
+            apply_bulk_retention, check_bulk_contracts,
+        )
+
         engine = create_engine(DB_URL)
         for obs in observations:
             try:
                 with engine.begin() as conn:
+                    check_bulk_contracts(conn, source=obs["s"],
+                                         concept_ids=[obs["c"]])
                     conn.execute(text("""
                         INSERT INTO semantic_observations
                         (concept_id, entity_type, entity_id, date, value, unit, source_used, fetched_at)
                         VALUES (:c,'stock',:e,:d,:v,'currency',:s,NOW())
                         ON CONFLICT DO NOTHING
                     """), obs)
+                    apply_bulk_retention(conn, source=obs["s"], concept_ids=[obs["c"]],
+                                         reason="financial_consumer")
             except Exception as e:
                 print(f"[{POD_ID}] Failed to write observation: {e}")
         

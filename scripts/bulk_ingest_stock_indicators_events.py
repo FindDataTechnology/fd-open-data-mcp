@@ -133,6 +133,14 @@ def load_concepts(engine, codes: list[str]) -> dict[str, dict]:
 def insert_rows(engine, rows: list[dict]) -> int:
     if not rows:
         return 0
+    # 直写脚本绕开 fetch.cache，留存契约必须在同一事务里自己执行一遍（见
+    # fd_open_data_mcp.fetch.retention_bulk 的模块注释）。performance 是 T 类。
+    from fd_open_data_mcp.fetch.retention_bulk import (
+        apply_bulk_retention, check_bulk_contracts,
+    )
+
+    concept_ids = sorted({int(r["concept_id"]) for r in rows})
+    source = rows[0]["source_used"]
     cols = ["concept_id", "entity_type", "entity_id", "date", "value",
             "unit", "source_used", "fetched_at", "granularity"]
     sql = (f"INSERT INTO semantic_observations ({', '.join(cols)}) VALUES %s "
@@ -143,9 +151,14 @@ def insert_rows(engine, rows: list[dict]) -> int:
     for bi in range(0, len(vals), BATCH):
         chunk = vals[bi:bi + BATCH]
         with engine.begin() as conn:
+            check_bulk_contracts(conn, source=source, concept_ids=concept_ids)
             cur = conn.connection.driver_connection.cursor()
             psycopg2.extras.execute_values(cur, sql, chunk, page_size=BATCH)
-            total += cur.rowcount if cur.rowcount and cur.rowcount > 0 else len(chunk)
+            landed = cur.rowcount if cur.rowcount and cur.rowcount > 0 else len(chunk)
+            cur.close()
+            apply_bulk_retention(conn, source=source, concept_ids=concept_ids,
+                                 reason="bulk_ingest_stock_indicators_events")
+            total += landed
     return total
 
 

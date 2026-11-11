@@ -227,6 +227,14 @@ def load_concepts(engine, codes: list[str]) -> dict[str, dict]:
 def upsert(engine, rows: list[dict]) -> int:
     if not rows:
         return 0
+    # 直写脚本绕开 fetch.cache，留存契约必须在同一事务里自己执行一遍（见
+    # fd_open_data_mcp.fetch.retention_bulk 的模块注释）。
+    from fd_open_data_mcp.fetch.retention_bulk import (
+        apply_bulk_retention, check_bulk_contracts,
+    )
+
+    concept_ids = sorted({int(r["concept_id"]) for r in rows})
+    source = rows[0]["source_used"]
     cols = ["concept_id", "entity_type", "entity_id", "date", "value",
             "unit", "source_used", "fetched_at", "granularity"]
     upd = ("value=EXCLUDED.value, unit=EXCLUDED.unit, "
@@ -239,11 +247,14 @@ def upsert(engine, rows: list[dict]) -> int:
     for attempt in range(5):
         try:
             with engine.begin() as conn:
+                check_bulk_contracts(conn, source=source, concept_ids=concept_ids)
                 cur = conn.connection.driver_connection.cursor()
                 try:
                     execute_values(cur, sql, vals, page_size=500)
                 finally:
                     cur.close()
+                apply_bulk_retention(conn, source=source, concept_ids=concept_ids,
+                                     reason="bulk_ingest_stock_financials")
             return len(vals)
         except Exception as e:  # noqa: BLE001
             last = e
