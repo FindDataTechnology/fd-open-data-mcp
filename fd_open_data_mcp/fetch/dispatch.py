@@ -326,11 +326,16 @@ def dispatch_one(
                         "concept says %r — storing the source's unit",
                         concept_id, cand_source, declared, concept.unit,
                     )
-                write_cache(session, concept_id, entity_type, entity_id, date,
-                            str(value), declared or concept.unit, cand_source,
-                            granularity=_write_granularity(concept.frequency))
-                return {"date": date, "value": value, "unit": concept.unit,
-                        "source_used": cand_source, "real_source_used": real_source, "from_cache": False}
+                stored = write_cache(session, concept_id, entity_type, entity_id, date,
+                                     str(value), declared or concept.unit, cand_source,
+                                     granularity=_write_granularity(concept.frequency)) is not None
+                out = {"date": date, "value": value, "unit": concept.unit,
+                       "source_used": cand_source, "real_source_used": real_source, "from_cache": False}
+                if not stored:
+                    # 取到了值但按留存契约**没有落库**（W 类窗口外）。明说，别让
+                    # 调用方以为这条已经进了库——静默丢弃与"写入成功"长得一样。
+                    out["stored"] = False
+                return out
 
     if candidates_seen == 0:
         return {"date": date, "value": None, "error": "no eligible source",

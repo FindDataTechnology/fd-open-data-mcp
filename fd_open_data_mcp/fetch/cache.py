@@ -601,7 +601,7 @@ def write_cache(
     date: str, value: Optional[str], unit: Optional[str], source_used: str,
     granularity: str = "day",
     *, correction: bool = False, reason: Optional[str] = None,
-) -> SemanticObservation:
+) -> Optional[SemanticObservation]:
     """Upsert one observation for ``source_used``.
 
     One row per (point, source): the write targets this source's own row —
@@ -612,7 +612,20 @@ def write_cache(
     Rewriting an **already finalized** row is refused unless the caller declares
     ``correction=True`` with a ``reason`` (see `_enforce_finalized_write_guard`).
     Creating a previously absent historical point is always allowed.
+
+    Returns ``None`` when the point is dropped by the retention contract (W 类
+    窗口外)——此时**什么都没写**，调用方不应把响应当作"已落库"。
     """
+    # 单点路径也是写入口，必须与两条 range 路径同一套留存语义：
+    # 2026-11-11 实测镜像里 write_cache 只有 T 合并、**没有**契约闸与窗口裁剪，
+    # 于是 `fetch(点)` 可以写进无契约的源、也可以把 W 类窗口外的老点写回来。
+    # 三个入口三份守卫各不相同，是"同一条规则在第四个入口失效"的典型形状。
+    from fd_open_data_mcp.fetch.retention import check_write_allowed
+
+    check_write_allowed(session, concept_id=concept_id, source=source_used)
+    if not _drop_out_of_window(session, concept_id, entity_type, entity_id,
+                               source_used, {date: value}):
+        return None
     obs = _read_base(session, concept_id, entity_type, entity_id, date,
                      source=source_used, granularity=granularity)
     now = datetime.now(timezone.utc)
