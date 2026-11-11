@@ -1,0 +1,121 @@
+# CANONICAL RECORD of the fd-master/coverage-expander CronJob — generated from the LIVE
+# object on 2026-11-11 (kube context xinru). Like its siblings this CronJob was
+# applied ad hoc and no repo tracked it, so the object's own
+# `last-applied-configuration` annotation is the only other record — and it is
+# STALE (it still names a retired registry / older image). Re-applying from that
+# annotation would silently roll this CronJob back.
+#
+# Regenerate / check for drift:
+#   kubectl --context xinru -n fd-master get cronjob coverage-expander -o yaml
+#   # diff the `spec` block against this file
+#
+# Secret values are references only (secretKeyRef) — nothing sensitive is inlined.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  labels:
+    app: coverage-expander
+  name: coverage-expander
+  namespace: fd-master
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 5
+  jobTemplate:
+    metadata: {}
+    spec:
+      template:
+        metadata: {}
+        spec:
+          containers:
+          - command:
+            - python
+            - -m
+            - fd_open_data_mcp.coverage.expander
+            env:
+            - name: DC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: DC_API_KEY
+                  name: dc-api-key
+            - name: FD_OPEN_DATA_MCP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: fd-db-secret
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_URL
+                  name: fd-db-secret
+            - name: RECONCILER_LAUNCHER
+              value: k8s-multi
+            - name: SCRAW_K8S_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: fd-db-secret
+            - name: SCRAW_K8S_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_URL
+                  name: fd-db-secret
+            - name: KUBECONFIG_DIR
+              value: /kubeconfigs
+            - name: POLICY_MAX_FETCHES
+              value: '50000'
+            - name: COVERAGE_MAX_WAVE_POLICIES
+              value: '16'
+            - name: COVERAGE_MAX_ACTIVE_WAVES
+              value: '6'
+            - name: COVERAGE_TARGET_CELLS
+              value: '8000'
+            - name: COVERAGE_PAUSE_FRACTION
+              value: '0.3'
+            - name: COVERAGE_MAX_PAUSED_GROUPS
+              value: '5'
+            - name: COVERAGE_BACKFILL_DAYS
+              value: '{"daily": 90, "weekly": 180, "monthly": 730, "quarterly": 3650, "yearly": 10950,
+                "irregular": 365, "unknown": 3650}'
+            - name: SCRAW_NOTIFIER
+              value: wechat
+            - name: SCRAW_WATCHER_SCT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: SCRAW_WATCHER_SCT_TOKEN
+                  name: crawl-watcher-secret
+            - name: PYTHONUNBUFFERED
+              value: '1'
+            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-5539dc5
+            imagePullPolicy: Always
+            name: expander
+            resources:
+              limits:
+                cpu: 500m
+                memory: 512Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+            terminationMessagePath: /dev/termination-log
+            terminationMessagePolicy: File
+            volumeMounts:
+            - mountPath: /kubeconfigs
+              name: kubeconfigs
+              readOnly: true
+          dnsPolicy: ClusterFirst
+          imagePullSecrets:
+          - name: fd-harbor-pull
+          restartPolicy: OnFailure
+          schedulerName: default-scheduler
+          securityContext: {}
+          serviceAccount: crawl-reconciler
+          serviceAccountName: crawl-reconciler
+          terminationGracePeriodSeconds: 30
+          volumes:
+          - name: kubeconfigs
+            secret:
+              defaultMode: 420
+              secretName: worker-kubeconfigs
+      ttlSecondsAfterFinished: 900
+  schedule: 3,13,23,33,43,53 * * * *
+  successfulJobsHistoryLimit: 3
+  suspend: false
