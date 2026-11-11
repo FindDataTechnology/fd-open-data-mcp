@@ -29,6 +29,7 @@ every read.
 """
 from __future__ import annotations
 
+import logging
 from datetime import datetime, timedelta, timezone
 from typing import Iterable, Optional, Union
 from uuid import uuid4
@@ -43,6 +44,8 @@ from fd_open_data_mcp.fetch.finalization import is_finalized, resolve_window
 
 from fd_open_data_mcp.models import Concept as _Concept
 from fd_open_data_mcp.models import ObservationRevision, SemanticObservation
+
+logger = logging.getLogger(__name__)
 from fd_open_data_mcp.semantic.dates import (
     SHAPE_LIKE_PATTERNS,
     obs_month_of,
@@ -710,6 +713,58 @@ def write_cache_range_new_only(
     return len(inserted)
 
 
+def _retention_window_days(session: Session, concept_id: int,
+                           source_used: str) -> Optional[int]:
+    """W 类（滚动窗口）的窗口天数；非 W 或无契约时返回 None。
+
+    与 :func:`_retention_snapshot_class` 同一套解析，只是这里要的是天数。
+    """
+    from fd_open_data_mcp.fetch.retention import family_of, resolve_contract
+
+    concept = session.get(_Concept, concept_id)
+    if concept is None:
+        return None
+    contract = resolve_contract(session, source_used, family_of(concept.code))
+    if contract is None or contract.retention_class != "W":
+        return None
+    return contract.retention_window_days
+
+
+def _drop_out_of_window(session: Session, concept_id: int, entity_type: str,
+                        entity_id: int, source_used: str,
+                        rows: dict[str, object]) -> dict[str, object]:
+    """W 类：把窗口外的点挡在写入之前（不是写完再删）。
+
+    为什么拦在入口：实测（2026-11-11）清完超窗行之后，一次全量重抓又把 234 条
+    2021 年的点写了回来——因为 W 类的写路径此前不做任何窗口裁剪。写完再删要多一次
+    范围删除，而且每写一次就删一次；在入口丢弃则是零额外成本。
+
+    **只处理完整的 ISO 日期**：`2025`（裸年）、`2025-12` 这类日期与窗口下界比较
+    没有唯一含义，猜一个方向就是在替上游决定口径——宁可保留并在日志里说明。
+    """
+    window_days = _retention_window_days(session, concept_id, source_used)
+    if not window_days:
+        return rows
+    cutoff = (datetime.now(timezone.utc).date()
+              - timedelta(days=int(window_days))).isoformat()
+    kept: dict[str, object] = {}
+    dropped: list[str] = []
+    for d, v in rows.items():
+        key = str(d)
+        if (len(key) == 10 and key[4] == "-" and key[7] == "-"
+                and key.replace("-", "").isdigit() and key < cutoff):
+            dropped.append(key)
+            continue
+        kept[d] = v
+    if dropped:
+        logger.warning(
+            "留存窗口：丢弃 %d 个早于 %s 的点（concept_id=%s entity=%s/%s source=%s，"
+            "最早 %s）——W 类只保留窗口内数据，重抓历史不会把它们写回来",
+            len(dropped), cutoff, concept_id, entity_type, entity_id,
+            source_used, min(dropped))
+    return kept
+
+
 def _retention_snapshot_class(session: Session, concept_id: int,
                               source_used: str) -> Optional[str]:
     """该 (概念, 源) 的留存类别；读不到契约时返回 None（= 不额外处理）。
@@ -808,6 +863,12 @@ def write_cache_range(
     from fd_open_data_mcp.fetch.retention import check_write_allowed
 
     check_write_allowed(session, concept_id=concept_id, source=source_used)
+    # W 类（滚动窗口）在入口裁掉窗口外的点：重抓历史不能把刚清掉的老行写回来
+    # （实测 2026-11-11：清完 aum 超窗行，一次全量重抓又写回 234 条 2021 年的点）。
+    rows = _drop_out_of_window(session, concept_id, entity_type, entity_id,
+                               source_used, rows)
+    if not rows:
+        return 0
     existing = {
         obs.date: obs
         for obs in _read_base_range(
