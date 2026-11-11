@@ -1688,11 +1688,27 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
             if cov_entity_type and entity_id is not None:
                 _dates = _series_dates(s, cid, cov_entity_type, entity_id)
                 _cov = _coverage(_dates, start, end)
-                in_window = [d for d in _dates if start <= d <= end]
+                # 覆盖区间必须按"这条观测代表哪段日历"折算：一条 `2019` 覆盖整年。
+                # 此前直接拿 (d, d) 去合并，按年的串在 _merge_intervals 里
+                # split("-") 就炸，整块被 except 吞成 "coverage unknown"。
+                from fd_open_data_mcp.semantic.dates import (
+                    observation_period as _obs_period,
+                )
+
+                _win = [_obs_period(start), _obs_period(end)]
+                _win_lo = _win[0][0].isoformat() if _win[0] else start
+                _win_hi = _win[1][1].isoformat() if _win[1] else end
+                _spans = []
+                for _d in _dates:
+                    _per = _obs_period(_d)
+                    if _per is None:
+                        continue
+                    _lo, _hi = _per[0].isoformat(), _per[1].isoformat()
+                    if _lo <= _win_hi and _hi >= _win_lo:      # 日历相交，而非字典序包含
+                        _spans.append((max(_lo, _win_lo), min(_hi, _win_hi)))
                 out["coverage"] = {
                     "requested": [start, end],
-                    "covered": [list(iv) for iv in _merge_intervals(
-                        (d, d) for d in in_window)],
+                    "covered": [list(iv) for iv in _merge_intervals(_spans)],
                     "missing": [list(g) for g in _cov.gaps],
                     "known_empty": [list(g) for g in _cov.known_empty],
                     "complete": _cov.complete,

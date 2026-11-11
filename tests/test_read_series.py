@@ -36,12 +36,15 @@ def test_returns_stored_points_in_order(session, concept):
     for year, value in (("2019", "1.9e12"), ("2020", "2.0e12"), ("2021", "2.1e12")):
         write_cache(session, concept, T, E, year, value, "USD", "worldbank")
 
-    out = _call(concept)
+    # 窗口必须落在数据实际覆盖的范围内：2018-2022 里 2018/2022 确实没有点，
+    # 那种情况下**应当**带 coverage 的 note（见 test_year_series_partial_window_is_noted）。
+    out = _call(concept, start="2019", end="2021")
 
     assert out["count"] == 3
     assert [p["date"] for p in out["points"]] == ["2019", "2020", "2021"]
     assert all(p["source_used"] == "worldbank" for p in out["points"])
     assert "note" not in out
+    assert out["coverage"]["complete"] is True
 
 
 def test_empty_window_is_a_note_not_an_error(session, concept):
@@ -182,7 +185,7 @@ def test_no_unparseable_row_means_no_gaps_key(session, concept):
     """The report is additive and only appears when there is something to say."""
     write_cache(session, concept, T, E, "2020", "2.0e12", "USD", "worldbank")
 
-    out = _call(concept, start="2018-01-01", end="2022-12-31")
+    out = _call(concept, start="2020", end="2020")
 
     assert "gaps" not in out and "note" not in out
 
@@ -294,3 +297,51 @@ def test_a_genuinely_empty_window_is_still_a_coverage_gap(session, concept):
     assert out["count"] == 0
     assert "coverage gap" in out["note"]
     assert "landed_entity_type" not in out
+
+
+def test_year_granularity_series_is_judged_on_its_own_cadence(session, concept):
+    """按年的序列，覆盖完整时必须判 complete。
+
+    2026-11-11 实测的缺陷：coverage() 把日期串一律当"某一天"喂给 _width/_prev_day，
+    按年的 `"2020"` 第一个就抛 ValueError（`split("-")` 拆不出三段），异常被上层
+    吞成 "coverage unknown" —— 每一读都降级，而本项目多数宏观数据正是按年的。
+    """
+    for year in ("2019", "2020", "2021"):
+        write_cache(session, concept, T, E, year, "1.0", "USD", "worldbank")
+
+    out = _call(concept, start="2019", end="2021")
+
+    assert out["coverage"]["complete"] is True
+    assert out["coverage"]["missing"] == []
+    assert "note" not in out
+
+
+def test_year_series_partial_window_is_noted(session, concept):
+    """窗口超出实际覆盖范围时，必须如实报缺——不能因为按年就默认完整。"""
+    for year in ("2019", "2020", "2021"):
+        write_cache(session, concept, T, E, year, "1.0", "USD", "worldbank")
+
+    out = _call(concept, start="2018-01-01", end="2022-12-31")
+
+    assert out["coverage"]["complete"] is False
+    assert out["coverage"]["missing"] == [["2018-01-01", "2018-12-31"],
+                                          ["2022-01-01", "2022-12-31"]]
+    assert "incomplete" in out["note"]
+
+
+def test_probed_empty_survives_when_there_are_no_observations(session, concept):
+    """没有任何观测时，「探过为空」必须仍然申报——否则与「从未取过」不可区分。
+
+    2026-11-12 组合回归：coverage() 把 known_empty 的收集挪到了 span 计算之后，
+    于是"无观测"那一档会把它整份丢掉，`unknown.fetchable` 与
+    `probed_empty.fetchable` 变成同一个值（`test_knowledge_surface_integrity`
+    的两条用例正是这么抓到的）。这里的用例守的是同一条边界。
+    """
+    from fd_open_data_mcp.fetch.coverage import coverage
+
+    cold = coverage([], "2026-01-01", "2026-01-10")
+    probed = coverage([], "2026-01-01", "2026-01-10",
+                      known_empty=[("2026-01-05", "2026-01-06")])
+
+    assert cold.known_empty == () and probed.known_empty == (("2026-01-05", "2026-01-06"),)
+    assert cold.fetchable != probed.fetchable
