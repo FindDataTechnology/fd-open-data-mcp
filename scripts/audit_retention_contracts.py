@@ -80,7 +80,7 @@ class Contract:
     family: str
     cls: str
     window_days: int | None
-    re_fetchable: bool
+    re_fetchable: bool | None
     upstream_history_mutable: bool
     budget_mb: int
 
@@ -151,6 +151,13 @@ def classify_violations(contract: Contract | None, *, rows: int, over_window: in
         # 删掉等于把"陈旧"变成"没有"，而未知与空是两件事（这正是本仓反复踩的坑）。
         # T 类的窗口含义是"快照多快该刷新"，属于取数覆盖问题，不是容量问题。
         out.append(f"over_window：{over_window} 行超出 {contract.window_days} 天窗口，应淘汰或给出豁免")
+    if contract.cls in (T, W) and contract.re_fetchable is None:
+        # 未声明 ≠ 不可回收，也 ≠ 可回收。淘汰工具靠这个字段决定"删了能不能拿回来"，
+        # 空着等于把判断留给下一个人。2026-11-11 实测：T/W 里显式 false 的 0 个、
+        # 未声明的 3 个（polygon/employee_count、polygon/market_capitalization、
+        # akshare/performance）——正是那几个"只有跑淘汰工具时才看得见"的缺口。
+        out.append("contract_incomplete：re_fetchable 未声明（T/W 靠它判断"
+                   "“删了能不能拿回来”，留空等于把判断交给下一个人）")
     if contract.cls == P and contract.window_days is not None:
         # 矛盾在**契约本身**：P 是不可回收，声明窗口即自相矛盾。
         # 不能拿 over_window 判——P 类有五年以上的老行恰恰是对的。2026-11-11 实测：
@@ -170,7 +177,8 @@ def severity_of(violations: list[str]) -> str:
     """
     if not violations:
         return "ok"
-    if any(not v.startswith("no_contract") for v in violations):
+    if any(not (v.startswith("no_contract") or v.startswith("contract_incomplete"))
+           for v in violations):
         return "capacity"
     return "contract_gap"
 

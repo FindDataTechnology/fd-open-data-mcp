@@ -178,3 +178,23 @@ def test_w_class_over_window_still_flagged():
     v = mod.classify_violations(c, rows=407301, over_window=234,
                                rows_per_entity_recent=7.0, family="aum")
     assert any(x.startswith("over_window") for x in v)
+
+
+def test_t_w_without_re_fetchable_is_a_contract_gap_not_capacity():
+    """T/W 的 `re_fetchable` 未声明要报，但**不能**升级成容量事故。
+
+    这个字段决定"删了能不能拿回来"，空着就是缺口；可它也不是在吃盘。混进 capacity
+    会让 CI 永久红灯（本仓已经因为这种事把闸门关过一次），所以必须落在 contract_gap。
+    """
+    mod = load()
+    c = mod.Contract("akshare", "performance", "T", None, None, None, 64)
+    v = mod.classify_violations(c, rows=602, over_window=0,
+                                rows_per_entity_recent=1.0, family="performance")
+    assert any(x.startswith("contract_incomplete") for x in v)
+    assert mod.severity_of(v) == "contract_gap"     # 不是 capacity
+    # 显式 false / true 都不报这条
+    for flag in (False, True):
+        c2 = mod.Contract("s", "f", "T", None, flag, None, 64)
+        v2 = mod.classify_violations(c2, rows=10, over_window=0,
+                                     rows_per_entity_recent=1.0, family="f")
+        assert not any(x.startswith("contract_incomplete") for x in v2)
