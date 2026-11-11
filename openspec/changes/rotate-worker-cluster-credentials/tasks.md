@@ -195,3 +195,31 @@
 - 生效条件：随下一次发版（见 6.2）。今天生产不受影响，因为两处默认值在生产都被 env 覆盖。
 - 未做：`MultiClusterLauncher` 那个默认 redis URL 还带着 `:5432/postgres`（明显是复制粘贴错，
   应是 6379）。它现在也被去掉了默认值，所以这条错值一并不再存在；但若有人显式传错仍会照用。
+
+### 7.6 已修（只加告警）：`fd-scripts` ConfigMap 是 8 月快照，与镜像里的脚本不是同一份
+
+- 实测比对（2026-11-11，`fd-master/fd-scripts` vs 仓库 `scripts/`）：
+
+  | key | ConfigMap | 仓库 | 判定 |
+  |---|---|---|---|
+  | `bulk_ingest_astock_daily.py` | 46382 | 46392 | 不一致 |
+  | `bulk_ingest_financials_aggregate.py` | 14532 | 14969 | 不一致 |
+  | `bulk_ingest_fund_nav_daily.py` | 11675 | 12060 | 不一致 |
+  | `bulk_ingest_stock_financials.py` | 15857 | 16294 | 不一致 |
+  | `bulk_ingest_stock_indicators_events.py` | 15540 | 15925 | 不一致 |
+  | `run_astock_backfill_batches.py` | 10420 | 10420 | 一致（且**不在 sdist 里**，只有 ConfigMap 有） |
+
+  另有三个 `.txt`（`cn_trade_cal_2026.txt` / `new-series-symbols.txt` /
+  `universe-all-symbols.txt`）只在 ConfigMap 里，是 direct 策略真正依赖的数据文件。
+- 当前**没有跑错代码**：`_read_script` 的查找顺序是 `/app/scripts` → `/opt/fd-scripts`，
+  而 0.5.61 的 sdist 里 5 个 `bulk_ingest_*.py` **全都有**（从 PyPI 下 sdist 逐个核对过），
+  所以镜像里那份新的赢，ConfigMap 里的旧副本被遮住。
+- 真正的风险是"被遮住这件事没有任何记录"：谁改了脚本只更新 ConfigMap（或只改仓库不发版），
+  都不会有任何反馈。所以 `_read_script` 现在会在**同名副本内容不同**时点名告警
+  （用哪份、哪份被遮住、别两边各改一处），行为不变、只加一行 warning。
+- 验证：`tests/test_read_script_shadowing.py` 3 个用例（一致时静默 / 不一致时点名 /
+  找不到仍抛）；反向验证把告警改成 `if False` → 点名那条真红；
+  相关套件 53 passed。
+- **未做：清理 ConfigMap**。删掉那 5 个被遮住的旧 `.py` 能去掉"两份真理"，但它同时会把
+  "镜像里没有就退回 ConfigMap"这条兜底变成唯一路径——今天没有收益，不值得动生产。
+  要动的话前提是：先确认 sdist 永远包含全部 direct 策略脚本（有测试最好）。

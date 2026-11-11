@@ -746,21 +746,43 @@ def _read_script(script_path: str) -> str:
     live in the fd-open-data-mcp repo, not scraw), and ``FD_SCRIPTS_DIR``
     (ConfigMap-mounted scripts for control-plane pods that run no repo
     checkout). Raises if not found so launch fails loudly rather than shipping
-    an empty ConfigMap."""
+    an empty ConfigMap.
+
+    First match wins, which is silent by nature: on 2026-11-11 the mounted
+    ``fd-scripts`` ConfigMap (a 2026-08-28 snapshot) still carried five
+    ``bulk_ingest_*.py`` copies that differ from the ones in /app/scripts. The
+    image copy was the one used — correctly — but nothing anywhere said two
+    versions existed, so an edit made only to the ConfigMap (or only to the
+    repo, without a release) would have been invisible. A differing duplicate
+    is now warned about by name.
+    """
     import os
+    name = os.path.basename(script_path)
     search = [
         "/app/scripts",
         "/opt/fd-scripts",
         os.environ.get("FD_SCRIPTS_DIR", ""),
     ]
+    found: list[tuple[str, str]] = []
     for base in search:
         if not base:
             continue
-        p = os.path.join(base, os.path.basename(script_path))
+        p = os.path.join(base, name)
         if os.path.isfile(p):
             with open(p, "r", encoding="utf-8") as f:
-                return f.read()
-    raise FileNotFoundError(f"script not found: {script_path}")
+                found.append((p, f.read()))
+    if not found:
+        raise FileNotFoundError(f"script not found: {script_path}")
+
+    chosen_path, chosen_src = found[0]
+    differing = [p for p, src in found[1:] if src != chosen_src]
+    if differing:
+        logger.warning(
+            "script %s resolved from %s, but a DIFFERENT copy exists at %s — "
+            "editing the shadowed copy has no effect (release the package or "
+            "update the mounted ConfigMap, not both)",
+            name, chosen_path, ", ".join(differing))
+    return chosen_src
 
 
 def pick_cluster(session: Session, plan: CrawlPlan | None, policy: CrawlPolicy | None = None) -> Cluster | None:
