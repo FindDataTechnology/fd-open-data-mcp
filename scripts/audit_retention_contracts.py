@@ -58,7 +58,9 @@ DEFAULT_CONTRACTS: tuple[tuple[str, str, str, int | None, bool, bool, int], ...]
     ("dounan-flower-price", "*", F, None, False, True, 64),
     ("mct-star-hotel", "*", F, None, False, True, 64),
     # 滚动窗口
-    ("akshare", "aum", W, 1826, True, True, 512),
+    # re_fetchable=False 不是笔误：该族 1,826 天日频历史只能由「最新规模」快照接口取，
+    # 历史补不回来（2026-11-12 实测绑定链 fund_individual_basic_info_xq）。
+    ("akshare", "aum", W, 1826, False, True, 512),
     ("polygon", "price", W, 730, True, True, 128),
     ("polygon", "trading_volume", W, 730, True, True, 128),
     ("akshare", "price", W, 730, True, True, 128),
