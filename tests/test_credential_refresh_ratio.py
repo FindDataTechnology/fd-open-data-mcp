@@ -81,3 +81,26 @@ def test_cli_passes_on_the_shipped_artefacts():
     """仓库里这两份必须真的满足规则（否则这条闸门一上来就是红的）。"""
     m = load()
     assert m.main([]) == 0
+
+
+def test_trailing_comment_on_the_cron_line_is_tolerated(tmp_path):
+    """给 cron 加一句行尾说明不能让闸门失效。
+
+    第一版正则只认到行尾，于是 `- cron: '17 3 * * 1'  # Monday 03:17 UTC`
+    解析失败、退出码变 2——闸门本身没坏，但从此每天的输出都是噪声，
+    很快就会被 `|| true` 掉。这正是"注释一加，校验就哑"的形态。
+    """
+    m = load()
+    p = tmp_path / "wf.yml"
+    p.write_text(
+        "on:\n  schedule:\n    - cron: '17 3 * * 1'      # Monday 03:17 UTC\n",
+        encoding="utf-8")
+    assert m.read_interval_hours(p) == 168.0
+
+
+def test_bare_and_double_quoted_forms(tmp_path):
+    m = load()
+    for cron, quoted in (("0 3 * * *", "0 3 * * *"), ("0 3 * * *", '"0 3 * * *"')):
+        p = tmp_path / "wf.yml"
+        p.write_text("on:\n  schedule:\n    - cron: %s\n" % quoted, encoding="utf-8")
+        assert m.read_interval_hours(p) == 24.0

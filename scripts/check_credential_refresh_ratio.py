@@ -53,17 +53,29 @@ def read_interval_hours(path: Path | None = None) -> float | None:
       `m h * * *`    每天一次          -> 24h
       `m h * * D`    每周某天一次      -> 168h
 
-    日/周字段必须显式判断：第一版只看了 hour，把 `17 3 * * 1`（每周一）读成 24h，
-    倍数因此显示成 30 而不是 4.3 —— 一个把闸门悄悄放宽 7 倍的错误。
+    实现上先把「cron:」之后的整行取出来、去行尾注释、去引号，再按空格切字段。
+    不用一条复杂正则去同时兼容带/不带引号和带注释：第一版就是因为只认到行尾，
+    给 cron 加一句说明就解析失败（rc=2 噪声，很快会被 `|| true` 掉）；
+    第二版用字符类把无引号的 `0 3 * * *` 只截到 `0`。两次都是"看起来能跑"。
     """
     path = path or WORKFLOW
     if not path.exists():
         return None
     text = path.read_text(encoding="utf-8")
-    m = re.search(r"^\s*-\s*cron:\s*['\"]?([^'\"\n]+)['\"]?\s*$", text, re.M)
+    m = re.search(r"^\s*-\s*cron:(.*)$", text, re.M)
     if not m:
         return None
-    fields = m.group(1).split()
+    raw = m.group(1).strip()
+    if raw[:1] in ("'", '"'):
+        q = raw[0]
+        end = raw.find(q, 1)
+        if end == -1:
+            return None
+        raw = raw[1:end]
+    else:
+        raw = raw.split("#", 1)[0].strip()
+
+    fields = raw.split()
     if len(fields) != 5:
         return None
     _minute, hour, dom, _month, dow = fields

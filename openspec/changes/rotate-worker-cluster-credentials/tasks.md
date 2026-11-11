@@ -262,3 +262,18 @@
 - **未做：清理 ConfigMap**。删掉那 5 个被遮住的旧 `.py` 能去掉"两份真理"，但它同时会把
   "镜像里没有就退回 ConfigMap"这条兜底变成唯一路径——今天没有收益，不值得动生产。
   要动的话前提是：先确认 sdist 永远包含全部 direct 策略脚本（有测试最好）。
+
+  刷新执行体（`.github/workflows/refresh-worker-credentials.yml`）的落地前提，**两处自查后改掉的错**：
+  1. 我第一版从 `deploy/crawl-control` 里 exec 去查 DB —— 而 `fd-master` **一个 deployment 都没有**
+     （`kubectl get deploy` → No resources found）。那一步永远跑不起来。改成从控制面 Secret 的
+     key（`<name>.token`）取集群清单：那本来就是控制面真实的凭据面，且不需要 DB
+     （CI 连不到 tailnet 里的 PG）。"挂载 == enabled" 仍由巡检脚本在有人有 DB 时核对。
+  2. `cheap` 的 API 是 `https://100.64.0.13:6443`（tailnet），**GitHub 托管 runner 连不上**。
+     所以 `runs-on` 改成 `[self-hosted, linux, finddata]`，并在 preflight 里逐个 context
+     `get ns`，连不上就点名失败——否则会在"刷了一半"的地方留下部分集群新、部分旧。
+  3. preflight 还硬检查 `secrets.WORKER_ADMIN_KUBECONFIGS`：**缺失就直接停，什么都不写**。
+     这把 admin kubeconfig 我**没有**替用户上传——那是在第三方 secret store 里新建一个
+     集群管理级凭据，属于安全姿态决定，超出"放手做"的范围。所以现在这个工作流是**已接好线
+     但还没通电**：缺 secret 时它会明确报错，而不会静默。
+     过渡期的实际刷新方式：手动跑 `rotate_worker_credential.py --cluster cheap --mode bound --apply`
+     （本机已有 `cheap-ts` admin context），或先把 secret 配好。
