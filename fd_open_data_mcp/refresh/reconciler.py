@@ -691,6 +691,16 @@ class ClusterK8sClient:
         st = self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}").get("status", {})
         return _job_state(st)
 
+    def get_job(self, name: str) -> dict:
+        """The raw Job object (needed for metadata.creationTimestamp).
+
+        Unlike ``job_status``/``job_deadline_seconds`` this does NOT swallow
+        errors: the caller of ``adopt_job_if_present`` must be able to tell
+        "404 = it really is not there" from "the read itself failed".
+        """
+        ns = self.cluster.namespace
+        return self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}")
+
     def job_deadline_seconds(self, name: str) -> int | None:
         """spec.activeDeadlineSeconds of this Job; None when unset/gone."""
         ns = self.cluster.namespace
@@ -735,6 +745,86 @@ class ClusterK8sClient:
             if e.code == 404:
                 return False
             raise
+
+
+# How far back a Job's creationTimestamp may be and still be adopted as "the Job
+# this attempt created" (reconcile-lost-launch-response). The name embeds a
+# second-resolution timestamp, so a genuine match is seconds old; the window only
+# exists to refuse a pathological same-named Job.
+LOST_RESPONSE_ADOPTION_WINDOW = dt.timedelta(minutes=15)
+
+
+class LaunchResponseLost(RuntimeError):
+    """A launch request raised, and re-reading could not confirm the Job exists.
+
+    Deliberately NOT a subclass of the original exception type: callers record
+    ``f"launch failed: {e}"`` and the message is what reaches the ledger."""
+
+
+def _creation_timestamp(body: dict) -> dt.datetime | None:
+    raw = ((body.get("metadata") or {})).get("creationTimestamp")
+    if not raw:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def adopt_job_if_present(client, name: str, err: BaseException,
+                         now: dt.datetime | None = None) -> None:
+    """Decide a failed launch by object absence instead of by the exception.
+
+    A create request that already reached the API server can time out while the
+    response is being read, leaving a real Job behind (observed live
+    2026-11-11: ``policy_runs`` said ``launch failed: The read operation timed
+    out`` while ``crawl-policy-2487-20261111063707`` ran to success). So after a
+    create error, read the cluster for the name we had already fixed:
+
+    * the Job exists inside the adoption window -> return normally (adopted);
+      the caller keeps its ``running`` row and its ``job_ref``
+    * 404 -> raise ``LaunchResponseLost`` describing a *confirmed* absence
+    * the read itself failed -> raise describing an *unconfirmed* absence
+
+    The last case must not claim absence we did not observe: a run marked failed
+    while the Job runs causes duplicate fetches next cycle, but a run marked
+    running with no Job dangles forever and blocks that policy's single-flight.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    cluster_name = getattr(getattr(client, "cluster", None), "name", "?")
+    try:
+        body = client.get_job(name)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise LaunchResponseLost(
+                f"{err} — 已回合核对：Job {name} 不存在（干净失败，可安全重试）"
+            ) from err
+        raise LaunchResponseLost(
+            f"{err} — 回合核对失败：读 Job 得到 HTTP {e.code}，无法确认是否落地"
+        ) from err
+    except Exception as e:  # noqa: BLE001 - any read failure = unknown, not absent
+        raise LaunchResponseLost(
+            f"{err} — 回合核对失败：{type(e).__name__}: {e}，无法确认是否落地"
+        ) from err
+
+    created = _creation_timestamp(body)
+    if created is None:
+        raise LaunchResponseLost(
+            f"{err} — 回合核对：Job {name} 存在但读不出 creationTimestamp，按失败处理"
+        ) from err
+    if not (now - LOST_RESPONSE_ADOPTION_WINDOW
+            <= created <= now + LOST_RESPONSE_ADOPTION_WINDOW):
+        raise LaunchResponseLost(
+            f"{err} — 回合核对：发现同名 Job 但创建于 {created.isoformat()}"
+            f"（窗口 {LOST_RESPONSE_ADOPTION_WINDOW}），按失败处理"
+        ) from err
+
+    logger.warning(
+        "launch response lost but job exists; adopting cluster=%s job=%s "
+        "created=%s err=%s: %s",
+        cluster_name, name, created.isoformat(), type(err).__name__, err)
+    return None
+
 
 
 
@@ -933,7 +1023,13 @@ class MultiClusterLauncher:
                 c["env"].append({"name": "SCRAW_JOB_REF", "value": job_ref})
         client = ClusterK8sClient(cluster)
         client.create(docs[0])
-        client.create(docs[1])
+        try:
+            client.create(docs[1])
+        except Exception as err:  # noqa: BLE001 - decision is made by re-reading
+            # The create may have been applied before the response was lost;
+            # never report a failed launch for a Job that exists, and never
+            # resend the request (a retry can create a second Job).
+            adopt_job_if_present(client, name, err)
         logger.info("launched policy %s on cluster %s as job=%s", policy.name, cluster.name, name)
         return (job_ref, cluster.id)
 
