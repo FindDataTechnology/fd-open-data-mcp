@@ -28,8 +28,23 @@
   `reconciler.py` 的 `ClusterK8sClient._api()` 现在把 401/403 映射成 `WorkerCredentialError`，由纯函数 `worker_credential_hint()` 生成可执行提示（点名 `$KUBECONFIG_DIR/<cluster>.token`、列出三种成因、给出轮换命令）。401 与 403 分开：前者是凭据失效、后者是 RBAC/集群被禁用。
   实测（打真实 cheap API）：伪造 token → `WorkerCredentialError` 且提示含轮换命令；  真 token → `PodList items=1` 不回归。**这一条与 bound/legacy 无关**——legacy 也会因  SA 被重建或凭据被摘除而 401，所以先落地。
 
-- [ ] 3.2 就绪/健康面暴露"凭据剩余寿命"（最近一次刷新时间 + `exp`）——验证：把刷新时间改早，看板/健康输出随之变化
+- [x] 3.2 就绪/健康面暴露"凭据剩余寿命"（最近一次刷新时间 + `exp`）——验证：把刷新时间改早，看板/健康输出随之变化
+  落在既有的 `scripts/check_worker_credential_surface.py` 上（不新造一个面）：新增
+  `credential_lifetime(token)` 从 JWT 的 `iat`/`exp` 读出 kind/寿命/剩余，`--json` 供看板与告警消费。
+  三态分开：`bound`（有 exp）／`legacy`（JWT 无 exp ⇒ **永不过期**，这是风险不是健康）／
+  `unknown`（不可解，不假装知道寿命）。判据与 3.3 同一刻度：**剩余 < 寿命 1/3 即报**
+  （= 刷新没在跑，且比"已过期"早得多），过期另报一条。
+  验证（三层）：①`tests/test_worker_credential_lifetime.py` 8 个用例，含"把刷新时间改早 → `ok` 翻转、
+  剩余值变化"（3.2 的原话验收）；②反向验证：把 `stale` 改成恒 False（最典型的假绿写法），
+  两个用例真红；③**真实生产凭据**：拿 fd-mcp 挂载里的 cheap 真 token 跑 → `永不过期（legacy，无 exp）`，
+  `--json` 里 `expires_at=null` —— 这个事实以前任何看板都看不到。
 - [ ] 3.3 CronJob 刷新节奏写进部署清单，且与 `--duration` 有明确倍数关系（刷新间隔 ≤ 寿命的 1/3）——验证：清单里的两个数值能被脚本读出来并断言满足比例
+  **被 3.2 的工作卡住，且卡点不是体力活**：签 bound token 要 `create serviceaccounts/token`，
+  而控制面握着的 worker 凭据明确没有这个动词（`kubectl auth can-i create serviceaccounts/token
+  --as=system:serviceaccount:scraw:crawl-worker -n scraw` → **no**；对照组 `create/delete/get jobs` → yes）。
+  所以"自动刷新"要么给控制面**新增一个比今天更强的凭据**（最小可给到
+  `resources: [serviceaccounts/token], resourceNames: [crawl-worker], verbs: [create]`），
+  要么退回"运维机/CI 手工签"。这不是清单里写两个数字就能解决的，须先定这件事——见 `DECISION.md`。
 
 ## 4. 文档与裁决
 

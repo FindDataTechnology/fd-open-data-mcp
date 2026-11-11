@@ -30,9 +30,11 @@ america/baidu/tencent/zihan 四组凭据，而 `clusters` 表里只有 cheap 是
 from __future__ import annotations
 
 import argparse
+import base64
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 DEFAULT_KUBECONFIGS_DIR = "/kubeconfigs"
@@ -57,6 +59,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         "--report-only",
         action="store_true",
         help="只打印现状，不做判定（退出码恒 0）",
+    )
+    p.add_argument(
+        "--json",
+        action="store_true",
+        help="机器可读输出（含每个集群的凭据剩余寿命），供看板/告警消费",
     )
     return p.parse_args(argv)
 
@@ -108,6 +115,99 @@ def load_mounted_clusters(ns: argparse.Namespace) -> set[str]:
     return names
 
 
+# ─── 凭据剩余寿命（rotate-worker-cluster-credentials 3.2）────────────────────
+# bound token 会到期，而到期是**静默**的：派发在某天突然 401，之前没有任何征兆。
+# legacy token 反过来永不失效，所以"看不出寿命"本身就是它最大的风险。
+# 两种都要能一眼看出来，判据都来自 token 本身（JWT 的 iat/exp），不靠外部记账。
+
+def decode_jwt_payload(token: str) -> dict | None:
+    """读 JWT 的 claims，**不验签**。
+
+    只用来回答"它什么时候过期"。验签是 API server 的事；这里验了也没意义，
+    因为真要证明凭据有效只有打一次 API（见 rotate_worker_credential.py）。
+    """
+    parts = token.strip().split(".")
+    if len(parts) != 3:
+        return None
+    body = parts[1]
+    pad = "=" * (-len(body) % 4)
+    try:
+        raw = base64.urlsafe_b64decode(body + pad)
+        claims = json.loads(raw)
+    except (ValueError, json.JSONDecodeError):
+        return None
+    return claims if isinstance(claims, dict) else None
+
+
+def credential_lifetime(token: str, now: float | None = None) -> dict:
+    """返回 {kind, issued_at, expires_at, lifetime_s, remaining_s, stale}。
+
+    kind: bound（有 exp）/ legacy（JWT 但无 exp）/ unknown（不是可解 JWT）。
+    stale 用「剩余 < 寿命的 1/3」判定——与 3.3 要求的刷新节奏（间隔 ≤ 寿命 1/3）
+    是同一个刻度的两端：刷新正常时它永远不亮，刷新停了它先亮。
+    """
+    claims = decode_jwt_payload(token)
+    if claims is None:
+        return {"kind": "unknown", "issued_at": None, "expires_at": None,
+                "lifetime_s": None, "remaining_s": None, "stale": None}
+    iat = claims.get("iat")
+    exp = claims.get("exp")
+    if exp is None:
+        # 无 exp 的 JWT = legacy SA token：永不过期。这不是"健康"，是"没有兜底"。
+        return {"kind": "legacy", "issued_at": iat, "expires_at": None,
+                "lifetime_s": None, "remaining_s": None, "stale": None}
+
+    now = time.time() if now is None else now
+    lifetime = (exp - iat) if isinstance(iat, (int, float)) else None
+    remaining = exp - now
+    stale = bool(lifetime and remaining < lifetime / 3.0)
+    return {"kind": "bound", "issued_at": iat, "expires_at": exp,
+            "lifetime_s": lifetime, "remaining_s": remaining, "stale": stale}
+
+
+def _fmt_seconds(seconds: float | None) -> str:
+    if seconds is None:
+        return "-"
+    sign = "-" if seconds < 0 else ""
+    seconds = abs(seconds)
+    if seconds >= 86400:
+        return f"{sign}{seconds / 86400:.1f}d"
+    if seconds >= 3600:
+        return f"{sign}{seconds / 3600:.1f}h"
+    return f"{sign}{seconds / 60:.0f}m"
+
+
+def describe_lifetime(life: dict) -> str:
+    if life["kind"] == "unknown":
+        return "寿命未知（token 不是可解 JWT）"
+    if life["kind"] == "legacy":
+        return "永不过期（legacy，无 exp）"
+    life_s = _fmt_seconds(life["lifetime_s"])
+    rem = _fmt_seconds(life["remaining_s"])
+    flag = "  STALE" if life["stale"] else ""
+    if life["remaining_s"] is not None and life["remaining_s"] < 0:
+        flag = "  EXPIRED"
+    return f"bound 寿命 {life_s}，剩余 {rem}{flag}"
+
+
+def lifetime_problems(lifetimes: dict[str, dict]) -> list[str]:
+    """到期/刷新停摆算违规；legacy 不算违规（它是选择，不是故障）。"""
+    problems: list[str] = []
+    for name in sorted(lifetimes):
+        life = lifetimes[name]
+        if life["kind"] != "bound":
+            continue
+        rem = life["remaining_s"]
+        if rem is not None and rem < 0:
+            problems.append(
+                f"{name}: bound token 已过期（派发此刻就会 401）——刷新没在跑")
+        elif life["stale"]:
+            problems.append(
+                f"{name}: bound token 剩余 {_fmt_seconds(rem)} 已低于寿命的 1/3"
+                f"（刷新没在跑，或刷新间隔 > 寿命 1/3）")
+    return problems
+
+
 def check(clusters: dict[str, bool], mounted: set[str]) -> list[str]:
     """返回违规描述列表；空列表 = 通过。"""
     problems: list[str] = []
@@ -131,6 +231,7 @@ def check(clusters: dict[str, bool], mounted: set[str]) -> list[str]:
     return problems
 
 
+
 def main(argv: list[str] | None = None) -> int:
     ns = parse_args(argv)
     try:
@@ -140,10 +241,40 @@ def main(argv: list[str] | None = None) -> int:
         print(f"ERROR {exc}", file=sys.stderr)
         return 2
 
+    base = Path(ns.kubeconfigs_dir)
+    lifetimes: dict[str, dict] = {}
+    for name in sorted(mounted):
+        try:
+            token = (base / f"{name}.token").read_text(encoding="utf-8")
+        except OSError as exc:
+            print(f"ERROR 读不到 {name}.token：{exc}", file=sys.stderr)
+            return 2
+        lifetimes[name] = credential_lifetime(token)
+
+    problems = check(clusters, mounted) + lifetime_problems(lifetimes)
+    ok = not problems
+
+    if ns.json:
+        print(json.dumps({
+            "ok": ok or ns.report_only,
+            "clusters": [
+                {"name": n, "enabled": clusters[n], "mounted": n in mounted,
+                 "credential": lifetimes.get(n)}
+                for n in sorted(clusters)
+            ],
+            "orphans": sorted(mounted - set(clusters)),
+            "problems": problems,
+        }, ensure_ascii=False, indent=2))
+        if ns.report_only:
+            return 0
+        return 0 if ok else 1
+
     print(f"clusters 表: {len(clusters)} 个（enabled={sum(1 for v in clusters.values() if v)}）")
     for name in sorted(clusters):
+        life = lifetimes.get(name)
         print(f"  {name:<12} enabled={str(clusters[name]).lower():<5} "
-              f"mounted={'yes' if name in mounted else 'no'}")
+              f"mounted={'yes' if name in mounted else 'no':<3} "
+              f"{describe_lifetime(life) if life else '挂载里没有凭据'}")
     orphans = sorted(mounted - set(clusters))
     if orphans:
         print(f"  挂载有、表里没有: {', '.join(orphans)}")
@@ -152,9 +283,8 @@ def main(argv: list[str] | None = None) -> int:
         print("REPORT-ONLY 未做判定")
         return 0
 
-    problems = check(clusters, mounted)
-    if not problems:
-        print("OK 凭据面与 clusters 表一致")
+    if ok:
+        print("OK 凭据面与 clusters 表一致，且没有到期/刷新的问题")
         return 0
 
     print(f"FAIL {len(problems)} 处违规：", file=sys.stderr)
