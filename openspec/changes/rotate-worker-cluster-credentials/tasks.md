@@ -170,3 +170,28 @@
   建议由持有该账号的人换一把——**换时只改 `dc-api-key` Secret 一处**，两个消费者现在都走引用。
 - 附带一句实话：我为了比对把它打印进过本会话的工具输出。推之前已对入库清单做明文体检
   （`grep -E "value: [A-Za-z0-9+/=_-]{24,}"`），`k8s/fd-master/` 下无任何明文长值。
+
+### 7.5 已修：启动器默认 DSN 里带口令，且把它当字面值写进 Job spec
+
+- 现象（两条，同一个 launcher）：
+  1. `K8sJobLauncher` / `MultiClusterLauncher` 的 `database_url` 默认值里**硬编码了
+     `postgres:<口令>@fd-open-pg.scraw`**，而这个模块随 sdist 发到**公共 PyPI** —— 等于把口令公布。
+  2. `K8sJobLauncher.launch()` 把 `self.database_url` 当**字面 env 值**写进 Job spec
+     （`{"name": "FD_OPEN_DATA_MCP_DATABASE_URL", "value": self.database_url}`），
+     而多集群 launcher 的 `_common_env` 早已改成 `secretKeyRef → fd-db-secret`。
+     生产走 `k8s-multi` 所以没暴露；一旦有人切回 `RECONCILER_LAUNCHER=k8s`，
+     真实 DSN（含口令）就会落进每个 pod spec，任何能 `get pods` 的人都能读。
+- 为什么这条该管：仓库里的 ingest 脚本早就改成了"没有 env 就拒绝并说明"，注释还留着
+  "used to fall back to a dev DSN …every Job died on connection-refused instead of saying why"。
+  启动器这两处没跟上——同一类问题，只修了脚本那一半。
+- 修法：两处默认值去掉凭据（`SCRAW_K8S_DATABASE_URL` 未设时为 `None`，不再编一份 DSN）；
+  新增 `K8sJobLauncher._db_env()`：**有显式覆盖**才写字面值（本地开发路径，那里没有 Secret），
+  **没覆盖**就走 `secretKeyRef → fd-db-secret`，与 `_common_env` 完全一致。
+- 验证：`tests/test_launcher_credential_defaults.py` 7 个用例；**反向验证两遍**——
+  把字面量写回调用点 → `test_launch_does_not_inline_the_dsn_any_more` 真红；
+  把口令塞回默认值 → `test_no_password_in_the_default_dsn` + `test_k8s_launcher_gets_the_dsn_from_the_secret` 真红。
+  相关套件 `test_reconciler / test_multi_cluster / test_direct_executor` + 新文件 → **59 passed**。
+  `grep -c admin123 fd_open_data_mcp/refresh/reconciler.py` → 0（连注释里也不留这个字面值）。
+- 生效条件：随下一次发版（见 6.2）。今天生产不受影响，因为两处默认值在生产都被 env 覆盖。
+- 未做：`MultiClusterLauncher` 那个默认 redis URL 还带着 `:5432/postgres`（明显是复制粘贴错，
+  应是 6379）。它现在也被去掉了默认值，所以这条错值一并不再存在；但若有人显式传错仍会照用。

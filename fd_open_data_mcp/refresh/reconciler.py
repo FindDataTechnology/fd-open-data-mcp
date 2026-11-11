@@ -382,12 +382,32 @@ class K8sJobLauncher:
         self.namespace = namespace or os.environ.get("SCRAW_K8S_NAMESPACE", "scraw")
         self.image = image or os.environ.get(
             "SCRAW_K8S_IMAGE", "scraw-fd-open-data-mcp:latest")
-        self.database_url = database_url or os.environ.get(
-            "SCRAW_K8S_DATABASE_URL",
-            "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres")
-        self.redis_url = redis_url or os.environ.get(
-            "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:6379/0")
+        # No credential default: this used to fall back to a DSN with a hardcoded
+        # `postgres` password — a password baked into a module that ships on PyPI,
+        # i.e. published. Absent an override the DSN reaches pods through
+        # fd-db-secret (see _db_env below), which is also how the multi-cluster
+        # launcher does it. An explicit override stays a literal on purpose: that
+        # path is for local runs where no Secret exists.
+        self.database_url = database_url or os.environ.get("SCRAW_K8S_DATABASE_URL")
+        self.redis_url = redis_url or os.environ.get("SCRAW_K8S_REDIS_URL")
         self._ctx = kube_context or os.environ.get("KUBE_CONTEXT")
+
+    def _db_env(self) -> list[dict]:
+        """DB/Redis env for a Job: explicit override, else the Secret.
+
+        A plain `value:` lands in the Job spec, where anyone with `get pods`
+        can read it (measured 2026-11-08 on the cheap cluster). The multi-cluster
+        launcher already does this; this one still wrote the DSN literally.
+        """
+        if self.database_url or self.redis_url:
+            return [{"name": "FD_OPEN_DATA_MCP_DATABASE_URL", "value": self.database_url or ""},
+                    {"name": "REDIS_URL", "value": self.redis_url or ""}]
+        return [{"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
+                 "valueFrom": {"secretKeyRef": {"name": "fd-db-secret",
+                                                "key": "DATABASE_URL"}}},
+                {"name": "REDIS_URL",
+                 "valueFrom": {"secretKeyRef": {"name": "fd-db-secret",
+                                                "key": "REDIS_URL"}}}]
 
     # -- transport: kubectl locally, in-cluster REST API inside a pod ---------
     _SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -454,9 +474,7 @@ class K8sJobLauncher:
                                 "volumeMounts": [{"name": "plan-volume", "mountPath": "/plan",
                                                   "readOnly": True}],
                                 "env": [
-                                    {"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
-                                     "value": self.database_url},
-                                    {"name": "REDIS_URL", "value": self.redis_url},
+                                    *self._db_env(),
                                     # the pod's yield reports key on this (D1):
                                     # it equals the job_ref stored on the run row
                                     {"name": "SCRAW_JOB_REF", "value": name},
@@ -802,11 +820,11 @@ class MultiClusterLauncher:
     at scheduling time."""
 
     def __init__(self, database_url: str | None = None, redis_url: str | None = None):
-        self.database_url = database_url or os.environ.get(
-            "SCRAW_K8S_DATABASE_URL",
-            "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres")
-        self.redis_url = redis_url or os.environ.get(
-            "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:5432/postgres")
+        # Same rule as K8sJobLauncher: no credential default. Jobs get the DSN
+        # from fd-db-secret (see _common_env); these attributes only carry an
+        # explicit override, which is what runtime_hints may template.
+        self.database_url = database_url or os.environ.get("SCRAW_K8S_DATABASE_URL")
+        self.redis_url = redis_url or os.environ.get("SCRAW_K8S_REDIS_URL")
 
     def _common_env(self, cluster) -> list[dict]:
         """Env shared by Scrapy and direct pods: DB, Redis, cluster id, forwarder.
