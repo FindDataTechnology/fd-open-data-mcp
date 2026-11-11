@@ -679,6 +679,16 @@ def write_cache_range_new_only(
     """
     if not rows:
         return 0
+    # 补数路径同样是写入口，必须执行同一套留存语义——否则它就是后门：
+    # 2026-11-11 实测 `nav` 在 T 语义上线后仍从 1,236 涨到 1,928 行（1.56 行/实体，
+    # 重新触发 T_class_accruing_history），涨的正是从这条 new-only 补数路径进来的。
+    from fd_open_data_mcp.fetch.retention import check_write_allowed
+
+    check_write_allowed(session, concept_id=concept_id, source=source_used)
+    rows = _drop_out_of_window(session, concept_id, entity_type, entity_id,
+                               source_used, rows)
+    if not rows:
+        return 0
     existing = {
         obs.date
         for obs in _read_base_range(
@@ -709,6 +719,16 @@ def write_cache_range_new_only(
         return 0
     bump_rollups(session, concept_id, entity_type, entity_id, source_used,
                  inserted, touched, now, granularity=granularity)
+    # T 类（只留当期）在补数路径上也要执行：新补进来的历史点若比现有快照旧，
+    # 它不该活着；若更新，旧的该被并掉。少这一句，补数就成了绕过 T 的后门。
+    # 保留点必须取"新插入 ∪ 已存在"里最大的那个——只在新插入里取 max 会把
+    # 更新的现有快照误删（实测：补进 10-01/10-15 时把 11-01 那条并掉了）。
+    if inserted and _retention_snapshot_class(session, concept_id, source_used) == "T":
+        # keep_date=None：由合并函数在该实体现有全部行里取最新那条。
+        # 不能在 `inserted`（或 inserted ∪ 本次查询区间）里取 max——补进来的点
+        # 往往比库里的快照旧，那样会把更新的快照误删。
+        _snapshot_consolidate(session, concept_id, entity_type, entity_id,
+                              granularity, source_used, None, None)
     session.commit()
     return len(inserted)
 
@@ -783,10 +803,14 @@ def _retention_snapshot_class(session: Session, concept_id: int,
 
 
 def _snapshot_consolidate(    session: Session, concept_id: int, entity_type: str, entity_id: int,
-    granularity: str, source_used: str, keep_date: str,
+    granularity: str, source_used: str, keep_date: Optional[str],
     revision_reason: Optional[str],
 ) -> int:
     """T 类（只留当期）写完后把旧快照并掉：只留 ``keep_date`` 那一条。
+
+    ``keep_date=None`` 表示"在该实体现有全部行里取最新的那个"——补数路径必须这么用：
+    补进来的点可能比库里的快照旧，此时要留的是**既有**的最新点，不能只在新插入的
+    日期里取 max（那样会把更新的快照误删）。
 
     为什么是"并"而不是"写完再删"：``bump_rollups`` 按行数记账，删行会让
     ``concept_source_stats`` 的计数单向漂高。这里**原地搬**——把旧行删除前记一条
@@ -798,14 +822,19 @@ def _snapshot_consolidate(    session: Session, concept_id: int, entity_type: st
     """
     from fd_open_data_mcp.models import ObservationRevision as _Rev
 
-    older = (session.query(SemanticObservation)
-             .filter(SemanticObservation.concept_id == concept_id,
-                     SemanticObservation.entity_type == entity_type,
-                     SemanticObservation.entity_id == entity_id,
-                     SemanticObservation.granularity == granularity,
-                     SemanticObservation.source_used == source_used,
-                     SemanticObservation.date < keep_date)
-             .all())
+    all_rows = (session.query(SemanticObservation)
+                .filter(SemanticObservation.concept_id == concept_id,
+                        SemanticObservation.entity_type == entity_type,
+                        SemanticObservation.entity_id == entity_id,
+                        SemanticObservation.granularity == granularity,
+                        SemanticObservation.source_used == source_used)
+                .all())
+    if not all_rows:
+        return 0
+    if keep_date is None:
+        # 补数路径：保留"现有全部行里最新的那个"，而不是新插入日期里的最大值。
+        keep_date = max(r.date for r in all_rows)
+    older = [r for r in all_rows if r.date < keep_date]
     if not older:
         return 0
     dates = sorted(o.date for o in older)

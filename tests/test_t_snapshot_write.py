@@ -107,3 +107,25 @@ def test_single_point_writer_also_consolidates(session):
     rows = _rows(session, c.id)
     assert len(rows) == 1
     assert rows[0].date == "2026-11-03"
+
+
+def test_insert_only_path_also_consolidates(session):
+    """补数路径（new-only）也必须执行 T 语义，否则它就是绕过 T 的后门。
+
+    2026-11-11 实测：T 语义上线后 `nav` 仍从 1,236 涨到 1,928 行（1.56 行/实体），
+    涨的正是从 `write_cache_range_new_only` 补进来的点——这条路径当时既不过闸门、
+    也不裁 W 窗口、更不做 T 合并。
+    """
+    from fd_open_data_mcp.fetch.cache import write_cache_range_new_only
+
+    c = _concept(session, code="tenure_days_new_only")
+    _contract(session, "akshare", "tenure_days_new_only", "T", 30)
+    write_cache_range(session, c.id, ENT[0], ENT[1], {"2026-11-01": 1}, "day",
+                      "akshare", granularity="day")
+    # 补数补进两个更早的点 → 合并后仍只留最新那条
+    write_cache_range_new_only(session, c.id, ENT[0], ENT[1],
+                               {"2026-10-01": 2, "2026-10-15": 3}, "day",
+                               "akshare", granularity="day")
+    rows = _rows(session, c.id)
+    assert len(rows) == 1, f"补数后应仍只留一条，实际 {len(rows)} 条"
+    assert rows[0].date == "2026-11-01"
