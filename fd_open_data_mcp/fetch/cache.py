@@ -31,7 +31,7 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime, timedelta, timezone
-from typing import Iterable, Optional, Union
+from typing import Iterable, Mapping, Optional, Union
 from uuid import uuid4
 
 from sqlalchemy import or_, text
@@ -549,7 +549,8 @@ def _read_base_range(
 def _enforce_finalized_write_guard(
     session: Session, concept_id: int, entity_type: str, entity_id: int,
     granularity: str, existing: Iterable, *, correction: bool,
-    reason: Optional[str],
+    reason: Optional[str], incoming: Optional[Mapping] = None,
+    incoming_unit: Optional[str] = None,
 ) -> None:
     """定型写闸：拒绝改写已定型的**已有**观测。
 
@@ -564,6 +565,11 @@ def _enforce_finalized_write_guard(
 
     概念级的窗口声明非法时 `resolve_window` 抛错，这里**不吞**：静默退化为默认会让
     "声明了却没生效"变成一个看不见的坑。
+
+    ``incoming``（date → 即将写入的值）把「写入同样的值」排除在「改写」之外：
+    at-least-once 重投递会把**一模一样**的一条再落一次，那不是修订，是幂等。
+    没有这条，崩后重投递会在定型窗口内抛 `FinalizedObservationError`，
+    消息永远拿不到 ack —— 2026-11-11 实测 `test_redelivery_is_idempotent` 因此红。
     """
     if correction and not (reason or "").strip():
         raise FinalizedObservationError(
@@ -575,6 +581,11 @@ def _enforce_finalized_write_guard(
     concept = session.get(_Concept, concept_id) if session is not None else None
     window = resolve_window(granularity, concept)
     for obs in existing:
+        if incoming is not None and obs.date in incoming:
+            # 值（与单位）都没变：这是重投递，不是改写
+            if (str(obs.value) == str(incoming[obs.date])
+                    and (incoming_unit is None or obs.unit == incoming_unit)):
+                continue
         if is_finalized(getattr(obs, "date", None), granularity, window):
             blocked.append((concept_id, entity_type, entity_id,
                             obs.date, granularity))
@@ -642,17 +653,19 @@ def write_cache(
         _enforce_finalized_write_guard(
             session, concept_id, entity_type, entity_id, granularity, [obs],
             correction=correction, reason=reason,
+            incoming={date: value}, incoming_unit=unit,
         )
         # 每一次覆写都必须留痕，不只是 correction。此前 `write_cache` 从不写修订行，
         # 于是单点刷新（`read` 的活路径）覆盖掉的旧值永久消失——as-of 回放对这类点
         # 只能判 `vintage_unavailable`。这是 `define-ingest-revision-and-coverage` R1
         # 要求「定型前修订 MUST 留痕」在单点写路径上的缺口，本 change 一并补上。
-        session.add(ObservationRevision(
-            concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
-            date=date, granularity=granularity, source_used=source_used,
-            revision_kind="overwrite", old_value=obs.value, new_value=value,
-            reason=reason, revised_at=now,
-        ))
+        if str(obs.value) != str(value) or obs.unit != unit:
+            session.add(ObservationRevision(
+                concept_id=concept_id, entity_type=entity_type, entity_id=entity_id,
+                date=date, granularity=granularity, source_used=source_used,
+                revision_kind="overwrite", old_value=obs.value, new_value=value,
+                reason=reason, revised_at=now,
+            ))
         obs.value = value
         obs.unit = unit
         obs.fetched_at = now
@@ -926,6 +939,7 @@ def write_cache_range(
         [existing[d] for d in rows if d in existing],
         correction=bool((revision_reason or "").strip()),
         reason=revision_reason,
+        incoming=rows, incoming_unit=unit,
     )
     now = datetime.now(timezone.utc)
     inserted, touched = [], []
@@ -942,6 +956,12 @@ def write_cache_range(
             inserted.append(d)
         else:
             new_value = str(value)
+            if str(obs.value) == new_value and obs.unit == unit:
+                # 幂等重写（at-least-once 重投递）：旧值与新值相同，没有"改了什么"
+                # 可回答。写一条 old==new 的修订行会让 as-of 回放看到不存在的变更。
+                obs.fetched_at = now
+                touched.append(d)
+                continue
             if revision_batch_id is None:
                 # 单点修订：旧值必须留下，否则"改了什么"无从回答。
                 session.add(ObservationRevision(
