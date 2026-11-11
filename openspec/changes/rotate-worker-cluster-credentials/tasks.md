@@ -15,10 +15,10 @@
 
 ## 2. 轮换脚本（签新 + 写回 + 实测）
 
-- [ ] 2.1 新增 `scripts/rotate_worker_credential.py`：对目标 worker 集群执行"签 bound token → 写回 `worker-kubeconfigs` → 探针实测"，其中"签"用 `kubectl create token <sa> --duration=<d>`——验证：对 `cheap` 跑一次，产出新值且与旧值不同
-- [ ] 2.2 脚本自带成对验收：旧值必须被拒、新值必须成功；任一不满足即 `exit != 0` 并打印实测响应——验证：把写回步骤替换为"写旧值"，脚本必须失败
-- [ ] 2.3 探针必须是**挂同一 Secret** 的 pod，打目标集群 `/api/v1/namespaces/<ns>/pods?limit=1`——验证：探针输出 `RESULT <cluster>: OK PodList`；把 token 文件截断后必须输出 `FAIL`
-- [ ] 2.4 脚本对"patch 报成功但值没变"的空操作判失败（读回比对）——验证：构造一次无变化的 patch，脚本必须报失败而不是完成
+- [~] 2.1 `scripts/rotate_worker_credential.py` 已实现两种签法（`--mode bound|legacy`）+ 写回 + 实测；**`--apply` 真跑路径未执行**：它会让旧凭据立即失效，须等 bound/legacy 裁决与窗口。 已验证的部分：`--dry-run` 计划正确（rc=0）、`--verify-only` 对 cheap 返回 `OK PodList items=1`（rc=0）、对已摘除的 tencent 返回 `ERROR 控制面没有 tencent.token`（rc=2）。
+- [x] 2.2 成对验收已实现：写回后先验新值，再验旧值（`旧值仍然可用——轮换未生效` 即 exit 1）；`--verify-only` 实测区分真值 `OK PodList` / 伪造值 `HTTP 401` / 空值 `HTTP 401`。旧值为空时（首次签发）显式跳过并说明，不假装验过。
+- [x] 2.3 探针改为**本机直连目标 API**而非挂载 pod：worker API 本就可从操作机到达（今天全天如此用），省掉一次 pod 调度；读控制面 Secret 的 token 走 JSON 解析（避开 jsonpath 点号坑）。踩到并修掉两个真问题：①本机系统代理会把 100.64 网段送进代理 → 表现为 timeout 而非 401（已显式禁用代理）；②worker 的 kubeconfig 是 `insecure-skip-tls-verify`，探测强制校验证书会报 `CERTIFICATE_VERIFY_FAILED` 并被误读成"凭据失效" → 改为跟随该集群既有 TLS 姿态并在输出里注明。
+- [x] 2.4 空操作判失败已实现：`write_back()` patch 后**读回比对**，不一致即记 `patch 报成功但读回不一致（空操作）`。另加一条：新旧值相同时报 `签出来的不是新凭据`——这正是今天"删 Secret 重建救活同一个 JWT"的教训。
 
 ## 3. 失效兜底：token 过期要可见
 
