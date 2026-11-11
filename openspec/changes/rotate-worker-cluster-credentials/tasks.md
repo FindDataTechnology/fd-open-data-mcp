@@ -1,4 +1,4 @@
-> 剩 5 项被同一个裁决挡住（bound / legacy）。一页看完即可决定：**[DECISION.md](DECISION.md)**。
+> 剩 4 项（2.1 / 3.2 / 3.3 / 6.1）被同一个裁决挡住（bound / legacy）。一页看完即可决定：**[DECISION.md](DECISION.md)**。
 
 ## 1. 止血：把禁用集群的凭据从挂载 Secret 摘掉
 
@@ -47,7 +47,13 @@
 
 ## 5. 回归
 
-- [ ] 5.1 `clusters.enabled=t` 的集群全部派发一次成功——验证：故意触发一轮派发，`launched` 非空且对应 Job 在该 worker 集群上 `Complete`
+- [x] 5.1 `clusters.enabled=t` 的集群全部派发一次成功——验证：故意触发一轮派发，`launched` 非空且对应 Job 在该 worker 集群上 `Complete`
+  不必等窗口，**轮换之后生产自己派发过**：SA 重建于 `2026-11-11T05:33:19Z`（`kubectl get sa crawl-worker -o jsonpath={.metadata.creationTimestamp}`），
+  之后 `policy_runs` 2351（p3）`status=success`、`cluster_id=9`（cheap）、`job_ref=cheap/crawl-policy-3-20261111065208`（06:52:04Z 起跑），
+  该 Job 在 cheap 上 `succeeded=1`。即"读新 token → 拼 kubeconfig → 建 Job → 跑完 → 回写 run"整条链在新凭据下通。
+  另有 2352（p5）仍在跑，`job_ref` 同样非空——不是"没活可派"的空绿。
+  另用 `ClusterK8sClient`（与 reconciler 同一份代码）单独打了一轮探针：create Job → `job_status=success` → pod 日志 `CRED_PROBE_OK` → delete。
+  该探针**严格校验证书**（`ssl.create_default_context(cafile=<cluster>.ca)`），所以同时证明 `cheap.ca` 是对的。
 - [x] 5.2 `enabled=f` 的集群不再被选中——验证：调度日志中不出现这些集群名
   强于"日志里没出现"：`pick_cluster()` 是 `session.query(Cluster).filter_by(enabled=True)` 的**硬过滤**（不是排序剔除），所以非启用集群连候选集都进不去。
   DB 实测：`clusters` 4 行 / `enabled` 1 行 / 候选集 = `cheap`；近 2 天 `policy_runs` 按集群聚合：`cheap(t)` 22 次，其余 0 次。
@@ -59,3 +65,40 @@
 ## 6. 收口
 
 - [ ] 6.1 归档——验证：`openspec archive rotate-worker-cluster-credentials --yes --strict` 成功
+
+
+## 7. 验证 5.1 时撞出来的两个相邻缺陷（不在本 change 的需求范围内）
+
+不是本 change 引入的，也不是 bound/legacy 能解决的；记在这里是因为它们都在
+"派发这条路"上，而 5.1 的验证必须走这条路，不记就会丢。
+
+### 7.1 已修：`cancel` 只改库不停 pod（RBAC 缺 `delete jobs`）
+
+- 现象：用真实 `ClusterK8sClient` 建 Job 后调 `delete_job` → `HTTP 403 Forbidden`。
+- 根因：`ClusterRole/crawl-worker` 只授了 `create,get,list`（`fd-proxy-service/k8s/crawl-worker-sa.yaml`，
+  注释还写着"needs exactly … Nothing else"），而 `runs.py:79` 取消时确实调 `launcher.delete(job_ref)`。
+- 为什么没被发现：`runs.py:80` 把异常吞了只记日志，返回 `job_deleted=false`，行状态照样是 `cancelled`
+  ——面板看起来完全正常。`ttlSecondsAfterFinished` 只回收**已结束**的 Job，所以被取消的那个会继续爬到
+  `activeDeadlineSeconds`，期间继续写 master 库。
+- 修法：给该 ClusterRole 的 jobs 加 `delete`（`fd-proxy-service` 提交 `4d123ef`，已推 origin/gitee，
+  两个远端 sha 一致）；线上 `cheap` 用 `kubectl patch clusterrole --type=json` 落并读回。
+  扩大面可忽略：`create jobs` 本来就能跑任意容器。
+- 验证：同一探针 create → `success` → 日志 `CRED_PROBE_OK` → `delete_job=True` → 读回 `404`。
+- 留下的后续（未做）：这份是 ClusterRole+ClusterRoleBinding（全集群生效），而 reconciler 只在
+  `clusters.namespace`（scraw）动作，改成命名空间级 Role 能收窄爆炸半径。
+
+### 7.2 未修，建议单开一个 change：读超时会留下"没人认领的 Job"
+
+- 证据（本机 UTC，`clusters` 全部时间戳都是 UTC）：
+  - `policy_runs` 2347（p2487）`status=failed`、`cluster_id=NULL`、`job_ref=NULL`，
+    `detail='launch failed: The read operation timed out'`，起于 `06:37:04Z`。
+  - 同一策略的 Job `crawl-policy-2487-20261111063707` 在 cheap 上 `succeeded=1`（`startTime 06:37:54Z`）。
+    Job 名字里的 `063707` 是构造清单的时刻 ⇒ **POST 已经把 Job 建出来了**，客户端等响应等到
+    30s 读超时才放弃。
+- 对照：同一轮里 2350（p2）是 `detail='launch failed: <urlopen error _ssl.c:994: the handshake operation timed out>'`，
+  那是连接都没建立，**确实没执行**。两种超时的语义完全不同，代码却都落成"launch failed + job_ref=NULL"。
+- 后果：数据其实落了库，run 却记 `failed` 且没有 `job_ref`；下一周期同窗口会再跑一遍（重复抓取/覆盖写），
+  而那个 Job 在面板上不可见、不可取消。
+- 建议做法（不要照抄，先设计）：`launch` 的超时分支里按 `<cluster>/<jobname>` 回合核对一次
+  Job 是否已存在，存在就把 `job_ref` 补上并标 `running`；只有握手类失败才可安全判 failed。
+  这件事需要一个新 change（例如 `reconcile-lost-response-launch`），本 change 不夹带。
