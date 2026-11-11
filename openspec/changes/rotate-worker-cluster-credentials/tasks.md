@@ -297,3 +297,34 @@
   另用一个一次性 pod 确认投递通道已配置（`ServerChanNotifier token_len 34`），**没有真的发消息**。
 - 口径提醒：这个 Job 只**告警**，从不刷新——刷新需要 `create serviceaccounts/token`，
   控制面凭据故意没有（见 `.github/workflows/refresh-worker-credentials.yml` 头部）。
+
+### 3.2 的递归问题（已知残留，写清楚免得当成"已经安全了"）
+
+到期告警那条 CronJob（`fd-master/worker-credential-expiry`）**自己也无人监视**：
+
+- `ops-console` 的 `WATCH_CRONJOBS` 只读 **cheap-ts 的 `fd-prod`** 命名空间
+  （`WATCH_NAMESPACE` 未设 → 默认 `fd-prod`，取 `/apis/batch/v1/namespaces/fd-prod/cronjobs`），
+  而这条 CronJob 在 **xinru 的 `fd-master`**。所以**不能**把它加进 `WATCH_CRONJOBS`——
+  加了它只会永远显示 `missing: true`，变成一条永久假红（比不监视更坏）。
+- 现状：它若连续失败，只有 `failedJobsHistoryLimit: 3` 里的 Job 记录，没人看。
+  也就是说这是一条**没人看的 dead-man switch**。
+- 但这是**净改进**而不是回归：在此之前根本没有任何到期提醒。它失败的结果等于"回到今天的样子"，
+  不会比现在更糟。
+- 真要闭环，下一步应二选一（都需要发版或跨集群监视）：
+  ① 把寿命检查折进 `visibility.scan`（`crawl-watcher-scan` 每 15 分钟、已有微信通道，
+     且是团队已经在看的告警路径）；② 给 xinru 侧加一个被监视的载体（如把心跳写进库，
+     由 coverage-expander/scan 检查"最近一次成功"）。
+
+### 上线路径已演练过（发版那天是机械操作，不是探索）
+
+在 `origin/main`（`47b8d74`）上依次合入两条分支做了 dry-run：
+
+- `spec/worker-cluster-credential-lifecycle` → **无冲突**
+- `spec/reconcile-lost-launch-response` → **无冲突**（自动合并了 `reconciler.py`）
+
+版本号现值 `fd_open_data_mcp/__init__.py: __version__ = "0.5.61"`，与线上镜像一致。
+所以发版只剩三步：合两条分支 → 把 `__version__` 抬到 `0.5.62` → 推 `v0.5.62` tag。
+
+**仍未做，且不该由我单方面做**：`origin/main` 上已含**另一个会话**在办的留存契约改动
+（`47b8d74` 等）。从它出发布线，会把别人在途的特性一并发到公共 PyPI，而 PyPI 版本号不可复用。
+需要用户明确一句：是把 main 当前状态作为 0.5.62 发出去，还是等那条线收口。
