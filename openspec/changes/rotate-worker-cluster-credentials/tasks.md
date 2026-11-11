@@ -1,3 +1,5 @@
+> 剩 5 项被同一个裁决挡住（bound / legacy）。一页看完即可决定：**[DECISION.md](DECISION.md)**。
+
 ## 1. 止血：把禁用集群的凭据从挂载 Secret 摘掉
 
 - [x] 1.1 从 `xinru/fd-mcp/worker-kubeconfigs` 移除非启用集群的凭据——验证：`/kubeconfigs` 下不再出现这些文件；`clusters` 表不变
