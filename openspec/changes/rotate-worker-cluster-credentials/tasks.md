@@ -46,7 +46,10 @@
 ## 5. 回归
 
 - [ ] 5.1 `clusters.enabled=t` 的集群全部派发一次成功——验证：故意触发一轮派发，`launched` 非空且对应 Job 在该 worker 集群上 `Complete`
-- [ ] 5.2 `enabled=f` 的集群不再被选中——验证：调度日志中不出现这些集群名
+- [x] 5.2 `enabled=f` 的集群不再被选中——验证：调度日志中不出现这些集群名
+  强于"日志里没出现"：`pick_cluster()` 是 `session.query(Cluster).filter_by(enabled=True)` 的**硬过滤**（不是排序剔除），所以非启用集群连候选集都进不去。
+  DB 实测：`clusters` 4 行 / `enabled` 1 行 / 候选集 = `cheap`；近 2 天 `policy_runs` 按集群聚合：`cheap(t)` 22 次，其余 0 次。
+
 - [ ] 5.3 `openspec validate rotate-worker-cluster-credentials --strict` 通过——验证：返回 valid
 
 ## 6. 收口
