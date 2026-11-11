@@ -172,19 +172,24 @@ def coverage(
     # 于是按年的序列（本项目多数宏观数据就是按年）第一个日期就抛
     # `ValueError: not enough values to unpack`，异常被上层吞成
     # "coverage unknown"，每一读都降级却没人看得见（11-11 实测 test_read_series 两条红）。
-    whole_spans = [sp for sp in (_span_of(d) for d in whole) if sp]
-    if not whole_spans:
-        # 所有日期都摆不到日历上（LATEST 哨兵、垃圾值）：位置未知，按空算。
-        return Coverage(None, None, (), ((start, end),))
-    span_start = min(sp[0] for sp in whole_spans)
-    span_end = max(sp[1] for sp in whole_spans)
-
-    gaps: list[tuple[str, str]] = []
+    # 「探过为空」必须先收进来：没有任何观测时，它与「从未取过」唯一的分界就是这份申报。
+    # （此前把它放在 span 计算之后，于是无观测的那一档会把它一起丢掉，
+    #  两种状态变得不可区分 —— 11-12 组合回归时被
+    #  test_knowledge_surface_integrity 的两条用例抓住。）
+    known: list[tuple[str, str]] = []
     for lo, hi in known_empty:
         clipped = (max(lo, win_lo), min(hi, win_hi))
         if clipped[0] <= clipped[1]:
-            gaps.append(clipped)
-    known = gaps[:]
+            known.append(clipped)
+    gaps: list[tuple[str, str]] = known[:]
+
+    whole_spans = [sp for sp in (_span_of(d) for d in whole) if sp]
+    if not whole_spans:
+        # 所有日期都摆不到日历上（LATEST 哨兵、垃圾值）：位置未知，按空算。
+        return Coverage(None, None, (), tuple(_merge_intervals(gaps)),
+                        tuple(_merge_intervals(known)))
+    span_start = min(sp[0] for sp in whole_spans)
+    span_end = max(sp[1] for sp in whole_spans)
 
     # Outer stretches: 第一/最后一个观测**代表**的区间之外，才是真的没覆盖。
     if span_start > win_lo:

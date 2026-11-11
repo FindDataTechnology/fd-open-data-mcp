@@ -327,3 +327,21 @@ def test_year_series_partial_window_is_noted(session, concept):
     assert out["coverage"]["missing"] == [["2018-01-01", "2018-12-31"],
                                           ["2022-01-01", "2022-12-31"]]
     assert "incomplete" in out["note"]
+
+
+def test_probed_empty_survives_when_there_are_no_observations(session, concept):
+    """没有任何观测时，「探过为空」必须仍然申报——否则与「从未取过」不可区分。
+
+    2026-11-12 组合回归：coverage() 把 known_empty 的收集挪到了 span 计算之后，
+    于是"无观测"那一档会把它整份丢掉，`unknown.fetchable` 与
+    `probed_empty.fetchable` 变成同一个值（`test_knowledge_surface_integrity`
+    的两条用例正是这么抓到的）。这里的用例守的是同一条边界。
+    """
+    from fd_open_data_mcp.fetch.coverage import coverage
+
+    cold = coverage([], "2026-01-01", "2026-01-10")
+    probed = coverage([], "2026-01-01", "2026-01-10",
+                      known_empty=[("2026-01-05", "2026-01-06")])
+
+    assert cold.known_empty == () and probed.known_empty == (("2026-01-05", "2026-01-06"),)
+    assert cold.fetchable != probed.fetchable
