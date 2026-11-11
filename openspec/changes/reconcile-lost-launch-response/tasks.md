@@ -49,3 +49,9 @@
 - [ ] 4.1 归档——验证：`openspec archive reconcile-lost-launch-response --yes --strict` 成功
 - [ ] 4.2 部署后观察一个周期：`policy_runs` 不再出现"detail 含 read timed out 但同名 Job 已 succeeded"的行
   （判据必须是**对照两侧**：既看 detail，也看 worker 上有没有同名 Job；只看日志会漏）
+- [ ] 4.3 上线（**未做，卡在对外动作上**）
+  线上 reconciler 是 `sha-5539dc5` = `fd_open_data_mcp 0.5.61`，本修复不在其中。
+  链路：推 `v*` tag → GitHub Actions 发**公共 PyPI**（不可逆，须用户点头）→ 重建 scraw 镜像
+  → 改 `crawl-reconciler` 的 image。
+  上线判据只认镜像内实测：`python -c "import fd_open_data_mcp; print(__version__)"` 为 0.5.62，
+  且 `grep -c adopt_job_if_present` 非零；不看 tag 名、不看 CI 绿灯。
