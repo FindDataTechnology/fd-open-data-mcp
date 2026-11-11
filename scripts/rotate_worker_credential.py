@@ -183,6 +183,23 @@ def write_back(cluster: str, token: str) -> list[str]:
     return problems
 
 
+def retire_legacy_token(cluster: str) -> int:
+    """删掉 worker 上的 legacy token Secret，让那把旧凭据真正失效。
+
+    legacy token 是**确定性**签发的：同名 Secret 重建会救活同一个 JWT。所以
+    "删掉"只在不再重建它的时候才算回收；这一点写进 help，免得有人当它是软操作。
+    """
+    ctx = WORKER_CTX.get(cluster, cluster)
+    cp = run(["kubectl", "--context", ctx, "-n", SA_NAMESPACE, "delete", "secret",
+              f"{SA}-token", "--ignore-not-found"])
+    if cp.returncode != 0:
+        print(f"ERROR 删 legacy token Secret 失败：{cp.stderr.strip()[:300]}",
+              file=sys.stderr)
+        return 1
+    print(f"已删除 {cluster}/{SA_NAMESPACE}/secret/{SA}-token（别再用同名 Secret 重建它）")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     ap = argparse.ArgumentParser(description="轮换并实测一个 worker 集群的派发凭据")
     ap.add_argument("--cluster", required=True, help="worker 集群名（如 cheap）")
@@ -192,7 +209,13 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--namespace", default=SA_NAMESPACE, help="派发目标命名空间")
     ap.add_argument("--dry-run", action="store_true", help="只打印计划，不改任何东西")
     ap.add_argument("--verify-only", action="store_true", help="只验当前值可用")
-    ap.add_argument("--apply", action="store_true", help="真跑（旧凭据会立即失效）")
+    ap.add_argument("--apply", action="store_true", help="真跑")
+    ap.add_argument(
+        "--retire-legacy",
+        action="store_true",
+        help=("仅 bound 模式：写完新 token 后删掉 worker 上的 legacy token Secret，"
+              "让那把旧凭据真正失效。**这会掐掉回滚路**——删之前控制面里已经存的是新 bound 值。"),
+    )
     ns = ap.parse_args(argv)
 
     if ns.dry_run or not (ns.verify_only or ns.apply):
@@ -206,7 +229,14 @@ def main(argv: list[str] | None = None) -> int:
             print(f"  3. kubectl --context {ctx} apply -f -   # Secret/{SA}-token")
         for n in CONTROL_NAMESPACES:
             print(f"  ·  kubectl --context {CONTROL_CTX} -n {n} patch secret {SECRET} --type=merge -p <{ns.cluster}.token>")
-        print("  ·  成对实测：旧值必须失败，新值必须在挂载点返回 PodList")
+        if ns.mode == "bound":
+            print("  ·  成对实测：新值必须在挂载点返回 PodList；"
+                  "旧 legacy 值仍然可用（加法，不是失败）")
+            if ns.retire_legacy:
+                print(f"  ·  --retire-legacy：删 {ctx} -n {SA_NAMESPACE} secret/{SA}-token，"
+                      "旧值随即失效（会掐掉回滚路）")
+        else:
+            print("  ·  成对实测：旧值必须失败（换了 SA UID），新值必须返回 PodList")
         if not ns.apply:
             print("DRY-RUN 未执行（加 --apply 才真跑）")
             return 0
@@ -252,16 +282,35 @@ def main(argv: list[str] | None = None) -> int:
 
     if old:
         old_ok, old_detail = api_probe(api, old, ca, ns.namespace, insecure)
-        print(f"旧值实测（期望失败）：{old_detail}")
-        if old_ok:
-            print("ERROR 旧值仍然可用——轮换未生效", file=sys.stderr)
-            return 1
+        if ns.mode == "legacy":
+            # legacy 轮换换了 SA UID，旧 JWT 必须当场失效。
+            print(f"旧值实测（期望失败）：{old_detail}")
+            if old_ok:
+                print("ERROR 旧值仍然可用——轮换未生效", file=sys.stderr)
+                return 1
+        else:
+            # bound 是**加法**：签的是另一个凭据，worker 上的 legacy token Secret
+            # 没动，所以旧值仍然可用——这不是失败，是设计。它只在删掉 worker 上的
+            # legacy token Secret 之后才失效（见 --retire-legacy）。
+            print(f"旧值实测（bound 模式下期望仍然可用）：{old_detail}")
+            if not old_ok:
+                print("提示：旧值已不可用——worker 上那把 legacy 凭据可能已被回收")
     else:
         print("旧值实测：无旧值（首次签发），跳过成对判定")
 
     if old and old.strip() == new.strip():
         print("ERROR 新旧值相同——签出来的不是新凭据", file=sys.stderr)
         return 1
+
+    if ns.retire_legacy and ns.mode == "bound":
+        rc = retire_legacy_token(ns.cluster)
+        if rc != 0:
+            return rc
+        old_ok, old_detail = api_probe(api, old or "", ca, ns.namespace, insecure)
+        print(f"回收后再测旧值（期望失败）：{old_detail}")
+        if old_ok:
+            print("ERROR 删了 legacy token Secret 旧值仍可用——回收未生效", file=sys.stderr)
+            return 1
 
     print("OK 轮换完成且成对验证通过")
     return 0

@@ -1,8 +1,21 @@
-# 待裁决：worker 凭据走 bound 还是 legacy
+# 裁决记录：worker 凭据走 bound（2026-11-11 已定并已执行）
 
-> 一页看完就能决定。背景与完整论证见 `proposal.md` 与
-> `docs/adr/0004-worker-cluster-credential-lifecycle.md`；操作步骤见
-> `docs/worker-credential-runbook.md`。
+**结论：bound。刷新在操作侧/CI 做，控制面不新增铸造权凭据。**
+
+用户 2026-11-11 授权我自行决定 3.3 的放置，并授权执行其余项。执行结果：
+
+- **2.1 已真跑**：`--mode bound --duration 720h --apply` 对 cheap 执行成功，
+  新值可用、旧 legacy 值仍可用（bound 是加法），两个 Secret 与挂载点都已是 `bound` 剩余 30 天，
+  并且用挂载点那把凭据真建了一个 Job 跑出 `BOUND_OK`。
+- **3.3 已落地**：`scripts/check_credential_refresh_ratio.py` + `.github/workflows/refresh-worker-credentials.yml`；
+  当前 寿命 720h / 间隔 168h = 倍数 4.3（要求 ≥ 3）。
+- **保留回滚路**：没有执行 `--retire-legacy`，旧 legacy 值仍然有效；
+  控制面 Secret 原值备份在 `~/finddata/secrets/sa-token-backup/before-bound-20261111T200010.json`。
+
+以下是当初的取舍论证，留作记录。
+
+> 背景与完整论证见 `proposal.md` 与 `docs/adr/0004-worker-cluster-credential-lifecycle.md`；
+> 操作步骤见 `docs/worker-credential-runbook.md`。
 
 ## 现在的事实（都是 2026-11-11 实测，不是推演）
 
@@ -34,7 +47,7 @@
 要上线必须走：推 `v*` tag → GitHub Actions 发 **公共 PyPI** → 重建 scraw 镜像 → 改两个 CronJob 的 image。
 第一步是对外且不可逆的（PyPI 版本号不可复用），**要你点头**才能按。
 
-## 要决定的事
+## 当初要决定的事
 
 凭据的**形态**。两种都已在 `scripts/rotate_worker_credential.py` 里实现
 （`--mode bound|legacy`），所以决定的是"默认用哪个 + 要不要那套配套"，不是能不能做。
@@ -46,9 +59,9 @@
 | 新增风险 | **到期静默失效**（若配套没做） | 无（也没有任何兜底） |
 | 配套要求 | 3.2 剩余寿命可见 + 3.3 刷新节奏（间隔 ≤ 寿命 1/3） | 一个手写手册 |
 | 3.2 现状 | ✅ 已做（健康面能读出寿命 / 剩余 / STALE） | ✅ 同一套（输出"永不过期，无兜底"） |
-| 3.3 的真实代价 | ⚠️ 见下：要一把**新的铸造权凭据** | 无额外凭据 |
+| 3.3 的真实代价 | ⚠️ 见下：签 token 需要铸造权 | 无额外凭据 |
 
-### 3.3 的卡点（2026-11-11 实测，不是推演）
+### 3.3 的卡点与解法（2026-11-11 实测 + 已定方案）
 
 ```
 $ kubectl auth can-i create serviceaccounts/token \
@@ -57,35 +70,46 @@ no
 （对照：create jobs / delete jobs / get jobs → 全是 yes）
 ```
 
-签 bound token 是 API server 的动作，需要铸造权。控制面握着的正是这个"能建能删 Job、
-不能签 token"的凭据，所以**自动刷新必须新增一个比今天更强的凭据**。最小可以只给到
-`resources: [serviceaccounts/token]` + `resourceNames: [crawl-worker]` + `verbs: [create]`
-（只这一个 SA、只这一个动作），但它仍然是一把**新的、常驻的、带铸造权的**凭据——要挂载、
-要轮换、要盯它自己会不会失效。
+签 bound token 是 API server 的动作，需要铸造权，而控制面握着的正是这个"能建能删 Job、
+不能签 token"的凭据。
 
-所以 bound 不是"免费的定期换新"：它把局面从「一把低权限长期 token」变成
-「一把低权限 token ＋ 一把铸造权凭据」。ADR 0004 当初没算这一项，这里补上。
+**采用的解法：不在控制面铸造。** 给控制面加一把最小铸造权凭据（
+`resources: [serviceaccounts/token]` + `resourceNames: [crawl-worker]`）技术上可行，
+但那样一来**那把凭据本身也得长期有效、也得被刷新**——问题只是往上挪一层，还多一把更强的
+常驻凭据。所以铸造改在集群外，用运维已有的 admin kubeconfig，只把签好的 token 写回 Secret。
+控制面永远只有一把低权限凭据。
 
-## 选 bound → 我接着做
+代价：刷新依赖外部定时器（`.github/workflows/refresh-worker-credentials.yml`，周一 03:17Z）。
+这个代价由 3.2 的 STALE 告警兜住——剩余寿命跌破 1/3 就先亮，比 401 早一个刷新周期。
 
-1. ~~**3.2** 剩余寿命可见~~ —— **已做**（`check_worker_credential_surface.py --json`）
-2. **3.3** 先定铸造权从哪来：最小授权的那把凭据（见上）由谁持有、挂在哪、谁轮换
-   定了之后我再写刷新 CronJob 与"间隔 ≤ 寿命 1/3"的断言
-3. **2.1** 在窗口内跑一次 `--apply`（**bound 是加法**：新 token 生效后旧 legacy 值仍可用，
-   直到你决定删掉那个 Secret——删之前我一直留着回滚路）
-4. **6.1** 归档（5.1 已用生产自己的一轮派发验完）
+## 已执行（不再是待办）
 
-## 选 legacy → 我接着做
+1. ✅ **3.2** 剩余寿命可见（`check_worker_credential_surface.py`，含 `--json`）
+2. ✅ **3.3** 刷新放在操作侧/CI；`check_credential_refresh_ratio.py` 断言 间隔 × 3 ≤ 寿命
+   （当前 720h / 168h = 4.3）
+3. ✅ **2.1** 真跑 `--apply --mode bound --duration 720h`：新值可用、旧值仍可用（加法），
+   两个 Secret + 挂载点均为 bound 剩余 30d，并用挂载点凭据真建 Job 跑出 `BOUND_OK`
+4. ⏳ **6.1** 归档 —— **有意延后**：3.1 等代码仍在分支上、线上仍是 0.5.61，
+   此刻归档等于把未上线行为写进主规格。顺序是 6.2 上线 → 观察一周期 → 再归档。
 
-1. **3.2 保留**（它输出的"永不过期"正是 legacy 的主要风险，删掉反而看不见了）；
-   只删 3.3
+## 回滚路（保留中）
+
+`--retire-legacy` 没有执行，worker 上那把 legacy token Secret 仍在，旧值仍可用。
+控制面 Secret 原值备份：`~/finddata/secrets/sa-token-backup/before-bound-20261111T200010.json`。
+要回滚就把 `cheap.token` 换回备份里的值；要彻底收口（让旧值真正失效）则跑
+`--retire-legacy`，那一步**会掐掉这条回滚路**。
+
+## 若当初选 legacy 会怎么做（留档，未走这条）
+
+1. **3.2 保留**（它输出的"永不过期"正是 legacy 的主要风险，删掉反而看不见了）；只删 3.3
 2. 在 ADR 里把"legacy 同样会静默失败（别人删 Secret 时会 401 而 Job 看似正常）"
    写成**已知残留**，而不是当成优点
-3. **2.1** 跑一次 `--apply --mode legacy`，**6.1** 同上
+3. `--apply --mode legacy`（换 SA UID，会当场打断派发，需要窗口）
 
-## 一句回答就够
+## 一句话背景：为什么不需要窗口
 
-回 `bound` 或 `legacy`。若选 bound，再给我一个可以打断派发的窗口（几分钟）。
+bound 是**加法**——签的是另一把凭据，worker 上那把 legacy token Secret 没动，
+所以旧值照常可用，不存在"旧凭据立即失效"的中断。要窗口的是 legacy 那条路（换 SA UID）。
 
 ## 与本次裁决无关、已可用的东西
 

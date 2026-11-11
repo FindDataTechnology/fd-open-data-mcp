@@ -1,4 +1,6 @@
-> 剩 4 项（2.1 / 3.2 / 3.3 / 6.1）被同一个裁决挡住（bound / legacy）。一页看完即可决定：**[DECISION.md](DECISION.md)**。
+> 裁决已定（2026-11-11）：**走 bound**，刷新放操作侧/CI，控制面不新增铸造权凭据。
+> 2.1 已真跑并验证（含一次真实 Job 端到端）。剩 6.1 归档与 6.2 上线。
+> 背景与取舍见 **[DECISION.md](DECISION.md)**。
 
 ## 1. 止血：把禁用集群的凭据从挂载 Secret 摘掉
 
@@ -17,7 +19,27 @@
 
 ## 2. 轮换脚本（签新 + 写回 + 实测）
 
-- [~] 2.1 `scripts/rotate_worker_credential.py` 已实现两种签法（`--mode bound|legacy`）+ 写回 + 实测；**`--apply` 真跑路径未执行**：它会让旧凭据立即失效，须等 bound/legacy 裁决与窗口。 已验证的部分：`--dry-run` 计划正确（rc=0）、`--verify-only` 对 cheap 返回 `OK PodList items=1`（rc=0）、对已摘除的 tencent 返回 `ERROR 控制面没有 tencent.token`（rc=2）。
+- [x] 2.1 `scripts/rotate_worker_credential.py` 已实现两种签法（`--mode bound|legacy`）+ 写回 + 实测；**`--apply` 真跑路径**于 2026-11-11 对 cheap 执行（`--mode bound --duration 720h`）
+  **走的是 bound，不是 legacy**：bound 是**加法**——签的是另一把凭据，worker 上那把 legacy
+  token Secret 没动，所以旧值仍然可用；不存在"旧凭据立即失效"的中断，也就不需要窗口。
+  （legacy 换 SA UID 会当场打断全部派发，那才需要窗口。）
+  执行前先把控制面 Secret 原值备份到 `~/finddata/secrets/sa-token-backup/before-bound-20261111T200010.json`
+  （`cheap.token` len 906 / sha256 前 12 位 `edd64fbf6765`），保留回滚路。
+  成对实测：新值 `OK PodList items=1`；旧值 `OK PodList items=1`（bound 模式下**期望**
+  仍然可用，脚本已按模式区分判定；见下面"顺手修掉的自身 bug"）。
+  落地确认：`fd-master` / `fd-mcp` 两个 Secret 与 fd-panel pod 的挂载点
+  `/kubeconfigs/cheap.token` 解出来都是 `bound`、剩余 30.0 天（kubelet 同步约 75s 后生效）。
+  3.2 的健康面现在读作 `cheap enabled=true mounted=yes bound 寿命 30.0d，剩余 30.0d`，rc=0。
+  **真派发复核**（不是只打只读 API）：用挂载点的值走 `ClusterK8sClient` 建一个 echo Job
+  → `state=success`、日志 `BOUND_OK`、`delete=True`。
+  中途一次 `deadline_exceeded` 是**探针设置问题**，不是凭据问题：`activeDeadlineSeconds=60`
+  撞上 469MB 镜像拉取 67.5s（事件里 `Pulled ... in 1m7.553s` 之后 13s 就被 `Killing`）；
+  同一条探针把截止时间放到 300s 后一次通过。记在这里，免得后人把那次红读成"bound 不可用"。
+  **顺手修掉的自身 bug**：脚本原来无条件断言"旧值必须失败"，这在 legacy 模式对、在 bound
+  模式错——照原样跑 2.1 会误报"轮换未生效"并 rc=1。已改成按模式判定，并新增
+  `--retire-legacy`（仅 bound；删 worker 上的 legacy token Secret，让旧值真正失效，
+  help 里写明**这会掐掉回滚路**）。本次**没有**执行 `--retire-legacy`：留着旧值当回滚路，
+  等 bound 这条路跑一段时间再收。
 - [x] 2.2 成对验收已实现：写回后先验新值，再验旧值（`旧值仍然可用——轮换未生效` 即 exit 1）；`--verify-only` 实测区分真值 `OK PodList` / 伪造值 `HTTP 401` / 空值 `HTTP 401`。旧值为空时（首次签发）显式跳过并说明，不假装验过。
 - [x] 2.3 探针改为**本机直连目标 API**而非挂载 pod：worker API 本就可从操作机到达（今天全天如此用），省掉一次 pod 调度；读控制面 Secret 的 token 走 JSON 解析（避开 jsonpath 点号坑）。踩到并修掉两个真问题：①本机系统代理会把 100.64 网段送进代理 → 表现为 timeout 而非 401（已显式禁用代理）；②worker 的 kubeconfig 是 `insecure-skip-tls-verify`，探测强制校验证书会报 `CERTIFICATE_VERIFY_FAILED` 并被误读成"凭据失效" → 改为跟随该集群既有 TLS 姿态并在输出里注明。
 - [x] 2.4 空操作判失败已实现：`write_back()` patch 后**读回比对**，不一致即记 `patch 报成功但读回不一致（空操作）`。另加一条：新旧值相同时报 `签出来的不是新凭据`——这正是今天"删 Secret 重建救活同一个 JWT"的教训。
@@ -40,13 +62,27 @@
   剩余值变化"（3.2 的原话验收）；②反向验证：把 `stale` 改成恒 False（最典型的假绿写法），
   两个用例真红；③**真实生产凭据**：拿 fd-mcp 挂载里的 cheap 真 token 跑 → `永不过期（legacy，无 exp）`，
   `--json` 里 `expires_at=null` —— 这个事实以前任何看板都看不到。
-- [ ] 3.3 CronJob 刷新节奏写进部署清单，且与 `--duration` 有明确倍数关系（刷新间隔 ≤ 寿命的 1/3）——验证：清单里的两个数值能被脚本读出来并断言满足比例
-  **被 3.2 的工作卡住，且卡点不是体力活**：签 bound token 要 `create serviceaccounts/token`，
-  而控制面握着的 worker 凭据明确没有这个动词（`kubectl auth can-i create serviceaccounts/token
-  --as=system:serviceaccount:scraw:crawl-worker -n scraw` → **no**；对照组 `create/delete/get jobs` → yes）。
-  所以"自动刷新"要么给控制面**新增一个比今天更强的凭据**（最小可给到
-  `resources: [serviceaccounts/token], resourceNames: [crawl-worker], verbs: [create]`），
-  要么退回"运维机/CI 手工签"。这不是清单里写两个数字就能解决的，须先定这件事——见 `DECISION.md`。
+- [x] 3.3 刷新节奏与 `--duration` 的倍数关系写进可执行物，且能被脚本读出来断言（刷新间隔 ≤ 寿命 1/3）
+  **裁决（用户 2026-11-11 授权我定）：不给控制面新增铸造权凭据，刷新放在操作侧/CI。**
+  理由：签 bound token 要 `create serviceaccounts/token`，而控制面握着的 worker 凭据明确没有
+  这个动词（`auth can-i create serviceaccounts/token --as=…/crawl-worker` → **no**；对照组
+  `create/delete/get jobs` → yes）。若为自动刷新给控制面加一把铸造权凭据，那把凭据本身也得
+  长期有效、也要被刷新——问题只是往上挪一层，还多一把更强的常驻凭据。
+  所以：控制面永远只有"能建删 Job"这一把；铸造在集群外用运维已有的 admin kubeconfig 完成，
+  只把签好的 token 写回 Secret。代价是刷新依赖外部定时器——而 3.2 的 STALE 告警就是它的眼睛
+  （剩余 < 1/3 时先亮，比 401 早一个刷新周期）。
+  落地三件：
+  - `scripts/check_credential_refresh_ratio.py`：寿命从轮换脚本的 `--duration` 默认值读，
+    间隔从工作流 cron 读，断言 `间隔 × 3 ≤ 寿命`。两个数字分居两个文件，正是它们会漂的原因。
+    当前实测：寿命 720h / 间隔 168h（`17 3 * * 1`）= **倍数 4.3**，OK。
+  - `.github/workflows/refresh-worker-credentials.yml`：每周一 03:17Z + `workflow_dispatch`
+    （可选 mode / dry_run）；从 DB 取 `enabled` 集群清单（不写死名单），逐个
+    `rotate_worker_credential.py --apply`，最后跑一次 `--report-only` 报寿命。
+  - `tests/test_credential_refresh_ratio.py` 8 个用例。
+  **解析器修掉一个真 bug**：第一版只看 hour 字段，把 `17 3 * * 1`（每周一）读成每 24h，
+  倍数因而显示 30 而不是 4.3 —— 一个把闸门悄悄放宽 7 倍的错误。现在日/周字段显式判定，
+  `1-5` / `1,3,5` / 月内某日 这类"间隔不固定"的形态一律返回 None（rc=2，不猜）。
+  反向验证：把 `judge()` 的 `ok` 写成恒 True → `test_verdict_rejects_a_too_long_interval` 真红。
 
 ## 4. 文档与裁决
 
@@ -82,6 +118,9 @@
 ## 6. 收口
 
 - [ ] 6.1 归档——验证：`openspec archive rotate-worker-cluster-credentials --yes --strict` 成功
+  **暂不归档，理由是判据**：本 change 里 3.1（401 归因）、派发缺陷修复等都还**只在分支上**，
+  线上仍是 `sha-5539dc5` / `0.5.61`。此时归档会把"还没有在线上成立的行为"写进主规格，
+  正是这个 change 一路在批的"声明了但没落地"。顺序应为：6.2 上线 → 观察一个周期 → 再归档。
 - [ ] 6.2 把 3.1 的代码送上线（**目前只在分支上**）——验证：线上镜像里 `WorkerCredentialError` 存在，
   且用伪造 token 触发一次派发能在日志里看到轮换命令
   链路：`git tag v0.5.62 && git push origin v0.5.62` → GitHub Actions `release.yml` 发**公共 PyPI**
