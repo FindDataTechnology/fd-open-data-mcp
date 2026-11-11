@@ -346,6 +346,17 @@ kubectl --context xinru -n fd-master delete cronjob worker-credential-expiry
 版本号现值 `fd_open_data_mcp/__init__.py: __version__ = "0.5.61"`，与线上镜像一致。
 所以发版只剩三步：合两条分支 → 把 `__version__` 抬到 `0.5.62` → 推 `v0.5.62` tag。
 
+复验记录（2026-11-11 晚，折进 scan 的两个提交之后）：两条分支已在 **GitHub 与 gitee 双推**
+（`spec/worker-cluster-credential-lifecycle` = `ff55e2c`，`spec/reconcile-lost-launch-response` = `1328905`），
+在 `origin/main`（`47b8d74`）上依次 `merge --no-commit` 仍**零冲突**，合并后的树上
+`test_scan_credential_expiry` + `test_scripts_resolve_repo_package` 12 条全绿，`__version__` 仍 `0.5.61`。
+
+> 复验方式本身踩过一个坑，记下来免得再犯：我先把 `tmp/cred-fold` 直推到
+> `refs/heads/spec/worker-cluster-credential-lifecycle`，**本地同名分支没跟着动**
+> （仍停在 `1844dc2`）。于是随后在本地做的"合并演练"合的是旧代码，还报"零冲突"——
+> 那是**假绿**。判据不能只看"合并成功"，要看合并出来的文件清单里是否真有新文件。
+> 修法：`git branch -f <branch> <sha>` 之后再演练，或始终从远端 ref 演练。
+
 **仍未做，且不该由我单方面做**：`origin/main` 上已含**另一个会话**在办的留存契约改动
 （`47b8d74` 等）。从它出发布线，会把别人在途的特性一并发到公共 PyPI，而 PyPI 版本号不可复用。
 需要用户明确一句：是把 main 当前状态作为 0.5.62 发出去，还是等那条线收口。
