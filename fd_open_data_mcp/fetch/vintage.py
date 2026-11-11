@@ -304,8 +304,36 @@ def read_range_as_of(
             "vintage_status": res.status,
         })
 
+    # 被留存策略淘汰的点：它们不在 `rows` 里（已搬进隔离表），若不单独查，
+    # 回放结果会把"曾经有、按契约删了"与"从来没有"混成同一件事。
+    evicted = load_evicted_points(
+        session, concept_id, entity_type, entity_id, start, end)
+    if evicted:
+        # 去重要用「库里现存的点」，不是 `details`——details 只装回放失败的点，
+        # 现存的点大多能回放、不会出现在里面。
+        present = {row.date for row in ordered}
+        for d, info in sorted(evicted.items()):
+            if d in present:
+                continue      # 现存行优先：还在库里的点按正常回放判
+            window = retention_window_note(session, concept_id,
+                                           info.get("source_used") or "")
+            res = ReplayResult(
+                None, VINTAGE_UNAVAILABLE,
+                detail=("该点曾被覆盖，后按留存策略淘汰（"
+                        f"批次 {info.get('batch_id')}，{info.get('reason') or 'retention'}）"
+                        + (f"；{window}" if window else "")
+                        + "；不再返回数值，且不等同于「从未覆盖」"),
+                batch_id=info.get("batch_id"),
+            )
+            results.append(res)
+            details.append({"date": d, "status": res.status,
+                            "detail": res.detail, "batch_id": res.batch_id,
+                            "evicted": True})
+
     summary = summarize(results)
     summary["skipped"] = len(results) - len(values)
+    summary["evicted_by_retention"] = sum(
+        1 for x in details if x.get("evicted"))
     return {
         "as_of_vintage": as_of.isoformat() if as_of else None,
         "values": values,
@@ -313,3 +341,63 @@ def read_range_as_of(
         "vintage": summary,
         "details": details,
     }
+
+
+EVICTED = "evicted_by_retention"
+
+
+def load_evicted_points(
+    session, concept_id: int, entity_type: str, entity_id: int,
+    start: str, end: str,
+) -> dict[str, dict]:
+    """取「曾被覆盖、后来按留存契约淘汰」的点（从隔离表读）。
+
+    为什么必须单独查：读路径只看现存行，被淘汰的点**根本不在结果里**——于是
+    "曾经有数据，按契约删了"与"从来没有覆盖过"在返回体里长得一模一样，下游无从区分。
+    `establish-data-retention-principle` R3 要求这两件事必须是两种返回体。
+
+    表不存在时返回空（单测的 sqlite 环境没有这张表），不抛——"查不到"不等于
+    "可以报 absent"，但这里连"曾淘汰"的依据都没有，只能让调用方按原样处理。
+    """
+    from sqlalchemy import text
+
+    sql = text("""
+        SELECT q.date, q.source_used, q.batch_id, q.reason, q.quarantined_at
+          FROM semantic_observations_quarantine q
+         WHERE q.concept_id = :cid
+           AND q.entity_type = :et
+           AND q.entity_id = :eid
+           AND q.date BETWEEN :start AND :end
+           AND q.batch_id IS NOT NULL
+    """)
+    try:
+        rows = session.execute(sql, {
+            "cid": concept_id, "et": entity_type, "eid": entity_id,
+            "start": start, "end": end,
+        }).all()
+    except Exception:  # noqa: BLE001 - 隔离表可能在当前库不存在
+        return {}
+    out: dict[str, dict] = {}
+    for r in rows:
+        out.setdefault(str(r[0]), {
+            "source_used": r[1], "batch_id": r[2], "reason": r[3],
+            "quarantined_at": r[4],
+        })
+    return out
+
+
+def retention_window_note(session, concept_id: int, source_used: str) -> Optional[str]:
+    """该 (概念, 源) 的留存窗口，用于在返回体里说明"为什么这个点不在"。"""
+    try:
+        from fd_open_data_mcp.fetch.retention import family_of, resolve_contract
+        from fd_open_data_mcp.models import Concept
+
+        concept = session.get(Concept, concept_id)
+        if concept is None:
+            return None
+        contract = resolve_contract(session, source_used, family_of(concept.code))
+        if contract is None or not contract.retention_window_days:
+            return None
+        return f"该源留存策略 {contract.retention_class}/{contract.retention_window_days} 天"
+    except Exception:  # noqa: BLE001
+        return None

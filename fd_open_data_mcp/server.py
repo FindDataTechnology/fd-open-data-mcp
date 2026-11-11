@@ -1568,6 +1568,14 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
                     f"{asof['vintage']['vintage_unavailable']} / 当时不存在 "
                     f"{asof['vintage']['absent']}；不可回放的点未返回数值"
                 )
+            if asof["vintage"].get("evicted_by_retention"):
+                # 「曾覆盖但按留存策略淘汰」≠「从未覆盖」——必须在返回体里说清楚，
+                # 否则下游会把"这段序列被裁过"读成"这个源本来不覆盖这里"。
+                out["note"] = (
+                    (out.get("note") + "；" if out.get("note") else "")
+                    + f"{asof['vintage']['evicted_by_retention']} 个点曾覆盖，"
+                    "已按留存策略淘汰（见 vintage_details 中 evicted=true）"
+                )
             if resolved:
                 scoping.record_hit(s, resolved["name"], out["count"])
             return out
