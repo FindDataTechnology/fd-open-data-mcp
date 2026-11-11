@@ -148,5 +148,25 @@
   （挂在 `/opt/fd-scripts`，装的是所有 `executor=direct` 策略的脚本源）。
   谁拿那份注解 apply 一次，四条 direct 策略当场全挂（`_read_script` 抛 `FileNotFoundError`）。
   已把 live 对象整理成 `k8s/fd-master/10-crawl-reconciler.yaml` 入库（忠实记录，含那句"先 diff 再 apply"）。
-- 未做：`crawl-watcher-digest` / `crawl-watcher-scan` / `fd-proxy-probe` / `coverage-expander`
-  同样没有清单，同样有这个风险。
+  另外 4 个 CronJob 同样没有真源、`last-applied-configuration` 同样过期，一并入库：
+  `20-coverage-expander.yaml` / `30-crawl-watcher-scan.yaml` / `40-crawl-watcher-digest.yaml`
+  / `50-fd-proxy-probe.yaml`。它们各自的注解还指着**已退役的 registry**（`harbor.local/…:latest`、
+  `100.64.0.8:30880/…:sha-d1c7a78`），拿注解 apply 一次就会把镜像回滚到拉不到的地方。
+
+### 7.4 已修：`coverage-expander` 把 `DC_API_KEY` 明文写在 env 里
+
+- 现象：`fd-master/coverage-expander` 的 env 里 `DC_API_KEY` 是**字面值**（48 字符），
+  而兄弟 CronJob `crawl-reconciler` 用的是 `secretKeyRef → dc-api-key/DC_API_KEY`。
+  这把 key 一直摆在 pod spec 里，任何能 `get cronjob` / `get pod` 的人都能读到。
+- 先确认是不是同一把再动手（只比指纹，不打印值）：Secret 里 `DC_API_KEY` 与列表里那个字面值
+  **len 48、sha256 前 12 位 `8f23570c25fd`，完全相同** ⇒ 纯重复，不是两把不同的 key。
+- 修法：`kubectl patch --type=json` 把 env[0] 换成 `valueFrom.secretKeyRef{name: dc-api-key,
+  key: DC_API_KEY}`。读回：字面值消失，其余 16 条 env / 镜像 / 卷 / schedule / concurrency 均未变。
+- 验证：`coverage-expander` 是 10 分钟一跳（`3,13,23,33,43,53`）。等 `11:03Z` 那一跳落地，
+  `lastSuccessfulTime=11:03:06Z`、pod `Completed` ⇒ Secret 引用解析成功
+  （解析不了会是 `CreateContainerConfigError`，不是 Completed）。
+- **未做：轮换这把 key**。我无法在 datacommons 侧铸新 key。定级：它曾以明文存在于集群对象里，
+  读取门槛是"有 fd-master 读权限"，比公开仓低得多；但本 change 就是讲凭据卫生，
+  建议由持有该账号的人换一把——**换时只改 `dc-api-key` Secret 一处**，两个消费者现在都走引用。
+- 附带一句实话：我为了比对把它打印进过本会话的工具输出。推之前已对入库清单做明文体检
+  （`grep -E "value: [A-Za-z0-9+/=_-]{24,}"`），`k8s/fd-master/` 下无任何明文长值。

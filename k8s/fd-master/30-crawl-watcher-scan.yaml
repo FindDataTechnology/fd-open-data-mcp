@@ -1,0 +1,78 @@
+# CANONICAL RECORD of the fd-master/crawl-watcher-scan CronJob — generated from the LIVE
+# object on 2026-11-11 (kube context xinru). Like its siblings this CronJob was
+# applied ad hoc and no repo tracked it, so the object's own
+# `last-applied-configuration` annotation is the only other record — and it is
+# STALE (it still names a retired registry / older image). Re-applying from that
+# annotation would silently roll this CronJob back.
+#
+# Regenerate / check for drift:
+#   kubectl --context xinru -n fd-master get cronjob crawl-watcher-scan -o yaml
+#   # diff the `spec` block against this file
+#
+# Secret values are references only (secretKeyRef) — nothing sensitive is inlined.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  labels:
+    app: crawl-watcher
+    component: scan
+  name: crawl-watcher-scan
+  namespace: fd-master
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata: {}
+    spec:
+      template:
+        metadata: {}
+        spec:
+          containers:
+          - command:
+            - python
+            - -m
+            - fd_open_data_mcp.visibility.scan
+            env:
+            - name: FD_OPEN_DATA_MCP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: fd-db-secret
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_URL
+                  name: fd-db-secret
+            - name: SCRAW_NOTIFIER
+              value: wechat
+            - name: SCRAW_WATCHER_SCT_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  key: SCRAW_WATCHER_SCT_TOKEN
+                  name: crawl-watcher-secret
+            - name: SCRAW_STALE_MINUTES
+              value: '90'
+            - name: PYTHONUNBUFFERED
+              value: '1'
+            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-416737f
+            imagePullPolicy: IfNotPresent
+            name: watcher-scan
+            resources:
+              limits:
+                cpu: 500m
+                memory: 512Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+            terminationMessagePath: /dev/termination-log
+            terminationMessagePolicy: File
+          dnsPolicy: ClusterFirst
+          imagePullSecrets:
+          - name: fd-harbor-pull
+          restartPolicy: OnFailure
+          schedulerName: default-scheduler
+          securityContext: {}
+          terminationGracePeriodSeconds: 30
+  schedule: 10,25,40,55 * * * *
+  successfulJobsHistoryLimit: 3
+  suspend: false
