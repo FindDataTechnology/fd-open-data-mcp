@@ -93,7 +93,7 @@
   + `grep -c WorkerCredentialError`（前者 0.5.62、后者非零），不看 tag 名、不看 CI 绿灯。
 
 
-## 7. 验证 5.1 时撞出来的两个相邻缺陷（不在本 change 的需求范围内）
+## 7. 验证 5.1 时撞出来的相邻缺陷（不在本 change 的需求范围内）
 
 不是本 change 引入的，也不是 bound/legacy 能解决的；记在这里是因为它们都在
 "派发这条路"上，而 5.1 的验证必须走这条路，不记就会丢。
@@ -128,3 +128,25 @@
 - 建议做法（不要照抄，先设计）：`launch` 的超时分支里按 `<cluster>/<jobname>` 回合核对一次
   Job 是否已存在，存在就把 `job_ref` 补上并标 `running`；只有握手类失败才可安全判 failed。
   这件事需要一个新 change（例如 `reconcile-lost-response-launch`），本 change 不夹带。
+  **已另开并做完**：`openspec/changes/reconcile-lost-launch-response`（分支
+  `spec/reconcile-lost-launch-response`，`1328905`）；未上线，卡在公共 PyPI 发版。
+
+### 7.3 已修：同一份清单里写着两个镜像版本，且线上对象没有任何清单
+
+- 现象：`fd-master/crawl-reconciler` 的容器是 `scraw-fd-open-data-mcp:sha-5539dc5`，
+  而同一份 env 里 `SCRAW_K8S_IMAGE=…:sha-2302fbe`。`sha-2302fbe` 恰好是**已禁用**集群
+  （america/baidu）的镜像——舰队换成 cheap 之后这条 env 没跟着改。
+- 今天为什么不炸：`RECONCILER_LAUNCHER=k8s-multi` 走 `MultiClusterLauncher`，Job 镜像取
+  `clusters.image`（cheap=`sha-5539dc5`），根本不构造 `K8sJobLauncher`，所以那条 env 是惰性的。
+  地雷在"哪天有人切回 `RECONCILER_LAUNCHER=k8s`"——worker Job 会用上一个比集群里其它东西都旧的镜像。
+- 修法：`kubectl set env cronjob/crawl-reconciler` 改成 `sha-5539dc5`，读回三处一致
+  （容器 / env / `clusters.image`）。**只动 env**；我另外用 `last-applied-configuration` 逐字段对照过
+  concurrency / schedule / suspend / restartPolicy / serviceAccount / imagePullSecrets / volumes /
+  mounts / command / env 名单 / resources / image，均未变。
+- **顺带发现的更大地雷**：这个 CronJob 在**任何仓里都没有清单**，是当年 `kubectl apply` 上去的；
+  而它自己带的 `last-applied-configuration` 注解**比 live 对象少一个 `fd-scripts` ConfigMap 卷**
+  （挂在 `/opt/fd-scripts`，装的是所有 `executor=direct` 策略的脚本源）。
+  谁拿那份注解 apply 一次，四条 direct 策略当场全挂（`_read_script` 抛 `FileNotFoundError`）。
+  已把 live 对象整理成 `k8s/fd-master/10-crawl-reconciler.yaml` 入库（忠实记录，含那句"先 diff 再 apply"）。
+- 未做：`crawl-watcher-digest` / `crawl-watcher-scan` / `fd-proxy-probe` / `coverage-expander`
+  同样没有清单，同样有这个风险。
