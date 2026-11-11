@@ -27,6 +27,8 @@
 - [x] 3.1 派发失败且 HTTP 401 时，错误信息点名"worker 凭据可能已过期，运行 rotate_worker_credential"——验证：用过期 token 触发一次派发，日志出现该提示
   `reconciler.py` 的 `ClusterK8sClient._api()` 现在把 401/403 映射成 `WorkerCredentialError`，由纯函数 `worker_credential_hint()` 生成可执行提示（点名 `$KUBECONFIG_DIR/<cluster>.token`、列出三种成因、给出轮换命令）。401 与 403 分开：前者是凭据失效、后者是 RBAC/集群被禁用。
   实测（打真实 cheap API）：伪造 token → `WorkerCredentialError` 且提示含轮换命令；  真 token → `PodList items=1` 不回归。**这一条与 bound/legacy 无关**——legacy 也会因  SA 被重建或凭据被摘除而 401，所以先落地。
+  ⚠️ **未上线**：线上 reconciler 是 `sha-5539dc5`（`fd_open_data_mcp.__version__ == 0.5.61`），
+  这个版本早于本分支。于是"401 会说人话"目前只在代码里有。解锁见 6.2。
 
 - [x] 3.2 就绪/健康面暴露"凭据剩余寿命"（最近一次刷新时间 + `exp`）——验证：把刷新时间改早，看板/健康输出随之变化
   落在既有的 `scripts/check_worker_credential_surface.py` 上（不新造一个面）：新增
@@ -80,6 +82,15 @@
 ## 6. 收口
 
 - [ ] 6.1 归档——验证：`openspec archive rotate-worker-cluster-credentials --yes --strict` 成功
+- [ ] 6.2 把 3.1 的代码送上线（**目前只在分支上**）——验证：线上镜像里 `WorkerCredentialError` 存在，
+  且用伪造 token 触发一次派发能在日志里看到轮换命令
+  链路：`git tag v0.5.62 && git push origin v0.5.62` → GitHub Actions `release.yml` 发**公共 PyPI**
+  → 重建 scraw 镜像（`FD_ODM_INSTALL` 下限抬到 0.5.62）→ 改 `crawl-reconciler` / `crawl-coverage-expander`
+  两个 CronJob 的 image。
+  **卡点**：第一步是对外且不可逆的（PyPI 版本号不可复用、删不掉），须用户点头；
+  另需先确认 main 干净（当前 main 有 13 项别的会话的未提交改动）。
+  判据只认镜像内实测：`python -c "import fd_open_data_mcp; print(fd_open_data_mcp.__version__)"`
+  + `grep -c WorkerCredentialError`（前者 0.5.62、后者非零），不看 tag 名、不看 CI 绿灯。
 
 
 ## 7. 验证 5.1 时撞出来的两个相邻缺陷（不在本 change 的需求范围内）

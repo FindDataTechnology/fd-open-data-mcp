@@ -11,10 +11,28 @@
 - 控制面挂载面已收敛：`fd-master` 4→2 键、`fd-mcp` 10→2 键，只剩唯一启用的 `cheap`。
 - 派发能力已恢复，而且是**跑完整轮**验的：新凭据下去后生产自己派发的 `policy_runs`
   已 `success`，对应 Job 在 cheap 上 `succeeded=1`（不只是打了一次只读 API）。
-- 401 现在会说人话（`WorkerCredentialError` + 轮换命令），不再藏在"launch failed"里。
-- 现在能**看见**凭据的寿命了：巡检脚本输出 `永不过期（legacy，无 exp）`——现状是 legacy，
-  而这句话正是它的风险，以前任何看板都不显示。
-- 顺手修掉一个相邻缺陷：`cancel` 以前只改数据库、pod 继续爬（RBAC 缺 `delete jobs`）。
+- 401 的归因已经写好（`WorkerCredentialError` + 轮换命令）——**但还没上线**，见下面的"代码 vs 线上"。
+- 凭据寿命现在能**看见**了：巡检脚本输出 `永不过期（legacy，无 exp）`——现状是 legacy，
+  而这句话正是它的风险，以前任何看板都不显示。（脚本是运维工具，跑在哪台机器上就用哪份代码，不需要出片。）
+- 顺手修掉一个相邻缺陷：`cancel` 以前只改数据库、pod 继续爬（RBAC 缺 `delete jobs`）。这条在**集群 RBAC** 上，
+  已经生效，不依赖发版。
+
+### 代码 vs 线上（2026-11-11 核实，别把"写完了"当成"生效了"）
+
+线上 reconciler 跑的是 `ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-5539dc5`，
+里面 `fd_open_data_mcp.__version__ == 0.5.61`。本轮所有代码改动都在这两个分支上、**一个都没进这个版本**：
+
+| 东西 | 状态 |
+|---|---|
+| 集群 RBAC 补 `delete jobs` | ✅ **已生效**（改的是集群对象，不是代码） |
+| SA 重建吊销旧 token | ✅ **已生效**（旧 401 / 新 200 实测） |
+| 挂载面收敛 4→2 / 10→2 键 | ✅ **已生效** |
+| 401 归因（3.1） | 🟡 代码+测试已提交，**线上仍是旧包** |
+| 凭据寿命巡检（3.2） | ✅ 可用（脚本，随取随跑） |
+| `reconcile-lost-launch-response` | 🟡 代码+测试已提交，**线上仍是旧包** |
+
+要上线必须走：推 `v*` tag → GitHub Actions 发 **公共 PyPI** → 重建 scraw 镜像 → 改两个 CronJob 的 image。
+第一步是对外且不可逆的（PyPI 版本号不可复用），**要你点头**才能按。
 
 ## 要决定的事
 
