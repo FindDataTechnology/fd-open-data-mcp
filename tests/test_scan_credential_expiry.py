@@ -185,3 +185,20 @@ def test_credential_folds_into_the_failure_message(session, creds_dir, sent, mon
     assert "CRAWL FAILURE" in title
     assert "WORKER CREDENTIAL" not in title
     assert "boom" in body and "1/3" in body
+
+
+@pytest.mark.parametrize("clusters", [1, 2, 9, 12])
+def test_alert_title_survives_the_32_char_budget(session, creds_dir, sent, clusters):
+    """标题被截到 32 字，集群数必须还在里面。
+
+    实测过的坏读数：`🔑 WORKER CREDENTIAL · 1 cluster(s)` 是 38 字，被截成
+    `🔑 WORKER CREDENTIAL · 1 cluster(` ——**单位被吃掉，只剩一个开括号**。
+    一条告警最该传达的就是"几个集群"，它不该是第一个被截掉的东西。
+    """
+    for i in range(clusters):
+        creds_dir(f"c{i}", _bound(remaining_days=2.0))
+    _scan(session)
+    title, _ = sent.send.call_args[0][:2]
+    assert len(title) <= 32, (len(title), title)
+    assert str(clusters) in title, title
+    assert not title.endswith("("), title

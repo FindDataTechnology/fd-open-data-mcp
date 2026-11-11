@@ -248,7 +248,11 @@ def _format_message(failed: list[dict], refused: list[dict],
     elif credential:
         # 凭据到期不是"运行失败"，但同样是"今天不处理明天就断"的事——给它自己的标题，
         # 免得操作者在一串失败里漏掉它。
-        title = f"🔑 WORKER CREDENTIAL · {len(credential)} cluster(s)"
+        # 标题在下面被截到 32 字（ServerChan 的限制），而
+        # `🔑 WORKER CREDENTIAL · 1 cluster(s)` 是 38 字——实测被截成
+        # `🔑 WORKER CREDENTIAL · 1 cluster(`，**数量后面的单位被吃掉**，
+        # 只剩一个开括号。所以这里不写单位，把集群数留在可见范围内。
+        title = f"🔑 WORKER CREDENTIAL · {len(credential)}"
     else:
         title = f"⏳ CRAWL STALE · {n} run(s)"
     lines: list[str] = []
