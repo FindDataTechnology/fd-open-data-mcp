@@ -50,3 +50,47 @@ def test_exemption_state_helper():
     assert _contract(exempt_until=date(2026, 12, 1)).exemption(today)[0] == "active"
     assert _contract(exempt_until=date(2026, 11, 11)).exemption(today)[0] == "active"
     assert _contract(exempt_until=date(2026, 11, 10)).exemption(today)[0] == "expired"
+
+
+def test_runtime_and_audit_exemption_implementations_agree():
+    """运行期与审计器两份豁免实现必须说同一句话。
+
+    为什么会有两份：审计器要能在**不装本包**的环境里跑（它是独立脚本，靠 importlib
+    装载），所以各写一份纯函数。两份不比对，就会出现"审计说保留、写入说可删"——
+    而这正是 2026-11-12 实测到的漏洞形态（豁免只对离线淘汰工具生效，两条写入路径
+    根本不看它）。
+    """
+    from datetime import date as _d
+
+    from fd_open_data_mcp.fetch.retention import exemption_state
+
+    today = _d(2026, 11, 12)
+
+    class Row:      # 模拟原始查询行 / ORM 行：属性取列
+        def __init__(self, until, owner=None, reason=None):
+            self.exempt_until, self.exempt_owner, self.exempt_reason = until, owner, reason
+
+    cases = [
+        (None, None, None),
+        (_d(2026, 12, 1), "chengsishi", "监管要求保留五年"),
+        (_d(2026, 11, 12), "chengsishi", "今天到期"),
+        (_d(2026, 11, 11), "chengsishi", "昨天到期"),
+        ("2026-12-01", "chengsishi", "字符串形态"),
+    ]
+    for until, owner, reason in cases:
+        runtime = exemption_state(Row(until, owner, reason), today=today)
+        audited = _contract(exempt_until=until, exempt_owner=owner,
+                            exempt_reason=reason).exemption(today)
+        assert runtime[0] == audited[0], \
+            f"状态不一致 until={until!r}: 运行期={runtime[0]} 审计={audited[0]}"
+
+
+def test_runtime_exemption_tolerates_a_row_without_the_column():
+    """没跑 0021 的库没有 exempt_until 列——此时必须答"没有豁免"，不能炸也不能当有。"""
+    from fd_open_data_mcp.fetch.retention import exemption_state
+
+    class LegacyRow:
+        retention_class = "W"
+        retention_window_days = 1826
+
+    assert exemption_state(LegacyRow()) == ("none", "")

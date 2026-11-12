@@ -763,6 +763,25 @@ def _retention_window_days(session: Session, concept_id: int,
     return contract.retention_window_days
 
 
+def _exemption_state(session: Session, concept_id: int,
+                     source_used: str) -> tuple[str, str]:
+    """该 (概念, 源) 的窗口外保留豁免状态。
+
+    ``resolve_contract`` 按 session 记忆结果，所以这里再解析一次不额外查库。
+    """
+    from fd_open_data_mcp.fetch.retention import (
+        exemption_state, family_of, resolve_contract,
+    )
+
+    concept = session.get(_Concept, concept_id)
+    if concept is None:
+        return "none", ""
+    contract = resolve_contract(session, source_used, family_of(concept.code))
+    if contract is None:
+        return "none", ""
+    return exemption_state(contract)
+
+
 def _drop_out_of_window(session: Session, concept_id: int, entity_type: str,
                         entity_id: int, source_used: str,
                         rows: dict[str, object]) -> dict[str, object]:
@@ -777,6 +796,14 @@ def _drop_out_of_window(session: Session, concept_id: int, entity_type: str,
     """
     window_days = _retention_window_days(session, concept_id, source_used)
     if not window_days:
+        return rows
+    # 有效豁免 = 该族超窗数据标"保留"。这条判断必须也放在这里，而不是只放在离线
+    # 淘汰工具里：本函数是**写入前丢弃**点，被丢的点连库都进不去、重抓也补不回来，
+    # 比"写完再删"更狠。2026-11-12 实测：aum 的豁免此前只对淘汰工具生效，
+    # 这条路径照样按 1826 天窗口丢点。
+    state, why = _exemption_state(session, concept_id, source_used)
+    if state == "active":
+        logger.warning("留存豁免生效，跳过入口窗口裁剪（超窗点照写）：%s", why)
         return rows
     cutoff = (datetime.now(timezone.utc).date()
               - timedelta(days=int(window_days))).isoformat()

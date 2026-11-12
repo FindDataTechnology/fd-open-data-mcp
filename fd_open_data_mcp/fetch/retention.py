@@ -76,6 +76,41 @@ def resolve_contract(session, source: str | None, family: str | None):
     return row
 
 
+def exemption_state(contract, today=None) -> tuple[str, str]:
+    """窗口外保留的豁免状态：``("active" | "expired" | "none", 说明)``。
+
+    为什么放在这里：**豁免必须在所有会减少行数的路径上生效**，否则它就是装饰。
+    2026-11-12 实测发现两处写入路径根本没看它——``cache._drop_out_of_window``
+    （写入前丢弃超窗点）与 ``retention_bulk.apply_bulk_retention``（写完按窗口 DELETE）
+    都只按 ``retention_window_days`` 办事，于是给 ``akshare/aum`` 的豁免只在离线淘汰
+    工具里有效，日增写入照样能把那些行删掉。判据写在写入路径能拿到的地方，才谈得上"生效"。
+
+    接受 **ORM 行**或**原始查询行**（两者都支持属性取列），并对没有该列的环境
+    （未跑 0021 的库）返回 ``none``——"没有豁免字段"不等于"有豁免"。
+
+    注意：``scripts/audit_retention_contracts.py`` 有一份**纯函数孪生**
+    （``Contract.exemption``），因为它要能在不装本包的环境里单独跑。
+    ``tests/test_retention_exemption.py`` 有一条交叉校验钉住两者说法一致——
+    两份实现不比对，就会变成下一个"审计说保留、写入说可删"。
+    """
+    import datetime as _dt
+
+    raw = getattr(contract, "exempt_until", None)
+    if raw is None:
+        return "none", ""
+    today = today or _dt.date.today()
+    d = raw
+    if isinstance(d, str):
+        d = _dt.date.fromisoformat(d[:10])
+    who = (f"，责任人 {getattr(contract, 'exempt_owner', None)}"
+           if getattr(contract, "exempt_owner", None) else "，责任人为空")
+    why = (f"（{getattr(contract, 'exempt_reason', None)}）"
+           if getattr(contract, "exempt_reason", None) else "（理由为空）")
+    if d < today:
+        return "expired", f"豁免已于 {d} 到期{who}{why}"
+    return "active", f"豁免有效至 {d}{who}{why}"
+
+
 def check_write_allowed(session, *, concept_id: int | None, source: str | None) -> None:
     """写入前的准入检查。**只读**，不改任何东西。
 

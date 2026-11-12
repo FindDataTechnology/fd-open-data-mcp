@@ -34,14 +34,14 @@ def _concept(conn, code, entity_type="fund"):
     return cid
 
 
-def _contract(conn, source, family, cls, window_days=None):
+def _contract(conn, source, family, cls, window_days=None, **extra):
     from sqlalchemy.orm import Session
 
     s = Session(bind=conn)
     s.add(DataRetentionContract(
         source=source, family=family, retention_class=cls,
         retention_window_days=window_days, re_fetchable=True,
-        upstream_history_mutable=False, volume_budget_mb=64))
+        upstream_history_mutable=False, volume_budget_mb=64, **extra))
     s.commit()
     s.close()
 
@@ -169,3 +169,45 @@ def test_every_script_that_writes_observations_applies_retention():
         "这些脚本直接写 semantic_observations 却没有执行留存收尾："
         f"{offenders}——在同一个事务里补 apply_bulk_retention(...)")
 
+
+
+def test_w_family_with_active_exemption_is_not_trimmed(session):
+    """有效豁免期内，批量直写**不许**按窗口删行。
+
+    2026-11-12 实测的漏洞形态：`akshare/aum` 持有一条有效豁免，但这条只对离线淘汰
+    工具生效；`apply_bulk_retention` 只认窗口天数，任何一次批量直写都会把那 222 行
+    超窗数据删掉。豁免写进契约却管不住真正会删数据的路径，它就是一句装饰。
+    """
+    from datetime import date, timedelta
+
+    conn = session.connection()
+    cid = _concept(conn, "aum", entity_type="fund")
+    _contract(conn, "akshare", "aum", "W", 30,
+              exempt_reason="可重取但需重算 1128 小时",
+              exempt_owner="chengsishi",
+              exempt_until=date.today() + timedelta(days=10))
+    _insert(conn, cid, "2000-01-03", et="fund")     # 远超窗口，但豁免期内不许删
+    _insert(conn, cid, "2026-11-10", et="fund")
+
+    res = apply_bulk_retention(conn, source="akshare", concept_ids=[cid])
+
+    assert res["w_deleted"] == 0, "豁免生效期内不该删任何行"
+    assert sorted(_dates(conn, cid, et="fund")) == ["2000-01-03", "2026-11-10"]
+
+
+def test_w_family_with_expired_exemption_is_trimmed_again(session):
+    """反向守卫：豁免到期即回到可淘汰，不能变成永久保留。"""
+    from datetime import date, timedelta
+
+    conn = session.connection()
+    cid = _concept(conn, "aum", entity_type="fund")
+    _contract(conn, "akshare", "aum", "W", 30,
+              exempt_reason="临时保留", exempt_owner="chengsishi",
+              exempt_until=date.today() - timedelta(days=1))
+    _insert(conn, cid, "2000-01-03", et="fund")
+    _insert(conn, cid, "2026-11-10", et="fund")
+
+    res = apply_bulk_retention(conn, source="akshare", concept_ids=[cid])
+
+    assert res["w_deleted"] == 1, "过期豁免必须让窗口重新生效"
+    assert _dates(conn, cid, et="fund") == ["2026-11-10"]

@@ -40,6 +40,8 @@ from typing import Iterable, Optional
 
 from sqlalchemy import bindparam, text
 
+from fd_open_data_mcp.fetch.retention import exemption_state
+
 logger = logging.getLogger(__name__)
 
 #: 一次 DELETE 的 id 上限，避免超长 IN 列表。
@@ -69,7 +71,8 @@ def resolve_bulk_contracts(conn, *, source: str, concept_ids: Iterable[int]) -> 
 
     contracts = conn.execute(
         text("""
-            SELECT source, family, retention_class, retention_window_days, re_fetchable
+            SELECT source, family, retention_class, retention_window_days, re_fetchable,
+                   exempt_until, exempt_owner, exempt_reason
               FROM data_retention_contracts
              WHERE source = :src
         """),
@@ -177,6 +180,17 @@ def apply_bulk_retention(conn, *, source: str, concept_ids: Iterable[int],
         if ct.retention_class == "T":
             t_ids.append(cid)
         elif ct.retention_class == "W" and ct.retention_window_days:
+            # 有效豁免优先于窗口：豁免期内的超窗数据是"声明保留"，不是"可淘汰"。
+            # 此前这条路径只认窗口天数，于是给 aum 的豁免只对离线淘汰工具生效，
+            # 任何一次批量直写都会把它超窗的 222 行删掉（2026-11-12 实测）。
+            state, why = exemption_state(ct)
+            if state == "active":
+                logger.warning("留存豁免生效，跳过 W 窗口淘汰（%s/%s）：%s",
+                               source, info["family"], why)
+                continue
+            if state == "expired":
+                logger.warning("留存豁免已失效，按可淘汰处理（%s/%s）：%s",
+                               source, info["family"], why)
             cutoff = (datetime.now(timezone.utc).date()
                       - timedelta(days=int(ct.retention_window_days))).isoformat()
             w_cutoffs[cid] = cutoff
