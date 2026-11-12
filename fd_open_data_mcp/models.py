@@ -423,10 +423,14 @@ class SemanticObservation(Base):
     # standing remove_index drift and the Build Check schema job stayed red.
     fetched_at = Column(DateTime, nullable=False, default=_now, index=True)
     # Derived partition bucket 'YYYY-MM' (add-data-stream-engine task 2.2):
-    # computed from date by fd_open_data_mcp.semantic.dates.obs_month_of at
-    # every write site — NEVER hand-maintained. NULL = unmappable (sentinels)
-    # → the default partition once monthly RANGE partitions exist (task 2.6).
-    # SQLite keeps the column but does not partition on it.
+    # computed from date by fd_open_data_mcp.semantic.dates.obs_month_of —
+    # NEVER hand-maintained. NULL = unmappable (sentinels) → the default
+    # partition once monthly RANGE partitions exist (task 2.6).
+    # Since alembic 0022 the derivation is enforced IN THE DATABASE (trigger
+    # trg_sem_obs_month, BEFORE INSERT OR UPDATE): the crawler image installs
+    # this package from PyPI, so "every write site computes it" could not be
+    # relied on — 22,214 of 945,379 rows were NULL as of 2026-11-12. Write-site
+    # calls to obs_month_of are kept because SQLite test DBs have no trigger.
     obs_month = Column(String(7), nullable=True)
 
     def toDict(self) -> dict:

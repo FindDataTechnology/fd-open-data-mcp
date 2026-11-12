@@ -4,9 +4,14 @@
 ------------------
 `scripts/bulk_ingest_*.py` 用 ``execute_values`` **直接**写 ``semantic_observations``，
 完全绕开 ``fetch.cache`` 的三条写路径。于是契约里写着的 T（只留当期）与 W（滚动窗口）
-在这些族上从不生效——库里的指纹很明确：``nav`` 1,236 行中 1,227 行
-``obs_month IS NULL``、``tenure_days`` 4,280 行全为 NULL，因为 cache 路径一定会填
-``obs_month``，不填的必然是另一条写入栈。
+在这些族上从不生效。
+
+当初的库内指纹是 ``obs_month IS NULL``（``nav`` 1,236 行中 1,227 行为 NULL、
+``tenure_days`` 4,280 行全为 NULL）：cache 路径一定会填，不填的必然是另一条写入栈。
+**这个指纹已经不能用了**——alembic 0022 把 ``obs_month`` 的派生变成库内触发器
+（``trg_sem_obs_month``），任何写者都补得上。现在判断"某族走没走契约"只能看
+留存本身：``audit_retention_contracts.py`` 的 ``T_class_accruing_history`` 判据，
+以及本模块的静态闸（``tests/test_bulk_retention_guard.py``）。
 
 更麻烦的一层：爬虫集群镜像（``clusters.image``）从 PyPI 装
 ``fd-open-data-mcp``，而留存语义所在版本当时还没发布。**留存语义只在写入进程所用
