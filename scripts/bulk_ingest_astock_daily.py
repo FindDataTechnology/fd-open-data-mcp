@@ -102,6 +102,31 @@ BATCH = 2000
 FETCH_TIMEOUT_S = 90
 RETRIES = 3
 
+# ── rate limiting (2026-11-12) ─────────────────────────────────────────────────
+# akshare's eastmoney backend closes the connection when one IP hammers push2, and
+# its own error text says the first trip clears in ~5 minutes while retrying during
+# the window only extends it ("反复触发后可能需要 40 分钟以上").
+#
+# The old retry loop had NO sleep at all: 3 immediate attempts per symbol, then
+# straight on to the next symbol. Measured 2026-11-12: symbols 000525, 000608,
+# 000609, 000610 each burned 3 attempts inside one second. Across 5,203 symbols
+# that is the exact pattern that turns a 5-minute ban into a long one — and it is
+# why the daily run kept failing at ~13 minutes with no usable evidence.
+RATE_LIMIT_BACKOFF_S = 300          # one acknowledged window, not a retry storm
+RATE_LIMIT_STREAK_ABORT = 3         # consecutive rate-limited symbols → stop the run
+RATE_LIMIT_MARKERS = ("限流", "断开了连接", "RemoteDisconnected", "Connection aborted")
+
+
+class RateLimited(RuntimeError):
+    """Upstream refused this IP. Retrying immediately only extends the ban, so the
+    run aborts instead of walking the remaining symbols at 3 calls each."""
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(m in text for m in RATE_LIMIT_MARKERS)
+
+
 # Dense, full-history blue chips used only as a trading-calendar probe (the
 # same basket the paper-trading astock provider uses). Their rows are
 # index-reachable; a market-wide max(date) is not.
@@ -464,8 +489,49 @@ def per_symbol_start(global_start: str, sym_last: str | None, end: str,
     return own, "caught_up"
 
 
+def run_symbols(codes, ingest, *, streak: int = 0,
+                streak_limit: int = RATE_LIMIT_STREAK_ABORT, on_tick=None):
+    """Walk ``codes`` calling ``ingest(code)``; stop once the limiter is three-for-three.
+
+    Returns ``(aborted, streak, processed)``. ``streak`` comes in by argument and
+    goes out by return so the count survives a slice boundary — a ban does not
+    reset just because the cooldown timer elapsed.
+
+    Kept as a module function (not inline in ``main``) so the abort rule is
+    testable without a database: this is the rule that decides whether a limiter
+    window gets extended over 5,203 symbols.
+    """
+    for i, code in enumerate(codes, 1):
+        try:
+            ingest(code)
+            streak = 0
+        except RateLimited as e:
+            # One symbol tripping the limiter is a data gap; three in a row is a
+            # ban. Walking the rest would keep the window open.
+            streak += 1
+            log.error("%s rate limited (%d/%d consecutive): %s",
+                      code, streak, streak_limit, e)
+            if streak >= streak_limit:
+                remaining = len(codes) - i
+                log.error("aborting run: the upstream keeps refusing this IP. "
+                          "Retrying now would only extend the ban — the remaining "
+                          "%d symbols are left for the next scheduled run.", remaining)
+                if on_tick:
+                    on_tick(i, code)
+                return True, streak, i
+        if on_tick:
+            on_tick(i, code)
+    return False, streak, len(codes)
+
+
 def fetch_frame(code: str, adjust: str, start: str, end: str, failed: list[str]):
+    """Fetch one symbol's daily bars.
+
+    Raises :class:`RateLimited` when the limiter is what refused us — the caller
+    must stop the run rather than treat it as "this symbol had no data".
+    """
     import akshare as ak
+    last: Exception | None = None
     for attempt in range(1, RETRIES + 1):
         try:
             df = _fetch_with_alarm(
@@ -476,10 +542,21 @@ def fetch_frame(code: str, adjust: str, start: str, end: str, failed: list[str])
                 return None
             return df
         except Exception as e:  # noqa: BLE001 — explicit failure, retried
-            log.warning("%s %s fetch attempt %d/%d FAILED: %s", code, adjust, attempt, RETRIES, e)
+            last = e
+            limiter = _is_rate_limited(e)
+            log.warning("%s %s fetch attempt %d/%d FAILED%s: %s", code, adjust,
+                        attempt, RETRIES, " (rate limited)" if limiter else "", e)
             if attempt == RETRIES:
-                failed.append(f"{code}:{adjust}:{type(e).__name__}")
-                return None
+                break
+            # Backing off between attempts is the whole point: three immediate
+            # retries are indistinguishable from three times the load.
+            backoff = RATE_LIMIT_BACKOFF_S if limiter else 2 ** attempt
+            log.warning("waiting %.0fs before retry %d/%d", backoff, attempt + 1, RETRIES)
+            time.sleep(backoff)
+    if last is not None and _is_rate_limited(last):
+        raise RateLimited(f"{code}: {last}") from last
+    if last is not None:
+        failed.append(f"{code}:{adjust}:{type(last).__name__}")
     return None
 
 
@@ -984,6 +1061,8 @@ def main() -> int:
     else:
         groups = [("1/1", ordered)]
 
+    rate_limit_streak = 0            # consecutive rate-limited symbols, across slices
+    aborted = False
     for gi, (label, grp) in enumerate(groups):
         if gi:
             log.info("slice %s: cooling down %.0fs before next slice",
@@ -991,25 +1070,40 @@ def main() -> int:
             time.sleep(max(0.0, args.slice_sleep))
             now = datetime.datetime.utcnow()  # fetched_at should track real time
         rows_before = stats["rows"]
-        for i, code in enumerate(grp, 1):
+
+        def _ingest(code, _now=now):
             ingest_symbol(engine, code, code_map[code], units, anchors.get(code_map[code]),
-                          sym_starts.get(code_map[code], start), end, now, existing,
+                          sym_starts.get(code_map[code], start), end, _now, existing,
                           args.dry_run or args.verify, stats, failed)
-            if i % 50 == 0 or i == len(grp):
+
+        def _tick(i, code, _label=label, _n=len(grp)):
+            if i % 50 == 0 or i == _n:
                 log.info("slice %s [%d/%d] cumulative rows %s, failed %d",
-                         label, i, len(grp), stats["rows"], len(failed))
+                         _label, i, _n, stats["rows"], len(failed))
+
+        aborted, rate_limit_streak, _ = run_symbols(
+            grp, _ingest, streak=rate_limit_streak, on_tick=_tick)
         if len(groups) > 1:
             log.info("slice %s done: +%d rows", label, stats["rows"] - rows_before)
         # report per slice: a multi-hour 8-slice run must not lose the whole
         # ledger to a crash in the last slice, and the reconciler's snapshot
         # reads these counters as live progress.
         _report_yield(stats["rows"] - rows_before, stats["rows"] - rows_before)
+        if aborted:
+            break
 
     log.info("done: %d rows%s, %d fetch failures, %d no-data symbols",
              stats["rows"], " (dry-run)" if (args.dry_run or args.verify) else "",
              len(failed), stats["empty_or_failed"])
     for f in failed[:20]:
         log.error("FAILED: %s", f)
+    if aborted:
+        # Exit 3, not 0: the run stopped early by design, so the reconciler must
+        # see a failure (a silent 0 would report the untouched tail as "current").
+        log.error("exiting 3: aborted after %d consecutive rate-limited symbols; "
+                  "%d rows were still written and reported above", rate_limit_streak,
+                  stats["rows"])
+        return 3
     if stats["rows"] == 0 and len(failed) >= len(code_map) and len(code_map) > 0:
         log.error("every leg failed — exiting 1 (explicit failure, not an empty success)")
         return 1
