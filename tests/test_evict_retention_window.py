@@ -123,3 +123,17 @@ def test_apply_asserts_row_count_invariant():
         assert "observation_revisions" in str(exc)
     else:
         raise AssertionError("修订表变化时必须抛")
+
+
+def test_exemption_check_precedes_the_not_re_fetchable_refusal():
+    """豁免判断必须在 re_fetchable 硬闸**之前**——两者都是"不淘汰"，但文案不同。
+
+    2026-11-12 实测：`akshare/aum` 声明 re_fetchable=false 且持有一条有效豁免，
+    工具先命中硬闸，于是报"需人工改契约"——把人引去改一条本来正确的契约。
+    正确的说法是"豁免期内不淘汰，责任人 X，到期 Y"。
+    """
+    src = SCRIPT.read_text()
+    exemption_at = src.index('if state == "active":')
+    refusal_at = src.index("不可回收层")
+    assert exemption_at < refusal_at, \
+        "豁免分支必须在 re_fetchable=false 拒绝之前，否则有效豁免会被报成'需改契约'"

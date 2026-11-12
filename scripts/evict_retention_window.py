@@ -164,6 +164,14 @@ def main(argv=None) -> int:
             ct = audit.resolve_contract(m["src"], m["fam"], contracts)
             if ct is None or ct.cls not in ("T", "W"):
                 continue      # P / F / 无契约：一律不碰
+            # 有效豁免 = 该族超窗数据标"保留"。只在报告里标而不在这里生效，
+            # 豁免就是一句装饰；spec 也写明"到期即回到可淘汰"（过期不拦）。
+            # 这个判断必须排在 re_fetchable 硬闸**之前**：两者结果都是"不淘汰"，
+            # 但报错"需人工改契约"会把人引去改一条本来正确的契约（11-12 实测）。
+            state, why = ct.exemption() if hasattr(ct, "exemption") else ("none", "")
+            if state == "active":
+                print(f"  跳过 {m['src']}/{m['fam']}：{why}——豁免期内不淘汰")
+                continue
             if ct.re_fetchable is False:
                 # 4.1 硬闸：明确声明"取不回来"的层，一行都不许动。
                 # 契约自相矛盾（类写着 T/W 该删、可重取性写着 false 删了就没了）时，
@@ -176,12 +184,6 @@ def main(argv=None) -> int:
                 # 但要把"没说清"这件事报出来——否则契约缺口永远没人补。
                 print(f"  提示 {m['src']}/{m['fam']}：re_fetchable 未声明——"
                       f"按类别 {ct.cls} 处理，建议补契约")
-            # 有效豁免 = 该族超窗数据标"保留"。只在报告里标而不在这里生效，
-            # 豁免就是一句装饰；spec 也写明"到期即回到可淘汰"（过期不拦）。
-            state, why = ct.exemption() if hasattr(ct, "exemption") else ("none", "")
-            if state == "active":
-                print(f"  跳过 {m['src']}/{m['fam']}：{why}——豁免期内不淘汰")
-                continue
             if state == "expired":
                 print(f"  提示 {m['src']}/{m['fam']}：{why}——豁免已失效，按可淘汰处理")
             targets.append((m["src"], m["fam"], ct, m["n"]))
