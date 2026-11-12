@@ -27,8 +27,10 @@ changing the shape of the result.
 
 from __future__ import annotations
 
+import calendar
 from dataclasses import dataclass
-from typing import Iterable, Sequence
+from datetime import date, timedelta
+from typing import Iterable, Optional, Sequence
 
 #: Default minimum width (in days, inclusive) of an interior hole before it is
 #: worth fetching. One missing day inside a dense series is usually a real
@@ -38,6 +40,10 @@ DEFAULT_MIN_HOLE_DAYS = 5
 #: Fraction of the series' own dates inside the window that must be present
 #: before an interior hole is treated as noise rather than a gap.
 DEFAULT_MIN_COVERAGE = 0.98
+
+#: 单条日期展开成日期的上限（见 ``expand_periods``）。一年 366 天足够覆盖任何
+#: 正常周期；超出的只能是周期判断错误或畸形日期。
+_MAX_EXPAND_DAYS = 400
 
 
 @dataclass(frozen=True)
@@ -117,6 +123,120 @@ def _width(start: str, end: str) -> int:
     return (b - a).days + 1
 
 
+def period_bounds(obs_date: str, frequency: Optional[str]) -> tuple[str, str]:
+    """一条存储日期**回答**的日期段（含两端），而不是它字面上的那一天。
+
+    为什么必须有这一步：``coverage()`` 是拿日期做字符串比较的，而存储日期并不规范——
+    年度行可能是裸 ``"2019"``、月度行可能是 ``"2019-05"``。裸年份 ``"2019"`` 在
+    字符串序里**小于** ``"2019-01-01"``，于是窗口写成 ``2019-01-01..2019-12-31``
+    时那条年度行整条落在窗口外，读面会声称"整年缺失"——而我们明明有这一年的值。
+
+    这条口径与读点的既有规则一致（"窗口落在这一年内，年度行就回答它"，
+    ``cache.period_prefixes`` 负责取点）：一条年度行回答的是整年，不是元旦那天。
+
+    周期无法判断时按字面处理（窄），不替上游扩大范围。
+    """
+    raw = str(obs_date).strip()
+    f = (frequency or "").lower()
+    try:
+        if len(raw) >= 4 and f in ("yearly", "annual", "year"):
+            y = int(raw[:4])
+            return f"{y:04d}-01-01", f"{y:04d}-12-31"
+        if len(raw) >= 7 and f in ("monthly", "month"):
+            y, m = int(raw[:4]), int(raw[5:7])
+            return (f"{y:04d}-{m:02d}-01",
+                    f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}")
+        if len(raw) >= 7 and f in ("quarterly", "quarter"):
+            y, m = int(raw[:4]), int(raw[5:7])
+            q0 = ((m - 1) // 3) * 3 + 1
+            q1 = q0 + 2
+            return (f"{y:04d}-{q0:02d}-01",
+                    f"{y:04d}-{q1:02d}-{calendar.monthrange(y, q1)[1]:02d}")
+        if len(raw) >= 10 and f in ("weekly", "week"):
+            d0 = date.fromisoformat(raw[:10])
+            return d0.isoformat(), (d0 + timedelta(days=6)).isoformat()
+        if len(raw) >= 10:
+            d = date.fromisoformat(raw[:10]).isoformat()
+            return d, d
+    except ValueError:
+        pass
+    return raw, raw
+
+
+def expand_periods(dates: Iterable[str], frequency: Optional[str]) -> list[str]:
+    """把每条存储日期展开成它回答的全部日历日，供 ``coverage()`` 做日粒度比较。
+
+    日频序列是恒等变换（存储日期本来就是那一天），所以这条路径不会改变价格读面
+    的行为；只有年/月/季/周频会展开。展开规模有上限保护：一条日期若展开超过
+    ``_MAX_EXPAND_DAYS`` 天（周期判断错误或日期畸形），按字面值处理而不是让一次
+    读请求在内存里铺开几十年。
+    """
+    out: list[str] = []
+    for d in dates:
+        lo, hi = period_bounds(d, frequency)
+        if lo == hi:
+            out.append(lo)
+            continue
+        try:
+            cur, end = date.fromisoformat(lo), date.fromisoformat(hi)
+        except ValueError:
+            out.append(str(d))
+            continue
+        span = (end - cur).days + 1
+        if span <= 0 or span > _MAX_EXPAND_DAYS:
+            out.append(lo)
+            continue
+        while cur <= end:
+            out.append(cur.isoformat())
+            cur += timedelta(days=1)
+    return out
+
+
+def _shape_bounds(raw: str) -> Optional[tuple[str, str]]:
+    """按**日期串自身的形状**定位它回答的那一段；无法定位时返回 None。
+
+    与 :func:`period_bounds` 的分工：那个按概念的 ``frequency`` 判（读面要如实说
+    "这条年度行回答整年"），这个只按形状兜底，用于 ``coverage()`` 内部防止区间运算
+    在畸形/不规范日期上崩——它不需要、也拿不到概念频率。
+
+    ``"2023-W20"``、``"LATEST"`` 这类无法定位在日历上的值返回 None：它们不参与
+    区间运算（读面另有 ``excluded``/``gaps`` 报告通道），但也不会把一次读请求打崩。
+    """
+    raw = str(raw).strip()
+    try:
+        if len(raw) == 4 and raw.isdigit():
+            y = int(raw)
+            return f"{y:04d}-01-01", f"{y:04d}-12-31"
+        if len(raw) == 7 and raw[4] == "-":
+            y, m = int(raw[:4]), int(raw[5:7])
+            return (f"{y:04d}-{m:02d}-01",
+                    f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}")
+        if len(raw) >= 10:
+            d = date.fromisoformat(raw[:10])
+            return d.isoformat(), d.isoformat()
+    except ValueError:
+        return None
+    return None
+
+
+def _expand_shaped(dates: Iterable[str]) -> list[str]:
+    """``_shape_bounds`` 的批量版本：无法定位的日期被丢弃（不参与区间运算）。"""
+    out: list[str] = []
+    for d in dates:
+        b = _shape_bounds(d)
+        if b is None:
+            continue
+        lo, hi = b
+        if lo == hi:
+            out.append(lo)
+            continue
+        cur, end = date.fromisoformat(lo), date.fromisoformat(hi)
+        while cur <= end:
+            out.append(cur.isoformat())
+            cur += timedelta(days=1)
+    return out
+
+
 def coverage(
     all_dates: Sequence[str],
     start: str,
@@ -142,8 +262,18 @@ def coverage(
     """
     if start > end:
         raise ValueError(f"start ({start}) is after end ({end})")
-    dates = sorted({d for d in all_dates if start <= d <= end})
-    whole = sorted(set(all_dates))
+    # 区间运算只认"能定位在日历上的一天"。存储日期并不规范（裸年 ``"2019"``、
+    # 裸月 ``"2019-05"``、周标记 ``"2023-W20"``、哨兵 ``"LATEST"``），
+    # ``_next_day("2019")`` 会直接抛 ValueError——此前这条异常被上层的
+    # ``except Exception`` 兜成 ``coverage unknown`` + ``degraded=True``，
+    # 于是每一次年频/月频读都在报警"取不到"，而真相只是"我们存的是裸年份"。
+    # 这里先把每条日期展开成它回答的日、再按窗口过滤（顺序不能反：裸年份
+    # ``"2019"`` 在字符串序里小于 ``"2019-01-01"``，先过滤会把它整条丢掉），
+    # 定位不了的日期不参与区间运算（读面另有 excluded 通道报告它们），
+    # 而不是让整次读失败。
+    shape_days = _expand_shaped(sorted(set(all_dates)))
+    dates = sorted({d for d in shape_days if start <= d <= end})
+    whole = sorted(set(shape_days))
     if not whole and not known_empty:
         # Cold: nothing is known. The honest answer is "everything is missing".
         return Coverage(None, None, (), ((start, end),))

@@ -36,12 +36,16 @@ def test_returns_stored_points_in_order(session, concept):
     for year, value in (("2019", "1.9e12"), ("2020", "2.0e12"), ("2021", "2.1e12")):
         write_cache(session, concept, T, E, year, value, "USD", "worldbank")
 
-    out = _call(concept)
+    # 窗口必须落在已覆盖范围上：11-09 起读面要如实声明覆盖
+    # （`define-ingest-revision-and-coverage` R8）。窗口比数据宽时 `note`
+    # 说的是"2018/2022 我们确实没有"——那是真话，不是噪声。
+    out = _call(concept, start="2019-01-01", end="2021-12-31")
 
     assert out["count"] == 3
     assert [p["date"] for p in out["points"]] == ["2019", "2020", "2021"]
     assert all(p["source_used"] == "worldbank" for p in out["points"])
     assert "note" not in out
+    assert out["coverage"]["complete"] is True
 
 
 def test_empty_window_is_a_note_not_an_error(session, concept):
@@ -182,7 +186,10 @@ def test_no_unparseable_row_means_no_gaps_key(session, concept):
     """The report is additive and only appears when there is something to say."""
     write_cache(session, concept, T, E, "2020", "2.0e12", "USD", "worldbank")
 
-    out = _call(concept, start="2018-01-01", end="2022-12-31")
+    # 窗口正好等于那一年：完整读不应带 `gaps`（日历外日期）也不应带 `note`
+    # （未覆盖区间）。窗口放宽到 2018..2022 的话 `note` 会如实报告缺 2018/2019/
+    # 2021/2022——那条 report 是真的，只是本用例要验的是"没有可说的就不说"。
+    out = _call(concept, start="2020-01-01", end="2020-12-31")
 
     assert "gaps" not in out and "note" not in out
 

@@ -1681,12 +1681,18 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
             from fd_open_data_mcp.fetch.coverage import (
                 _merge_intervals,
                 coverage as _coverage,
+                expand_periods as _expand_periods,
             )
             from fd_open_data_mcp.fetch.gapfill import series_dates as _series_dates
 
             cov_entity_type = out.get("landed_entity_type") or entity_type
             if cov_entity_type and entity_id is not None:
-                _dates = _series_dates(s, cid, cov_entity_type, entity_id)
+                _stored = _series_dates(s, cid, cov_entity_type, entity_id)
+                # 按"这条日期回答的那一期"判覆盖，而不是按字面那一天：年度行回答整年
+                # （裸年份 "2019" 在字符串序里小于 "2019-01-01"，照字面比会把整整一年
+                # 判成缺失）。日频是恒等变换，价格读面行为不变。
+                _dates = _expand_periods(
+                    _stored, getattr(concept, "frequency", None))
                 _cov = _coverage(_dates, start, end)
                 in_window = [d for d in _dates if start <= d <= end]
                 out["coverage"] = {
