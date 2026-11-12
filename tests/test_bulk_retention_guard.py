@@ -18,7 +18,14 @@ from fd_open_data_mcp.fetch.retention_bulk import (
 from fd_open_data_mcp.fetch.retention import RetentionContractMissing
 from fd_open_data_mcp.models import Concept, DataRetentionContract
 
-SCRIPTS = pathlib.Path(__file__).resolve().parents[1] / "scripts"
+ROOT = pathlib.Path(__file__).resolve().parents[1]
+SCRIPTS = ROOT / "scripts"
+PACKAGE = ROOT / "fd_open_data_mcp"
+
+#: 观测表的字面量戳。**不要**再用 ``execute_values`` 当替代判据——那样会把
+#: `entities/resolver.py`（写 entity_source_identifiers）、`mirror_fund_to_cluster.py`
+#: （搬元数据表）之类的非观测写入误判成旁路。
+INSERT_MARK = "INSERT INTO semantic_observations"
 
 
 def _concept(conn, code, entity_type="fund"):
@@ -145,23 +152,23 @@ def test_every_script_that_writes_observations_applies_retention():
         # 把误挂的观测搬回原表——是"反向搬运"，不是新数据入口；搬回来的行本就通过过
         # 某种写入，这里再裁会二次改写别人的历史。
         "quarantine_misattached_observations.py": "从隔离表反向搬回，不是新写入",
-        # 写的是 fdw 外部表（另一台库的 semantic_observations），留存契约归那个库管。
-        "bulk_ingest_astock_daily.py": "写 xinru3 的外部表(ft_sem_obs_xinru3_w)，非本库",
     }
 
     offenders, matched_allow = [], set()
-    for path in sorted(SCRIPTS.glob("*.py")):
+    # 扫描面必须包含**包自身**：`fd_open_data_mcp/migrate.py` 与
+    # `fd_open_data_mcp/crawl/migrate.py` 都直写观测表，而先前的闸只扫 `scripts/`——
+    # 于是这两条迁移路径长期没有收尾，闸看着在守、实际只守了半个仓。
+    roots = list(sorted(SCRIPTS.glob("*.py"))) + list(sorted(PACKAGE.rglob("*.py")))
+    for path in roots:
         src = path.read_text(encoding="utf-8")
-        if "semantic_observations" not in src:
+        if INSERT_MARK not in src:
             continue
-        if "INSERT INTO semantic_observations" not in src and "execute_values" not in src:
-            continue
-        if "apply_bulk_retention" in src:
+        if "apply_bulk_retention(" in src or "apply_retention(" in src:
             continue
         if path.name in allowlist:
             matched_allow.add(path.name)
             continue
-        offenders.append(path.name)
+        offenders.append(str(path.relative_to(ROOT)))
 
     stale = set(allowlist) - matched_allow
     assert not stale, f"放行名单里有条目已不再命中判据（应删掉或改判据）：{sorted(stale)}"

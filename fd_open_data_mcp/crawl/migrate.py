@@ -64,6 +64,8 @@ def _migrate_wide(
 ) -> dict:
     """Generic wide->long reshape: for each (value-column -> concept code), INSERT...SELECT
     from ``table`` joined to ``entity_source_identifiers`` on ``symbol_col``."""
+    from fd_open_data_mcp.fetch.retention_bulk import apply_bulk_retention
+
     summary: dict = {"source_table": table, "symbol": symbol, "limit": limit, "columns": {}}
     for col, code in value_columns.items():
         concept_id, unit = _concept_lookup(session, code, entity_type)
@@ -94,6 +96,10 @@ def _migrate_wide(
         params["source"] = source
         params["granularity"] = "day"  # DAILY_COLUMNS tables are all daily OHLCV
         result = session.execute(sql, params)
+        # 迁移也是写入路径：不在这里执行契约，一次全历史迁移就会把窗口外的行整批
+        # 写回去（W 族）或给 T 族多留一堆历史，夜里那次淘汰白跑。
+        apply_bulk_retention(session, source=source, concept_ids=[concept_id],
+                             reason="crawl_migrate_wide")
         session.commit()  # commit per-column so progress is visible + resumable
         summary["columns"][col] = {"concept": code, "concept_id": concept_id, "inserted": result.rowcount}
     return summary
