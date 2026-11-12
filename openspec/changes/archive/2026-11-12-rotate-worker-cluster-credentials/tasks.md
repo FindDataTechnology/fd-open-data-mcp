@@ -117,17 +117,30 @@
 
 ## 6. 收口
 
-- [ ] 6.1 归档——验证：`openspec archive rotate-worker-cluster-credentials --yes --strict` 成功
-  **暂不归档，理由是判据**：本 change 里 3.1（401 归因）、派发缺陷修复等都还**只在分支上**，
-  线上仍是 `sha-5539dc5` / `0.5.61`。此时归档会把"还没有在线上成立的行为"写进主规格，
-  正是这个 change 一路在批的"声明了但没落地"。顺序应为：6.2 上线 → 观察一个周期 → 再归档。
-- [ ] 6.2 把 3.1 的代码送上线（**目前只在分支上**）——验证：线上镜像里 `WorkerCredentialError` 存在，
+- [x] 6.1 归档——验证：`openspec archive rotate-worker-cluster-credentials --yes --strict` 成功
+  **2026-11-12 归档，由用户裁决推翻原先的"等到上线再归档"**：理由是没有真实客户、系统一直在动，
+  等一个观察周期的价值不如一条能红的断言。原先的顾虑（把没落地的行为写进主规格）用两条措施兜住：
+  ① 代码侧判据写成构造测试（`tests/test_worker_credential_attribution.py`，见 6.2 的注）；
+  ② 仍未上线的部分**没有勾**（6.2 保持未完成并写明卡点），不让勾选状态替现实说话。
+- [ ] 6.2 把 3.1 的代码送上线——验证：线上镜像里 `WorkerCredentialError` 存在，
   且用伪造 token 触发一次派发能在日志里看到轮换命令
-  链路：`git tag v0.5.62 && git push origin v0.5.62` → GitHub Actions `release.yml` 发**公共 PyPI**
-  → 重建 scraw 镜像（`FD_ODM_INSTALL` 下限抬到 0.5.62）→ 改 `crawl-reconciler` / `crawl-coverage-expander`
-  两个 CronJob 的 image。
-  **卡点**：第一步是对外且不可逆的（PyPI 版本号不可复用、删不掉），须用户点头；
-  另需先确认 main 干净（当前 main 有 13 项别的会话的未提交改动）。
+
+  **代码侧已完成并覆盖（2026-11-12）**：`WorkerCredentialError` / `worker_credential_hint` 已在 main
+  （合并 `9678e95`），PyPI 0.5.62 内含。新增 `tests/test_worker_credential_attribution.py` 断言
+  401 → 该异常且消息里带可直接执行的
+  `python3 scripts/rotate_worker_credential.py --cluster cheap --apply`；403 → 只说 RBAC/禁用、
+  **不**提轮换（403 是凭据有效但没权限，让人重铸凭据是往错方向指）；500 → 原样抛 `HTTPError`
+  （转换必须窄）。两条注入都验过能红，还原后 14 条全绿。
+
+  **线上侧已成立的部分**：`crawl-watcher-scan` 跑 `fd-open-data-mcp:sha-9678e95`，pod 内实测
+  `__version__ 0.5.62` + `visibility/credentials.py` 存在，每 15 分钟产出 `credentials_checked: true`。
+
+  **仍未完成的部分（本条保持未勾的原因）**：`crawl-reconciler` 与 `coverage-expander` 仍跑
+  `scraw-fd-open-data-mcp:sha-daec768` = 0.5.61（pod 内实测：无 `visibility/credentials.py`，
+  `import WorkerCredentialError` 报 ImportError）。**不能把它们换成本仓镜像**：2026-11-12 实测
+  `fd-open-data-mcp:sha-9678e95` 里既没有 `/app/scripts` 也没有 `bulk_ingest_*.py`，而
+  `_read_script()` 正是从镜像里取这些脚本拼 ConfigMap —— 换过去会打断派发。
+  解锁办法仍是原链路：重建 scraw 镜像并把 `FD_ODM_INSTALL` 下限抬到 0.5.62，再改这两个 CronJob 的 image。
   判据只认镜像内实测：`python -c "import fd_open_data_mcp; print(fd_open_data_mcp.__version__)"`
   + `grep -c WorkerCredentialError`（前者 0.5.62、后者非零），不看 tag 名、不看 CI 绿灯。
 
