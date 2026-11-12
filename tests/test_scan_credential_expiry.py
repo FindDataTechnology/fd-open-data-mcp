@@ -84,6 +84,22 @@ def test_healthy_bound_token_is_silent(session, creds_dir, sent):
     assert sent.send.call_count == 0
 
 
+def test_mounted_but_empty_is_not_green(session, creds_dir, sent):
+    """挂载点在、但一个 `.token` 都没有 ⇒ 不算查过。
+
+    实测坏读数（2026-11-12 线上输出）：`credentials_checked: true` +
+    `credential: []`，而健康时也是这两个值——两种情形完全同形。于是只要密钥键
+    从 `cheap.token` 改成别的、或 Secret 被换空，到期告警会**静默变哑**，
+    唯一的外部判据（那个 true）还在说"查过了"。判据必须落到"真评过 token"。
+    """
+    (creds_dir.dir / "cheap.ca").write_text("CA", encoding="utf-8")  # 只有证书没有 token
+    summary = _scan(session)
+    assert summary["credentials_checked"] is False, (
+        "目录在但零个 token 不能算 checked——否则与健康同形")
+    assert summary["credential"] == []
+    assert sent.send.call_count == 0  # 仍属部署形态问题，不当风险告警
+
+
 def test_stale_bound_token_alerts_with_its_own_title(session, creds_dir, sent):
     # 寿命 30d、只剩 2d → 远低于 1/3
     creds_dir("cheap", _bound(remaining_days=2.0))

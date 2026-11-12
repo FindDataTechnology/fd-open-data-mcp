@@ -161,6 +161,12 @@ kubectl --context xinru -n fd-master logs kcfg-probe
 **判据**：`credentials_checked: true` 才代表"查过了"。`false` 是「挂载没生效」，
 不是「凭据都健康」——这两件事长得像，但一个是沉默的成功，一个是沉默的失效。
 
+这条判据**2026-11-12 收紧过一次**：原先只要目录能读就算 `true`，于是"目录在、
+但里面一个 `<cluster>.token` 都没有"（密钥键改名、Secret 被换空、路径挂错一级）
+也报 `true` + `credential: []`，与"全都健康"逐字同形。现在 `true` 的含义是
+**至少评过一个 token**；零个 token 会返回 `false` 并在日志里留一行
+`里没有任何 <cluster>.token`。线上第一次见到 `false` 时先看那一行，别先怀疑凭据坏了。
+
 过渡期的 `CronJob/worker-credential-expiry` + `ConfigMap/credential-alert-scripts`
 已于同日退役（`k8s/fd-master/60-credential-expiry-alert.yaml` 一并删除）。
 退役顺序不能反：先换镜像并确认 `credentials_checked: true`，再删旧的；

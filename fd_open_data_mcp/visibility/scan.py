@@ -100,6 +100,13 @@ def check_credential_expiry(now: dt.datetime | None = None) -> tuple[list[dict],
     - 读 token 失败 → 归为 unknown，`lifetime_problems` 不管它（不知道 ≠ 违规），
       由巡检脚本去判，因为只有它知道哪些集群"该有"。
     - legacy（无 exp）→ 不告警。它是选择不是故障（见 DECISION.md）。
+
+    第四个不是选择，是坑：目录在、但里面**一个 `.token` 都没有**（密钥键改名成
+    `cheap.crt`、Secret 被换空、路径挂错一级）时，`read_lifetimes` 返回 `{}`，
+    `lifetime_problems` 也只能返回 `[]`——于是 ``checked=True`` + `credential=[]`，
+    与"所有凭据都健康"**完全同形**。2026-11-12 实测线上正是这一形（当时确实健康，
+    但两种情形不可区分）。`credentials_checked` 的语义因此收紧为"**至少评过一个
+    token**"：没评到就不算查过。
     """
     now = now or dt.datetime.now(dt.timezone.utc)
     try:
@@ -111,6 +118,12 @@ def check_credential_expiry(now: dt.datetime | None = None) -> tuple[list[dict],
         # 挂载在但读不动：这确实是异常，但也别把整轮 scan 拖垮。
         logger.warning("credential expiry: 读 %s 失败（%s），本轮跳过",
                        _CREDENTIALS_DIR, exc)
+        return [], False
+
+    if not lifetimes:
+        # 目录在、零个 `<cluster>.token`：不是"都健康"，是"这条检查没生效"。
+        logger.warning("credential expiry: %s 里没有任何 <cluster>.token——"
+                       "挂载或 Secret 键名不对，到期告警此刻是哑的", _CREDENTIALS_DIR)
         return [], False
 
     problems = credentials.lifetime_problems(lifetimes)
