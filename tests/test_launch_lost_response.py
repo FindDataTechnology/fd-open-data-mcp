@@ -227,3 +227,51 @@ def test_launch_direct_records_failed_when_absence_is_confirmed(session):
     assert run.status == "failed"
     assert run.job_ref is None
     assert "不存在" in run.detail
+
+
+def test_adopted_launch_leaves_no_timeout_in_the_ledger(session):
+    """The ledger end state, i.e. the other half of the "对照两侧" rule.
+
+    4.2 asked to confirm in production that ``policy_runs`` stops showing rows whose
+    ``detail`` says "read timed out" while the same-named Job succeeded. That is an
+    observation over a cycle; 2026-11-12 the user replaced the wait with this test
+    (no real customers, the system keeps moving). The row is the durable judge.
+
+    Both sides are asserted here and in the test above: the Job exists → the row must
+    stay open and carry the ``job_ref`` (this test); the Job is provably absent → the
+    row must close as failed with the reason (the previous test). A change that
+    collapsed either direction would leave one of them red.
+    """
+    from fd_open_data_mcp.models import Cluster, CrawlPolicy, PolicyRun
+    from fd_open_data_mcp.refresh.reconciler import _launch_direct
+
+    class _AdoptingLauncher:
+        """Adoption happens inside launch(); it returns the job_ref it adopted."""
+
+        def launch(self, plan, policy):
+            return "cheap/crawl-policy-1-20261111063707", 9
+
+    # policy_runs.cluster_id is a real FK: a launch always has a cluster row, and
+    # the row is what makes the ledger readable ("which box ran it").
+    cluster = Cluster(id=9, name="cheap", api_server="https://api.cheap:6443",
+                      namespace="scraw", image="registry/x:tag")
+    session.add(cluster)
+    policy = CrawlPolicy(name="adopted", enabled=True, concept_ids=[1],
+                         entity_type="fund", cron_expr="0 6 * * *",
+                         timezone="UTC", date_policy={"mode": "since_last"},
+                         frequency="daily", mode="per_date", executor="direct",
+                         script="bulk_ingest_x")
+    session.add(policy)
+    session.commit()
+
+    out = _launch_direct(session, policy, _AdoptingLauncher(),
+                         now=dt.datetime.now(dt.timezone.utc))
+
+    assert out["status"] == "launched"
+    run = session.query(PolicyRun).filter_by(policy_id=policy.id).one()
+    assert run.status == "running"
+    assert run.job_ref == "cheap/crawl-policy-1-20261111063707"
+    assert run.cluster_id == 9
+    # The whole point: an adopted launch must not leave behind a timeout claim.
+    assert not (run.detail or ""), run.detail
+    assert "timed out" not in (run.detail or "")

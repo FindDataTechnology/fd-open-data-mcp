@@ -46,12 +46,23 @@
 
 ## 4. 收口
 
-- [ ] 4.1 归档——验证：`openspec archive reconcile-lost-launch-response --yes --strict` 成功
-- [ ] 4.2 部署后观察一个周期：`policy_runs` 不再出现"detail 含 read timed out 但同名 Job 已 succeeded"的行
+- [x] 4.1 归档——验证：`openspec archive reconcile-lost-launch-response --yes --strict` 成功
+  **2026-11-12 归档**（用户裁决：没有真实客户、系统一直在动，不等观察周期）。
+- [x] 4.2 判据改为构造测试：`policy_runs` 不再出现"detail 含 read timed out 但同名 Job 已 succeeded"的行
   （判据必须是**对照两侧**：既看 detail，也看 worker 上有没有同名 Job；只看日志会漏）
-- [ ] 4.3 上线（**未做，卡在对外动作上**）
-  线上 reconciler 是 `sha-5539dc5` = `fd_open_data_mcp 0.5.61`，本修复不在其中。
-  链路：推 `v*` tag → GitHub Actions 发**公共 PyPI**（不可逆，须用户点头）→ 重建 scraw 镜像
-  → 改 `crawl-reconciler` 的 image。
+  **为什么不看线上了**：这一条原本要求部署后观察一个周期；用户 2026-11-12 裁决用构造断言替代
+  （等一周的价值不如一条能红的断言）。落在 `tests/test_launch_lost_response.py`：
+  - `test_adopted_launch_leaves_no_timeout_in_the_ledger`：adopted → 行保持 `running`、`job_ref`
+    与 `cluster_id` 都在、`detail` 为空（不含 timed out）；
+  - 邻居 `test_launch_direct_records_failed_when_absence_is_confirmed`：确认不存在 → `failed` +
+    `不存在` 文案 + `job_ref is None`。
+  两条正好构成任务要求的**对照两侧**。注入验证：把 adopted 写成 failed 并写 timeout 文案 → 前者红；
+  还原后全绿。函数级判据（adopt / 404 / 读失败 / 过期 Job / 缺时间戳）另有 8 条既有用例。
+- [ ] 4.3 上线（**仍未做**）
+  线上 reconciler 是 `scraw-fd-open-data-mcp:sha-daec768` = `fd_open_data_mcp 0.5.61`（pod 内实测），
+  本修复不在其中。PyPI 0.5.62 已发（2026-11-12），剩下的卡点是**镜像**：`crawl-reconciler` 不能换
+  成本仓镜像——实测 `fd-open-data-mcp:sha-9678e95` 里没有 `/app/scripts`、没有 `bulk_ingest_*.py`，
+  而 `_read_script()` 要从镜像里取它们拼 ConfigMap，换过去会打断派发。
+  链路：重建 scraw 镜像（`FD_ODM_INSTALL` 下限抬到 0.5.62）→ 改 `crawl-reconciler` 的 image。
   上线判据只认镜像内实测：`python -c "import fd_open_data_mcp; print(__version__)"` 为 0.5.62，
   且 `grep -c adopt_job_if_present` 非零；不看 tag 名、不看 CI 绿灯。
