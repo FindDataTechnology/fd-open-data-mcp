@@ -22,7 +22,7 @@
 ## 3. 上线与收口
 
 - [x] 3.1 `openspec validate alert-on-credential-surface-mismatch --strict` 通过
-- [ ] 3.2 出镜像 → pod 内实测：真挂载（`cheap9` 一致）无告警、`credentials_checked: true`；
+- [x] 3.2 出镜像 → pod 内实测：真挂载（`cheap9` 一致）无告警、`credentials_checked: true`；
   空挂载仍 `false`——验证：两条 pod 探针输出
 - [ ] 3.3 滚 `crawl-watcher-scan` 到新 tag，确认一轮定时 `SuccessCriteriaMet`
 - [ ] 3.4 归档本 change，并补 `worker-credential-lifecycle` 的 Purpose
@@ -59,7 +59,27 @@ JWT——它要回答的是"该有的在不在"，而 401 只在运行期才发�
 缺失，任何依赖它的场景都该红。还原后逐字校验（`diff` 空、`elif False` 计数 0）再跑
 得 9 passed，备份删除。
 
-**3.1**：`openspec validate alert-on-credential-surface-mismatch --strict` → valid。
+**3.1**：`openspec validate alert-on-credential-surface-mismatch --strict` → valid
+（改动前后各跑过一次，插入本条记录后再跑仍 valid）。
+
+**3.2（pod 内实测，三种形态，2026-11-12）**：镜像 `fd-open-data-mcp:sha-ea8ca09`（digest
+`c01287a6…`），在 `fd-master` 里用真实 Secret 与真实 `clusters` 表跑 `check_credential_surface`
+与 `check_credential_expiry`：
+
+| 形态 | SURFACE | EXPIRY |
+|---|---|---|
+| 真挂载（`cheap`+`cheap9`） | `checked=True`，**1 条 `cheap disabled`** | `checked=True`，无问题 |
+| 目录在但零 token（emptyDir） | `checked=True`，1 条 `cheap9 missing` | `checked=False` + 日志「里没有任何 `<cluster>.token`」 |
+| 目录不存在（不挂卷） | `checked=False`，静默 | `checked=False`，静默 |
+
+**第一行是意外收获，也是最好的证据**：任务原文写的是"真挂载无告警"，但真实挂载此刻
+**并不一致**——`cheap` 已 `enabled=false`，凭据却还在（另一个会话在 11-12 傍晚把它写了
+回去）。新检查上线后第一次运行就当场抓到了我此前靠人工撞见的那条违规。**这不是缺陷，
+这正是它存在的理由**；"一致时无告警"由单测（`test_consistent_surface_is_silent`）钉住。
+
+第二行纠正了我自己一处误判：emptyDir 让目录**存在**，所以比对确实执行了，
+`checked=True` 是对的——它报出"启用的 `cheap9` 缺凭据"，比"静默"更准确。真正的
+"未挂载"是第三行（目录不存在），两路都静默且判 `False`，与"部署形态差异不是风险"一致。
 
 ## 不做
 
