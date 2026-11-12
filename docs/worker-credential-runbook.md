@@ -109,6 +109,13 @@ psql "$FD_OPEN_DATA_MCP_DATABASE_URL" -c \
 
 **判据必须成对，且必须发生在真实挂载点。**
 
+下面的镜像 tag 只是示例——**照抄它会随发布变旧**，先取线上当前值：
+
+```bash
+kubectl --context xinru -n fd-master get cronjob crawl-watcher-scan \
+  -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[0].image}'; echo
+```
+
 ```bash
 kubectl --context xinru -n fd-master apply -f - <<'EOF'
 apiVersion: v1
@@ -119,7 +126,7 @@ spec:
   volumes: [{name: kubeconfigs, secret: {secretName: worker-kubeconfigs}}]
   containers:
     - name: probe
-      image: ccr.ccs.tencentyun.com/finddata/fd-open-data-mcp:sha-9678e95
+      image: ccr.ccs.tencentyun.com/finddata/fd-open-data-mcp:sha-9678e95   # 换成 cronjob 当前 tag
       volumeMounts: [{name: kubeconfigs, mountPath: /kubeconfigs}]
       command: ["python3","-c"]
       args:
