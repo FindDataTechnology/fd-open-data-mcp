@@ -58,11 +58,14 @@
     `不存在` 文案 + `job_ref is None`。
   两条正好构成任务要求的**对照两侧**。注入验证：把 adopted 写成 failed 并写 timeout 文案 → 前者红；
   还原后全绿。函数级判据（adopt / 404 / 读失败 / 过期 Job / 缺时间戳）另有 8 条既有用例。
-- [ ] 4.3 上线（**仍未做**）
-  线上 reconciler 是 `scraw-fd-open-data-mcp:sha-daec768` = `fd_open_data_mcp 0.5.61`（pod 内实测），
-  本修复不在其中。PyPI 0.5.62 已发（2026-11-12），剩下的卡点是**镜像**：`crawl-reconciler` 不能换
-  成本仓镜像——实测 `fd-open-data-mcp:sha-9678e95` 里没有 `/app/scripts`、没有 `bulk_ingest_*.py`，
-  而 `_read_script()` 要从镜像里取它们拼 ConfigMap，换过去会打断派发。
-  链路：重建 scraw 镜像（`FD_ODM_INSTALL` 下限抬到 0.5.62）→ 改 `crawl-reconciler` 的 image。
-  上线判据只认镜像内实测：`python -c "import fd_open_data_mcp; print(__version__)"` 为 0.5.62，
-  且 `grep -c adopt_job_if_present` 非零；不看 tag 名、不看 CI 绿灯。
+- [x] 4.3 上线（**2026-11-12 已完成**）
+  做法：本仓镜像不能用于派发侧（实测 `fd-open-data-mcp:sha-9678e95` 里没有 `/app/scripts`、
+  没有 `bulk_ingest_*.py`，而 `_read_script()` 要从镜像里取它们拼 ConfigMap——换过去会打断派发），
+  所以走原链路重建**爬虫镜像**：`scraw-fd-open-data-mcp` 仓把 `Dockerfile` 的
+  `ARG FD_ODM_REF` 从 `34d55b6` 抬到 `dcbaa57`（提交 `625c804`，纯超集——`34d55b6` 仍是
+  `dcbaa57` 的祖先，留存语义一字不动）→ 公开仓免费 CI 自动构建 → 铸 `sha-625c804`
+  （digest `be3d00fb…`，冒烟门过了才铸）→ `crawl-reconciler` 与 `coverage-expander` 都滚到它。
+  镜像内实测（pod 探针，不是看 tag 名）：`version: 0.5.62`、`adopt_job_if_present` 可导入、
+  `WorkerCredentialError` 可导入、`/app/scripts` 仍在。
+  调度实测：08:52 `crawl-reconciler` 与 08:53 `coverage-expander` 两轮均 `SuccessCriteriaMet`，
+  schema gate 报 `0023_re_fetch_cost`（历史里那 3 个 Failed 是 11-10 的旧账，跑的是 `sha-5794867`）。
