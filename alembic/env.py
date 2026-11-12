@@ -56,6 +56,15 @@ def _include_object(obj, name, type_, reflected, compare_to):
         return False
     if type_ == "index" and name in _CONTRACT_INDEXES:
         return False
+    # 0013's write gate: a PG-regex (`~`) CHECK, NOT VALID, migration-only.
+    # It cannot be declared on the model — SQLite test databases build tables
+    # with `create_all`, where `~` is a syntax error (4 tests in
+    # test_vocabulary_conformance fail on it). Same contract-only reasoning as
+    # the pgvector columns above: the migration owns it, autogenerate ignores
+    # it. Adding it to the model WOULD silence the drift but break every
+    # sqlite-backed suite.
+    if type_ == "check_constraint" and name in _CONTRACT_CHECK_CONSTRAINTS:
+        return False
     return True
 
 
@@ -69,6 +78,11 @@ _CONTRACT_INDEXES = frozenset(
     {
         "hnsw_concept_embeddings_vec",
         "hnsw_entity_embeddings_vec",
+    }
+)
+_CONTRACT_CHECK_CONSTRAINTS = frozenset(
+    {
+        "semantic_observations_date_shape_check",
     }
 )
 
