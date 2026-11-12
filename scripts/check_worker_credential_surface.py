@@ -148,30 +148,18 @@ from fd_open_data_mcp.visibility.credentials import (  # noqa: E402
     credential_lifetime,
     describe_lifetime,
     lifetime_problems,
+    surface_problems,
 )
 
 
 def check(clusters: dict[str, bool], mounted: set[str]) -> list[str]:
-    """返回违规描述列表；空列表 = 通过。"""
-    problems: list[str] = []
+    """返回违规描述列表；空列表 = 通过。
 
-    for name in sorted(mounted):
-        if name not in clusters:
-            problems.append(
-                f"{name}: 挂载里有凭据，但 clusters 表没有这个集群（孤儿凭据）"
-            )
-        elif not clusters[name]:
-            problems.append(
-                f"{name}: 挂载里有凭据，但该集群 enabled=false（应为重新启用时另签新凭据）"
-            )
-
-    for name in sorted(clusters):
-        if clusters[name] and name not in mounted:
-            problems.append(
-                f"{name}: enabled=true 但挂载里没有 <name>.token（派发会在运行期 401）"
-            )
-
-    return problems
+    判定本身在包里（`credentials.surface_problems`）：集群内 `visibility.scan` 每 15
+    分钟也要判同一件事并告警，两处必须是同一份实现——否则一边说违规、一边说没事，
+    而分不清谁对正是这类检查最容易失效的方式。这里只负责把记录摊平成可打印的行。
+    """
+    return [p["problem"] for p in surface_problems(clusters, mounted)]
 
 
 

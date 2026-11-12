@@ -22,6 +22,7 @@ from __future__ import annotations
 import base64
 import json
 import time
+from collections.abc import Iterable, Mapping
 from pathlib import Path
 
 # 寿命判定的唯一阈值。改这里，巡检脚本与 scan 告警同时改——这就是搬进包里的目的。
@@ -144,3 +145,55 @@ def read_lifetimes(kubeconfigs_dir: str | Path) -> dict[str, dict]:
                                "lifetime_s": None, "remaining_s": None, "stale": None,
                                "error": str(exc)}
     return lifetimes
+
+
+def mounted_clusters(kubeconfigs_dir: str | Path) -> set[str]:
+    """挂载目录里出现过的集群名（按 `<name>.token` 归并）。
+
+    目录不存在 → 抛 FileNotFoundError，与 `read_lifetimes` 同一姿态：由调用方决定
+    "静默跳过"还是"判失败"，不在这里把"没挂载"与"没有凭据"抹平。
+
+    只读文件名、不解析内容：派发会在**运行期**才因为缺凭据而 401，这里要在那之前
+    就能回答"该有的在不在"。
+    """
+    base = Path(kubeconfigs_dir)
+    if not base.is_dir():
+        raise FileNotFoundError(f"凭据目录不存在：{base}")
+    return {entry.name[: -len(".token")] for entry in base.iterdir()
+            if entry.name.endswith(".token") and entry.is_file()}
+
+
+def surface_problems(clusters: Mapping[str, bool],
+                     mounted: Iterable[str]) -> list[dict]:
+    """挂载面与 `clusters` 表的一致性。空列表 = 一致。
+
+    **这是唯一一份判定**：离线巡检脚本要逐条打印、集群内 scan 要逐条告警并去重，
+    两处都调它。否则又是两份真值——一边说违规、一边说没事，没人分得清谁对。
+
+    三种形态：
+    - ``orphan``    表里没有这个集群（谁都不知道它属于谁）
+    - ``disabled``  `enabled=false` 却有凭据（禁用集群留一把可用凭据＝给自己留后门）
+    - ``missing``   `enabled=true` 却没有凭据（派发要到运行期才 401）
+    """
+    mounted_set = set(mounted)
+    out: list[dict] = []
+    for name in sorted(mounted_set):
+        if name not in clusters:
+            out.append({
+                "cluster": name, "kind": "orphan",
+                "problem": f"{name}: 挂载里有凭据，但 clusters 表没有这个集群（孤儿凭据）",
+            })
+        elif not clusters[name]:
+            out.append({
+                "cluster": name, "kind": "disabled",
+                "problem": (f"{name}: 挂载里有凭据，但该集群 enabled=false"
+                            "（应为重新启用时另签新凭据）"),
+            })
+    for name in sorted(clusters):
+        if clusters[name] and name not in mounted_set:
+            out.append({
+                "cluster": name, "kind": "missing",
+                "problem": (f"{name}: enabled=true 但挂载里没有 <name>.token"
+                            "（派发会在运行期 401）"),
+            })
+    return out

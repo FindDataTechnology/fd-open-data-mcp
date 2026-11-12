@@ -40,6 +40,22 @@ def _bound(remaining_days: float, lifetime_days: float = 30.0) -> str:
                  "exp": int(now + remaining_days * DAY)})
 
 
+@pytest.fixture(autouse=True)
+def _mounted_cluster_is_a_real_cluster(session):
+    """挂了 `cheap.token`，`clusters` 表里就必须有一行且 `enabled=true`。
+
+    本文件测的是"到期"，而 scan 现在同时判"挂载面 vs 表"：挂着一个表里没有的凭据
+    就是**孤儿**，会另发一条告警，让这里的 `send.call_count == 0` 断言变成假红。
+    这不是放宽判定，而是让用例的场景自洽——线上挂了凭据的集群一定在表里。
+    """
+    from fd_open_data_mcp.models import Cluster
+
+    if session.query(Cluster).count() == 0:
+        session.add(Cluster(name="cheap", api_server="https://cheap:6443",
+                            namespace="scraw", enabled=True))
+        session.commit()
+
+
 @pytest.fixture
 def creds_dir(tmp_path, monkeypatch):
     """Redirect the mount point to a tmp dir; returns a writer helper."""
@@ -85,19 +101,28 @@ def test_healthy_bound_token_is_silent(session, creds_dir, sent):
 
 
 def test_mounted_but_empty_is_not_green(session, creds_dir, sent):
-    """挂载点在、但一个 `.token` 都没有 ⇒ 不算查过。
+    """挂载点在、但一个 `.token` 都没有 ⇒ 不算查过，而且是"缺凭据"。
 
     实测坏读数（2026-11-12 线上输出）：`credentials_checked: true` +
     `credential: []`，而健康时也是这两个值——两种情形完全同形。于是只要密钥键
     从 `cheap.token` 改成别的、或 Secret 被换空，到期告警会**静默变哑**，
     唯一的外部判据（那个 true）还在说"查过了"。判据必须落到"真评过 token"。
+
+    2026-11-12 起还有第二道：挂载面比对会把"启用的集群缺凭据"单独报出来
+    （surface 的 `missing`）。所以这条用例现在断言两件事——到期检查保持沉默但
+    明说没查过，而**面检查会告警**。空挂载在任何意义上都不再是绿色的。
     """
     (creds_dir.dir / "cheap.ca").write_text("CA", encoding="utf-8")  # 只有证书没有 token
     summary = _scan(session)
     assert summary["credentials_checked"] is False, (
         "目录在但零个 token 不能算 checked——否则与健康同形")
-    assert summary["credential"] == []
-    assert sent.send.call_count == 0  # 仍属部署形态问题，不当风险告警
+    assert summary["credential"] == []          # 到期这一路：无话可说，且明说没查过
+    # 面这一路：cheap 是启用的，却没有 token —— 必须报出来
+    assert [(r["cluster"], r["kind"]) for r in summary["credential_surface"]] == [
+        ("cheap", "missing")]
+    assert sent.send.call_count == 1
+    title, body = sent.send.call_args[0][:2]
+    assert "CREDENTIAL SURFACE" in title and "401" in body
 
 
 def test_stale_bound_token_alerts_with_its_own_title(session, creds_dir, sent):

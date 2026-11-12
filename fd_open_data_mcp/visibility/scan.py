@@ -31,7 +31,7 @@ from sqlalchemy import func
 from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.db import get_database
-from fd_open_data_mcp.models import CrawlPolicy, PolicyRun
+from fd_open_data_mcp.models import Cluster, CrawlPolicy, PolicyRun
 from fd_open_data_mcp.visibility import credentials, snapshot
 from fd_open_data_mcp.visibility.notifiers.factory import get_notifier
 from fd_open_data_mcp.visibility import state
@@ -155,6 +155,45 @@ def check_credential_expiry(now: dt.datetime | None = None) -> tuple[list[dict],
     return fresh, True
 
 
+def check_credential_surface(session: Session) -> tuple[list[dict], bool]:
+    """挂载面与 `clusters` 表的一致性。返回 (新告警项, 是否真的查了)。
+
+    为什么和到期检查一样挂在 scan 里：这类问题**没有运行期症状**。派发只按
+    `enabled=true` 选集群，所以"禁用集群上留着一把可用凭据"永远不会被用到，也就
+    永远不会报错；而"启用的集群缺凭据"要等到真正派发时才 401。2026-11-12 实测：
+    前者在线上存在了几个小时，是我排查另一件事时撞见的，不是被告知的。
+
+    三个刻意选择（与到期检查同一姿态）：
+    - 目录不存在 → ``checked=False``，静默跳过。没挂载是部署形态差异，不是风险。
+    - `clusters` 表读不到 → 跳过并记日志，不把整轮 scan 拖垮。
+    - **只报告，不处置**：自动删一把可能正被别处使用的凭据，比留个孤儿更难收场。
+    """
+    try:
+        mounted = credentials.mounted_clusters(_CREDENTIALS_DIR)
+    except FileNotFoundError:
+        logger.info("credential surface: %s 未挂载，跳过", _CREDENTIALS_DIR)
+        return [], False
+    except OSError as exc:
+        logger.warning("credential surface: 读 %s 失败（%s），本轮跳过",
+                       _CREDENTIALS_DIR, exc)
+        return [], False
+
+    try:
+        rows = session.query(Cluster.name, Cluster.enabled).all()
+    except Exception as exc:  # 库抖动不该让整轮扫描失败
+        logger.warning("credential surface: 读 clusters 表失败（%s），本轮跳过", exc)
+        return [], False
+
+    clusters = {str(name): bool(enabled) for name, enabled in rows}
+    fresh: list[dict] = []
+    for problem in credentials.surface_problems(clusters, mounted):
+        subject = f"credential-surface:{problem['cluster']}:{problem['kind']}"
+        if state.already_alerted(subject, "credential-surface"):
+            continue
+        fresh.append({**problem, "_subject": subject})
+    return fresh, True
+
+
 def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
     """One scan tick. Returns a summary dict (also printed by ``main``)."""
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -234,12 +273,19 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
     summary["credential"] = new_credential
     summary["credentials_checked"] = checked
 
+    # 2c. 挂载面 vs clusters 表（alert-on-credential-surface-mismatch）。
+    # 与 2b 同一个理由：折进同一条消息、共用通道与去重。判据在包里
+    # （`credentials.surface_problems`），离线巡检脚本调的是同一份。
+    new_surface, surface_checked = check_credential_surface(session)
+    summary["credential_surface"] = new_surface
+    summary["credential_surface_checked"] = surface_checked
+
     # 3. batch all new events into ONE message (ServerChan rate-limit aware)
     n_total = (len(new_failed) + len(new_refused) + len(new_zero_yield)
-               + len(new_stale) + len(new_credential))
+               + len(new_stale) + len(new_credential) + len(new_surface))
     if n_total > 0:
         title, body = _format_message(new_failed, new_refused, new_zero_yield,
-                                      new_stale, new_credential)
+                                      new_stale, new_credential, new_surface)
         notifier.send(title, body, level="error")
         summary["notified"] = True
         # mark only AFTER a send attempt so a sink outage doesn't drop alerts
@@ -249,6 +295,9 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
             state.mark_alerted(rec["run_id"], "stale")
         for rec in new_credential:
             state.mark_alerted(rec["_subject"], "credential",
+                               ttl_sec=_CREDENTIAL_REMIND_SEC)
+        for rec in new_surface:
+            state.mark_alerted(rec["_subject"], "credential-surface",
                                ttl_sec=_CREDENTIAL_REMIND_SEC)
 
     # 4. advance the watermark to the newest terminal run covered
@@ -263,9 +312,12 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
 
 def _format_message(failed: list[dict], refused: list[dict],
                     zero_yield: list[dict], stale: list[dict],
-                    credential: list[dict] | None = None) -> tuple[str, str]:
+                    credential: list[dict] | None = None,
+                    surface: list[dict] | None = None) -> tuple[str, str]:
     credential = credential or []
-    n = len(failed) + len(refused) + len(zero_yield) + len(stale) + len(credential)
+    surface = surface or []
+    n = (len(failed) + len(refused) + len(zero_yield) + len(stale)
+         + len(credential) + len(surface))
     alerting = failed or refused or zero_yield
     if alerting:
         title = f"🚨 CRAWL FAILURE · {n} run(s)"
@@ -277,6 +329,10 @@ def _format_message(failed: list[dict], refused: list[dict],
         # `🔑 WORKER CREDENTIAL · 1 cluster(`，**数量后面的单位被吃掉**，
         # 只剩一个开括号。所以这里不写单位，把集群数留在可见范围内。
         title = f"🔑 WORKER CREDENTIAL · {len(credential)}"
+    elif surface:
+        # 面不一致（孤儿/禁用却有/启用却缺）与到期是两件事：一个要"去刷新"，
+        # 一个要"去改配置"。混用一个标题会让人按错处置。
+        title = f"🔑 CREDENTIAL SURFACE · {len(surface)}"
     else:
         title = f"⏳ CRAWL STALE · {n} run(s)"
     lines: list[str] = []
@@ -297,6 +353,8 @@ def _format_message(failed: list[dict], refused: list[dict],
         lines.append(f" • {rec['policy']}   stale {rec['age_minutes']}min   {rec['job_ref'] or ''}")
     for rec in credential:
         lines.append(f" • {rec['problem']}")
+    for rec in surface:
+        lines.append(f" • {rec['problem']}")
     body = "\n".join(lines)
     if alerting:
         jobs = ", ".join(r["job_ref"] for r in (failed + refused + zero_yield) if r.get("job_ref"))
@@ -308,6 +366,19 @@ def _format_message(failed: list[dict], refused: list[dict],
                  if len(credential) == 1 else
                  '\n→ 刷新：python3 scripts/rotate_worker_credential.py --cluster <name> '
                  '--mode bound --apply（或等 CI 的 refresh-worker-credentials）')
+    if surface:
+        # 处置与"到期"不同：孤儿/禁用是**删挂载**，缺失是**签发**。给错命令等于教人
+        # 用错办法，所以按 kind 分开写，而不是复用上面那条刷新提示。
+        missing = [r["cluster"] for r in surface if r["kind"] == "missing"]
+        stale_keys = [r["cluster"] for r in surface if r["kind"] != "missing"]
+        if stale_keys:
+            body += (f"\n→ 清理：删掉挂载里的 {'/'.join(f'{c}.token' for c in stale_keys)}"
+                     "（disabled 或表外集群不该留凭据）")
+        if missing:
+            body += ('\n→ 签发：python3 scripts/rotate_worker_credential.py --cluster '
+                     f'{missing[0]} --mode bound --apply' if len(missing) == 1 else
+                     '\n→ 签发：python3 scripts/rotate_worker_credential.py --cluster <name> '
+                     '--mode bound --apply（缺凭据的集群逐个签）')
     return title[:32], body
 
 
