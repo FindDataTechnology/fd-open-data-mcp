@@ -445,9 +445,23 @@ def _station_unreachable(station_id: int, err: Exception) -> str:
 
 # ── cockpit aggregations (panel-ui-refresh: KPI row + yield trend) ─────────
 def kpi_snapshot(s) -> dict:
-    """Home KPI row from `policy_runs`: running count, 24h terminal-run
-    success rate, 24h summed new rows, and 24h failures (failed +
-    zero_yield — the two operator-actionable terminal states)."""
+    """Home KPI row from `policy_runs`: running count, 24h survival rate over
+    *decidable* runs, 24h summed new rows, and 24h failures (failed +
+    zero_yield — the two operator-actionable terminal states).
+
+    成功率口径（2026-11-12 定，见 openspec change
+    `align-panel-success-rate-caliber`）：
+
+        成功率 = success / (success + failed + zero_yield)
+
+    分母**不含** running（未终态）、no_op / redundant（"这一轮没有信号"：
+    空计划、抓到但无新增）。它们记录、也在页面上单独计数，但不该把健康算成故障。
+    此前分母是所有非 running 终态，线上 24h 实测 failed 3 / no_op 3 / success 5
+    → 报 45.5%，而可判定失败率其实是 3/8。判据只有一处定义：
+    `visibility.scan.ALERT_STATUSES`（告警分类器同源）。
+    """
+    from fd_open_data_mcp.visibility.scan import ALERT_STATUSES, NO_SIGNAL_STATUSES
+
     now = dt.datetime.utcnow()
     since = now - dt.timedelta(hours=24)
     running = int(s.query(func.count(PolicyRun.id))
@@ -457,16 +471,25 @@ def kpi_snapshot(s) -> dict:
         .filter(PolicyRun.finished_at >= since,
                 PolicyRun.status != "running")
         .group_by(PolicyRun.status).all())
-    terminal = sum(by_status.values())
     successes = by_status.get("success", 0)
+    failures = sum(by_status.get(st, 0) for st in ALERT_STATUSES)
+    # 可判定分母：只有"成功"与"该报警的失败"。其余状态单独计数、不隐藏。
+    decidable = successes + failures
+    no_signal = sum(by_status.get(st, 0) for st in NO_SIGNAL_STATUSES)
+    unknown = sum(c for st, c in by_status.items()
+                  if st != "success" and st not in ALERT_STATUSES
+                  and st not in NO_SIGNAL_STATUSES)
     new_rows = int(s.query(func.coalesce(func.sum(PolicyRun.rows_new), 0))
                    .filter(PolicyRun.finished_at >= since,
                            PolicyRun.rows_new.isnot(None)).scalar() or 0)
     return {
         "running": running,
-        "success_rate": round(100 * successes / terminal) if terminal else None,
+        "success_rate": round(100 * successes / decidable) if decidable else None,
         "new_rows": new_rows,
-        "failures": by_status.get("failed", 0) + by_status.get("zero_yield", 0),
+        "failures": failures,
+        "no_signal": no_signal,
+        # 未知状态也进不了分母，但必须让人看见——否则新状态一出现就静默消失。
+        "unknown": unknown,
     }
 
 

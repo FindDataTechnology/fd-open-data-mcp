@@ -14,9 +14,9 @@
 {% from "_macros.html" import svg_bars %}
 <div class="kpi-row">
   <div class="kpi"><div class="kpi-value">{{ kpi.running }}</div><div class="kpi-label">{{ t('运行中') }}</div></div>
-  <div class="kpi k-ok"><div class="kpi-value">{{ kpi.success_rate ~ '%' if kpi.success_rate is not none else '—' }}</div><div class="kpi-label">{{ t('24h 成功率') }}</div></div>
+  <div class="kpi k-ok"><div class="kpi-value">{{ kpi.success_rate ~ '%' if kpi.success_rate is not none else '—' }}</div><div class="kpi-label">{{ t('24h 成功率（可判定）') }}</div></div>
   <div class="kpi"><div class="kpi-value">{{ "{:,}".format(kpi.new_rows) }}</div><div class="kpi-label">{{ t('24h 新增行') }}</div></div>
-  <div class="kpi k-err"><div class="kpi-value">{{ kpi.failures }}</div><div class="kpi-label">{{ t('24h 失败') }}</div></div>
+  <div class="kpi k-err"><div class="kpi-value">{{ kpi.failures }}</div><div class="kpi-label">{{ t('24h 失败') }}{% if kpi.no_signal %} · {{ t('无信号') }} {{ kpi.no_signal }}{% endif %}{% if kpi.unknown %} · {{ t('未知状态') }} {{ kpi.unknown }}{% endif %}</div></div>
 </div>
 
 <section class="card mt">

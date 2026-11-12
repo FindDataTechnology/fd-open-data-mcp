@@ -54,7 +54,18 @@ def _classify(run: PolicyRun) -> str | None:
 
 # Terminal non-success statuses the scan queries for (spec crawl-visibility:
 # failed, zero_yield, including guardrail refusals recorded as failed rows).
-_ALERT_STATUSES = ("failed", "zero_yield")
+#
+# 2026-11-12：升为**公开**常量并被面板 KPI 复用。此前面板自己算成功率，把
+# ``no_op``（空计划，本函数明确判为"不可告警"）也算进了失败分母——线上 24h
+# 实测 failed 3 / no_op 3 / success 5，面板报 45.5%，而真正可判定的失败率是
+# 3/8。同一个"什么算失败"必须只有一处定义，否则两处各自漂移。
+ALERT_STATUSES = ("failed", "zero_yield")
+
+#: 记录但不告警、也不该计入成功率的终态（"这一轮没有信号"）。
+NO_SIGNAL_STATUSES = ("no_op", "redundant")
+
+#: 兼容旧名（仓内/仓外仍可能有引用）。
+_ALERT_STATUSES = ALERT_STATUSES
 
 
 def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
