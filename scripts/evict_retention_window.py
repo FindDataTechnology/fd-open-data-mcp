@@ -61,6 +61,24 @@ def _args(argv=None):
     return p.parse_args(argv)
 
 
+def _refusal(ct) -> str | None:
+    """不可自动淘汰时返回理由，可自动淘汰返回 None（纯函数，便于单测）。
+
+    两档都在这里拒绝，且**理由不同**——混成一句会让人以为改契约就能解决：
+
+    * `re_fetchable is False` / `re_fetch_cost == 'impossible'` —— 取不回来，一行都不许动；
+    * `re_fetch_cost == 'rebuild'` —— **能**取回，但代价必须有人认。spec R5 只禁止
+      "没有成本数字"的淘汰；数字能在库里（`re_fetch_cost_hours`），但"拿 77 kB 换
+      1,128 小时"这种账得人来拍，工具不该替他拍。
+    """
+    if ct.re_fetchable is False:
+        return "契约声明不可回收"
+    cost = getattr(ct, "re_fetch_cost", None)
+    if cost in ("impossible", "rebuild"):
+        return ct.cost_phrase() if hasattr(ct, "cost_phrase") else cost
+    return None
+
+
 def _victims_sql(cls: str) -> str:
     """返回挑出待淘汰行的 SQL（占位 :src / :fam / :cutoff 由调用方补）。
 
@@ -172,12 +190,10 @@ def main(argv=None) -> int:
             if state == "active":
                 print(f"  跳过 {m['src']}/{m['fam']}：{why}——豁免期内不淘汰")
                 continue
-            if ct.re_fetchable is False:
-                # 4.1 硬闸：明确声明"取不回来"的层，一行都不许动。
-                # 契约自相矛盾（类写着 T/W 该删、可重取性写着 false 删了就没了）时，
-                # 唯一正确的动作是停下并交给人，不是替人挑一个。
-                print(f"  拒绝 {m['src']}/{m['fam']}：契约声明 re_fetchable=false"
-                      f"（不可回收层，淘汰不可逆）——策略不得触及，需人工改契约")
+            refusal = _refusal(ct)
+            if refusal:
+                print(f"  拒绝 {m['src']}/{m['fam']}：{refusal}"
+                      f"——策略不得自动触及，需人工改契约或给出豁免")
                 continue
             if ct.re_fetchable is None:
                 # 未声明 ≠ 不可回收。淘汰与否仍由类别决定（T/W 本身就是"该删"的声明），

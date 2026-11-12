@@ -1827,6 +1827,13 @@ class DataRetentionContract(Base):
     retention_class = Column(String(8))          # P 永久 / F 全历史 / W 滚动窗口 / T 只留当期
     retention_window_days = Column(Integer)
     re_fetchable = Column(Boolean)
+    # 重取代价三态（alembic 0023）：'one_http' / 'rebuild' / 'impossible'，NULL = 未声明。
+    # 布尔 `re_fetchable` 装不下第三态——`akshare/aum` 可重取但要重算约 47 天，
+    # 用 false 写它等于在契约里写一句假话（spec R1 要求的正是这一项）。
+    re_fetch_cost = Column(String(16))
+    # `rebuild` 的耗时估算（小时）。淘汰工具拒绝时会把小时数报出来，
+    # 让人拿"释放多少 MB"去对"重算多少小时"（spec R5）。
+    re_fetch_cost_hours = Column(Integer)
     upstream_history_mutable = Column(Boolean)
     volume_budget_mb = Column(Integer)
     # ── 窗口之外的保留必须显式（spec R: "Retention window is business-driven"）──

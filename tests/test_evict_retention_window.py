@@ -74,18 +74,46 @@ def test_batch_delete_is_by_id_not_by_predicate():
 
 
 def test_refuses_families_declared_not_re_fetchable():
-    """4.1：`re_fetchable is False` 才是"不可回收"，必须拒绝。
+    """4.1：显式"取不回来"必须拒绝；未声明（NULL）不能当成不可回收。
 
     三态，不能写成 `if not ct.re_fetchable`：那会把 **未声明（NULL）** 也当成
     "不可回收"。2026-11-11 实测：T/W 里显式 false 的一个都没有，未声明的有 3 个
     （polygon/employee_count、polygon/market_capitalization、akshare/performance），
     旧写法把这三族全拒了、还把文案说成"声明 false"——报出去的是一句假话。
     """
+    mod = load()
+    Contract = mod._load_audit().Contract
+    refused = Contract("s", "f", "W", 730, False, True, 64,
+                           re_fetch_cost="impossible")
+    assert mod._refusal(refused), "显式不可回收必须拒绝"
+    undeclared = Contract("s", "f", "W", 730, None, True, 64)
+    assert mod._refusal(undeclared) is None, "未声明不等于不可回收，不能拒"
+    cheap = Contract("s", "f", "W", 730, True, True, 64, re_fetch_cost="one_http")
+    assert mod._refusal(cheap) is None, "一次 HTTP 可取回的层应当可自动淘汰"
+    # 源码层面仍守住"不把 NULL 当 false"这条老教训
     src = SCRIPT.read_text()
-    assert "if ct.re_fetchable is False:" in src, "必须只对显式 false 拒绝"
     assert "if not ct.re_fetchable:" not in src, "不得把 NULL 当成不可回收"
-    assert "不可回收层" in src
     assert "re_fetchable 未声明" in src, "未声明要单独提示，不能沉默"
+
+
+def test_refuses_rebuild_layers_even_though_they_are_fetchable():
+    """`rebuild` 不是"取不回来"，而是"取回的代价得有人认"。
+
+    用真实那一条做判据：akshare/aum 可重取，但要重算 40 万行 ≈ 1,128 小时
+    （tasks 5.1 实测 0.1 行/秒）。它整族只占 38 MB、超窗部分 77 kB——工具若按
+    "能取回"就自动删，等于替人拍了一个"77 kB 换 47 天"的账。
+    """
+    mod = load()
+    Contract = mod._load_audit().Contract
+    aum = Contract("akshare", "aum", "W", 1826, True, True, 512,
+                       re_fetch_cost="rebuild", re_fetch_cost_hours=1128)
+    why = mod._refusal(aum)
+    assert why, "rebuild 必须拒绝自动淘汰"
+    assert "1128" in why, f"拒绝理由要带出重算成本，实际：{why}"
+    # 没有耗时估算时也要拒，且要说明"还没给估算"——不能因为没数字就放行
+    no_est = Contract("s", "f", "W", 730, True, True, 64, re_fetch_cost="rebuild")
+    why2 = mod._refusal(no_est)
+    assert why2 and "尚未" in why2, f"缺估算要说清，实际：{why2}"
 
 
 def test_apply_asserts_row_count_invariant():
@@ -125,15 +153,18 @@ def test_apply_asserts_row_count_invariant():
         raise AssertionError("修订表变化时必须抛")
 
 
-def test_exemption_check_precedes_the_not_re_fetchable_refusal():
-    """豁免判断必须在 re_fetchable 硬闸**之前**——两者都是"不淘汰"，但文案不同。
+def test_exemption_check_precedes_the_refusal_gate():
+    """豁免判断必须在"拒绝"分支**之前**——两者都是"不淘汰"，但文案相反。
 
-    2026-11-12 实测：`akshare/aum` 声明 re_fetchable=false 且持有一条有效豁免，
+    2026-11-12 实测：`akshare/aum` 持有一条有效豁免（当时还写着 re_fetchable=false），
     工具先命中硬闸，于是报"需人工改契约"——把人引去改一条本来正确的契约。
     正确的说法是"豁免期内不淘汰，责任人 X，到期 Y"。
+
+    锚点用 `if refusal:` 而不是某句文案：文案会随重构变（`_refusal()` 抽出后
+    "不可回收层"那句就没了），但"先问豁免、再问能不能删"这个顺序是判据本身。
     """
     src = SCRIPT.read_text()
     exemption_at = src.index('if state == "active":')
-    refusal_at = src.index("不可回收层")
+    refusal_at = src.index("if refusal:")
     assert exemption_at < refusal_at, \
-        "豁免分支必须在 re_fetchable=false 拒绝之前，否则有效豁免会被报成'需改契约'"
+        "豁免分支必须在拒绝分支之前，否则有效豁免会被报成'需改契约'"

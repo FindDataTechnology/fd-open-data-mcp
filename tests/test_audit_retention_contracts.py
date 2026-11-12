@@ -165,7 +165,10 @@ def test_t_class_over_window_is_not_a_capacity_violation():
     由巡检/覆盖度那侧报，不进容量违规——否则闸门永远红，最后被人关掉。
     """
     mod = load()
-    c = mod.Contract("akshare", "yield", "T", 30, True, False, 64)
+    # 五项齐备才算"合规契约"。本用例判的是超窗口径，不是完整性，
+    # 所以 cost 要显式给——否则会顺带命中 contract_incomplete 而分不清在验哪条。
+    c = mod.Contract("akshare", "yield", "T", 30, True, False, 64,
+                     re_fetch_cost="one_http")
     v = mod.classify_violations(c, rows=998, over_window=898,
                                rows_per_entity_recent=1.0, family="yield")
     assert v == [], f"T 类不该因超窗报容量违规，实际 {v}"
@@ -192,9 +195,51 @@ def test_t_w_without_re_fetchable_is_a_contract_gap_not_capacity():
                                 rows_per_entity_recent=1.0, family="performance")
     assert any(x.startswith("contract_incomplete") for x in v)
     assert mod.severity_of(v) == "contract_gap"     # 不是 capacity
-    # 显式 false / true 都不报这条
+    # 显式 false / true（且五项齐备）都不报这条
     for flag in (False, True):
-        c2 = mod.Contract("s", "f", "T", None, flag, None, 64)
+        c2 = mod.Contract("s", "f", "T", None, flag, None, 64,
+                          re_fetch_cost="one_http" if flag else "impossible")
         v2 = mod.classify_violations(c2, rows=10, over_window=0,
                                      rows_per_entity_recent=1.0, family="f")
         assert not any(x.startswith("contract_incomplete") for x in v2)
+
+
+def test_t_w_without_re_fetch_cost_names_the_third_state():
+    """R1 的第三项（`re_fetch_cost`）缺了也要报，且同样只算契约缺口。
+
+    为什么单独一条：布尔 `re_fetchable` 说不出"能取回但很贵"，而这正是 aum 唯一
+    诚实的描述（可重取，但要 1,128 小时）。缺这一项时淘汰工具只能退回布尔判断，
+    等于丢掉"贵不贵"这一档——2026-11-12 之前库里就是这个状态（alembic 0023 才补列）。
+
+    守卫要求：报出来必须**点名三态**，否则读的人不知道该怎么填。
+    """
+    mod = load()
+    c = mod.Contract("akshare", "aum", "W", 1826, True, True, 512)   # 只有布尔
+    v = mod.classify_violations(c, rows=407067, over_window=0,
+                                rows_per_entity_recent=0.0, family="aum")
+    hits = [x for x in v if x.startswith("contract_incomplete") and "re_fetch_cost" in x]
+    assert hits, f"缺 re_fetch_cost 必须被点名，实际 {v}"
+    assert "rebuild" in hits[0] and "one_http" in hits[0], \
+        f"要说清三态怎么填，实际：{hits[0]}"
+    assert mod.severity_of(v) == "contract_gap", "缺字段不是容量事故，别让闸门永久红"
+    # 填了三态就不该再报
+    c2 = mod.Contract("akshare", "aum", "W", 1826, True, True, 512,
+                      re_fetch_cost="rebuild", re_fetch_cost_hours=1128)
+    v2 = mod.classify_violations(c2, rows=407067, over_window=0,
+                                 rows_per_entity_recent=0.0, family="aum")
+    assert not any("re_fetch_cost" in x for x in v2)
+
+
+def test_cost_is_co_presented_with_over_window():
+    """R5：报"能释放多少"时必须同时报"要重算多久"。
+
+    只报容量不报代价，就会得出"为了 77 kB 删掉要重算 1,128 小时的数据"这种账——
+    aum 就是那个实例（2026-11-12 实测：整族 38 MB、超窗部分 77 kB、重算 47 天）。
+    """
+    mod = load()
+    c = mod.Contract("akshare", "aum", "W", 1826, True, True, 512,
+                     re_fetch_cost="rebuild", re_fetch_cost_hours=1128)
+    v = mod.classify_violations(c, rows=407067, over_window=222,
+                                rows_per_entity_recent=0.0, family="aum")
+    hit = [x for x in v if x.startswith("over_window")][0]
+    assert "1128" in hit, f"超窗提示必须带重算成本，实际：{hit}"

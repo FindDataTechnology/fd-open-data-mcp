@@ -58,9 +58,11 @@ DEFAULT_CONTRACTS: tuple[tuple[str, str, str, int | None, bool, bool, int], ...]
     ("dounan-flower-price", "*", F, None, False, True, 64),
     ("mct-star-hotel", "*", F, None, False, True, 64),
     # 滚动窗口
-    # re_fetchable=False 不是笔误：该族 1,826 天日频历史只能由「最新规模」快照接口取，
-    # 历史补不回来（2026-11-12 实测绑定链 fund_individual_basic_info_xq）。
-    ("akshare", "aum", W, 1826, False, True, 512),
+    # 2026-11-12 订正：上一版把它写成 re_fetchable=False，理由是"五年日频历史只能由
+    # 「最新规模」快照接口取回"。**技术上它能重取**，只是要重算 40 万行 ≈ 1,128 小时
+    # （tasks 5.1 实测 0.1 行/秒）。布尔装不下"很贵"，才被迫写成 false——那是在契约里
+    # 写一句假话。0023 加了 re_fetch_cost 三态后，这里如实写成 rebuild + 耗时。
+    ("akshare", "aum", W, 1826, True, True, 512, "rebuild", 1128),
     ("polygon", "price", W, 730, True, True, 128),
     ("polygon", "trading_volume", W, 730, True, True, 128),
     ("akshare", "price", W, 730, True, True, 128),
@@ -97,6 +99,24 @@ class Contract:
     exempt_reason: str | None = None
     exempt_owner: str | None = None
     exempt_until: object = None      # datetime.date | None
+    # 重取代价三态（spec R1 的第三项）：'one_http' / 'rebuild' / 'impossible'。
+    # 布尔 re_fetchable 说不出"能取回但很贵"，而那正是最该被看见的一类
+    # （akshare/aum：可重取，但要 1,128 小时）。
+    re_fetch_cost: str | None = None
+    re_fetch_cost_hours: int | None = None
+
+    def cost_phrase(self) -> str:
+        """一句话说清"删了怎么拿回来"——报告与淘汰拒绝共用同一句话，避免两处口径。"""
+        c = (self.re_fetch_cost or "").strip()
+        if c == "impossible":
+            return "不可重建（上游已无此历史）"
+        if c == "rebuild":
+            if self.re_fetch_cost_hours:
+                return f"需重建，估算约 {self.re_fetch_cost_hours} 小时"
+            return "需重建，但尚未给出耗时估算"
+        if c == "one_http":
+            return "一次 HTTP 即可取回"
+        return "重取代价未声明"
 
     def exemption(self, today=None):
         """返回 ("active" | "expired" | "none", 说明)。纯函数，便于单测。"""
@@ -129,9 +149,20 @@ def resolve_contract(source: str | None, family: str | None, db_contracts=None) 
             for key, c in db_contracts.items():
                 if key == cand:
                     return c
-        for src, fam, cls, win, refetch, mut, budget in DEFAULT_CONTRACTS:
+        for entry in DEFAULT_CONTRACTS:
+            src, fam, cls, win, refetch, mut, budget = entry[:7]
+            # 第 8/9 位可选：重取代价三态 + 耗时估算（alembic 0023）。只有确需
+            # "能取回但很贵"这一档的族才写（目前只有 aum）。
+            cost = entry[7] if len(entry) > 7 else None
+            hours = entry[8] if len(entry) > 8 else None
+            if cost is None and refetch is not None:
+                # seed 是**声明**，0023 已按同一条映射回填库（false→impossible、
+                # true→one_http）。两边各说一套就是新的漂移源，所以这里照抄那条规则；
+                # `rebuild` 永不推断——它必须由人对着实测数字写。
+                cost = "one_http" if refetch else "impossible"
             if (src, fam) == cand:
-                return Contract(s, f, cls, win, refetch, mut, budget)
+                return Contract(s, f, cls, win, refetch, mut, budget,
+                                re_fetch_cost=cost, re_fetch_cost_hours=hours)
     return None
 
 
@@ -154,15 +185,28 @@ def load_db_contracts(conn) -> dict:
         """)).first() is not None
     except Exception:  # noqa: BLE001 — 非 Postgres（sqlite 测试）没有 information_schema
         has_exempt = False
+    # 同理探测 0023 的两列：没跑迁移的环境要能继续审计（退成"未声明"并点名），
+    # 而不是整个审计崩掉。
+    has_cost = False
+    try:
+        has_cost = conn.execute(text("""
+            SELECT 1 FROM information_schema.columns
+             WHERE table_name = 'data_retention_contracts'
+               AND column_name = 're_fetch_cost'
+        """)).first() is not None
+    except Exception:  # noqa: BLE001
+        has_cost = False
+    extra = ""
     if has_exempt:
-        rows = conn.execute(text(f"""
-            SELECT {_COLS}, exempt_reason, exempt_owner, exempt_until
-              FROM data_retention_contracts
-        """)).all()
+        extra += ", exempt_reason, exempt_owner, exempt_until"
     else:
-        rows = conn.execute(text(
-            f"SELECT {_COLS}, NULL AS exempt_reason, NULL AS exempt_owner,"
-            f" NULL AS exempt_until FROM data_retention_contracts")).all()
+        extra += (", NULL AS exempt_reason, NULL AS exempt_owner,"
+                  " NULL AS exempt_until")
+    if has_cost:
+        extra += ", re_fetch_cost, re_fetch_cost_hours"
+    else:
+        extra += ", NULL AS re_fetch_cost, NULL AS re_fetch_cost_hours"
+    rows = conn.execute(text(f"SELECT {_COLS}{extra} FROM data_retention_contracts")).all()
     out = {}
     for r in rows:
         m = r._mapping
@@ -173,6 +217,7 @@ def load_db_contracts(conn) -> dict:
             m["retention_window_days"], m["re_fetchable"],
             m["upstream_history_mutable"], m["volume_budget_mb"] or 0,
             m["exempt_reason"], m["exempt_owner"], m["exempt_until"],
+            m["re_fetch_cost"], m["re_fetch_cost_hours"],
         )
     return out
 
@@ -198,12 +243,15 @@ def classify_violations(contract: Contract | None, *, rows: int, over_window: in
         # 删掉等于把"陈旧"变成"没有"，而未知与空是两件事（这正是本仓反复踩的坑）。
         # T 类的窗口含义是"快照多快该刷新"，属于取数覆盖问题，不是容量问题。
         state, why = contract.exemption()
+        # 成本必须与"可释放多少"同框出现（spec R5）——只报容量、不报代价的淘汰
+        # 就是"为了 77 kB 删掉要重算 47 天的数据"这种账。
+        cost = f"；该族{cost_phrase}" if (cost_phrase := contract.cost_phrase()) else ""
         if state == "expired":
             out.append(f"over_window：{over_window} 行超出 {contract.window_days} 天窗口；"
-                       f"{why}——豁免已失效，该部分数据回到可淘汰")
+                       f"{why}——豁免已失效，该部分数据回到可淘汰{cost}")
         else:
             out.append(f"over_window：{over_window} 行超出 {contract.window_days} 天窗口，"
-                       f"应淘汰或给出豁免")
+                       f"应淘汰或给出豁免{cost}")
     if contract.cls in (T, W) and contract.re_fetchable is None:
         # 未声明 ≠ 不可回收，也 ≠ 可回收。淘汰工具靠这个字段决定"删了能不能拿回来"，
         # 空着等于把判断留给下一个人。2026-11-11 实测：T/W 里显式 false 的 0 个、
@@ -211,6 +259,13 @@ def classify_violations(contract: Contract | None, *, rows: int, over_window: in
         # akshare/performance）——正是那几个"只有跑淘汰工具时才看得见"的缺口。
         out.append("contract_incomplete：re_fetchable 未声明（T/W 靠它判断"
                    "“删了能不能拿回来”，留空等于把判断交给下一个人）")
+    if contract.cls in (T, W) and contract.re_fetch_cost is None:
+        # R1 的五项里，re_fetch_cost 是唯一曾经"规范要求、库里没有落点"的一项
+        # （alembic 0023 才补上）。它比布尔多说一档"能取回但很贵"，而那正是
+        # aum 这类族唯一诚实的描述。留空就让淘汰工具退回布尔，等于丢一档信息。
+        out.append("contract_incomplete：re_fetch_cost 未声明（one_http / rebuild / "
+                   "impossible 三态；缺它就只能用布尔'能不能拿回来'近似，"
+                   "装不下'能拿回来但要重算很久'）")
     if contract.cls == P and contract.window_days is not None:
         # 矛盾在**契约本身**：P 是不可回收，声明窗口即自相矛盾。
         # 不能拿 over_window 判——P 类有五年以上的老行恰恰是对的。2026-11-11 实测：
