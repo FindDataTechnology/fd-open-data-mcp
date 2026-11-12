@@ -148,3 +148,48 @@ def test_illegal_window_declaration_fails_closed(session, concept):
     with pytest.raises(ValueError):
         write_cache(session, concept.id, "country", 1, "2020-12-31", "5.3", "%",
                     "probe", granularity="year")
+
+
+# --- 边界：同值重写不是「改写」 ---------------------------------------------
+
+def test_rewriting_identical_value_is_allowed_and_leaves_no_revision(session, concept):
+    """at-least-once 重投递会把一模一样的一条再落一次，那不是修订。
+
+    2026-11-11 实测：闸门只看「命中了既有定型行」，不看到底改没改值，于是
+    `test_stream_ingest.py::test_redelivery_is_idempotent` 在崩后重投递场景下
+    抛 FinalizedObservationError —— 消息永远拿不到 ack。同时旧实现还会写一条
+    old==new 的修订行，让 as-of 回放看到一次并不存在的变更。
+    """
+    write_cache(session, concept.id, "country", 1, "2020-12-31", "5.2", "%",
+                "probe", granularity="year")
+    before_rev = _revisions(session)
+
+    # 同值同单位：不抛、不多出行、不留修订
+    write_cache(session, concept.id, "country", 1, "2020-12-31", "5.2", "%",
+                "probe", granularity="year")
+    assert _count(session) == 1
+    assert _revisions(session) == before_rev
+
+    # 但值真的变了，闸照旧拦
+    with pytest.raises(FinalizedObservationError):
+        write_cache(session, concept.id, "country", 1, "2020-12-31", "9.9", "%",
+                    "probe", granularity="year")
+
+
+def test_range_rewrite_of_identical_values_is_allowed(session, concept):
+    """整段重抓（W 类窗口内）若值没变，不该被定型闸拦下，也不该记 batch 修订。"""
+    write_cache_range(session, concept.id, "country", 1,
+                      {"2020-12-31": "5.2", "2021-12-31": "6.1"}, "%", "probe",
+                      granularity="year")
+    before_rev = _revisions(session)
+    write_cache_range(session, concept.id, "country", 1,
+                      {"2020-12-31": "5.2", "2021-12-31": "6.1"}, "%", "probe",
+                      granularity="year")
+    assert _count(session) == 2
+    assert _revisions(session) == before_rev
+
+    # 值变了（哪怕只有一个点）→ 照旧要 reason
+    with pytest.raises(FinalizedObservationError):
+        write_cache_range(session, concept.id, "country", 1,
+                          {"2020-12-31": "5.2", "2021-12-31": "6.2"}, "%", "probe",
+                          granularity="year")

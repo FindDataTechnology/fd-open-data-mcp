@@ -1688,11 +1688,27 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
             if cov_entity_type and entity_id is not None:
                 _dates = _series_dates(s, cid, cov_entity_type, entity_id)
                 _cov = _coverage(_dates, start, end)
-                in_window = [d for d in _dates if start <= d <= end]
+                # 覆盖区间必须按"这条观测代表哪段日历"折算：一条 `2019` 覆盖整年。
+                # 此前直接拿 (d, d) 去合并，按年的串在 _merge_intervals 里
+                # split("-") 就炸，整块被 except 吞成 "coverage unknown"。
+                from fd_open_data_mcp.semantic.dates import (
+                    observation_period as _obs_period,
+                )
+
+                _win = [_obs_period(start), _obs_period(end)]
+                _win_lo = _win[0][0].isoformat() if _win[0] else start
+                _win_hi = _win[1][1].isoformat() if _win[1] else end
+                _spans = []
+                for _d in _dates:
+                    _per = _obs_period(_d)
+                    if _per is None:
+                        continue
+                    _lo, _hi = _per[0].isoformat(), _per[1].isoformat()
+                    if _lo <= _win_hi and _hi >= _win_lo:      # 日历相交，而非字典序包含
+                        _spans.append((max(_lo, _win_lo), min(_hi, _win_hi)))
                 out["coverage"] = {
                     "requested": [start, end],
-                    "covered": [list(iv) for iv in _merge_intervals(
-                        (d, d) for d in in_window)],
+                    "covered": [list(iv) for iv in _merge_intervals(_spans)],
                     "missing": [list(g) for g in _cov.gaps],
                     "known_empty": [list(g) for g in _cov.known_empty],
                     "complete": _cov.complete,
@@ -1926,17 +1942,33 @@ def _enable_mcp_session_reaping() -> None:
         timeout = float(os.environ.get("MCP_SESSION_IDLE_TIMEOUT", "1800") or 0)
     except ValueError:
         timeout = 1800.0
-    if timeout <= 0 or getattr(
-        StreamableHTTPSessionManager.__init__, "_fd_reaping_patch", False
-    ):
+    # 幂等但**值敏感**：判据是"已经用同一个值装过"，不是"装过"。
+    # 只看布尔标记的话，第二次调用（哪怕 MCP_SESSION_IDLE_TIMEOUT 改了）会被静默忽略，
+    # 实际生效的永远是第一次装进去的那个值——配置在安装那一刻被固化。
+    # 2026-11-12 实测：先按默认装上 1800，再设 env=60 调用，管理器拿到的仍是 1800，
+    # 于是 `test_session_reaping` 单独跑 6 passed、整套里两条红（前面有测试启动过 app）。
+    current = StreamableHTTPSessionManager.__init__
+    installed = getattr(current, "_fd_reaping_timeout", None)
+    if timeout <= 0:
+        # 0 = 关闭。关掉必须**撤掉**已装的那层，否则旧值继续生效，"关闭"就是假的
+        # （与"配置在安装那一刻被固化"是同一个病的另一面）。
+        if installed is not None:
+            StreamableHTTPSessionManager.__init__ = getattr(
+                current, "_fd_reaping_origin", current
+            )
         return
-    origin = StreamableHTTPSessionManager.__init__
+    if installed == timeout:
+        return
+    # 重复安装时替换而不是套娃：始终包住最初的 __init__。
+    origin = getattr(current, "_fd_reaping_origin", current)
 
     def _init_with_idle_timeout(self, *args, **kwargs):
         kwargs.setdefault("session_idle_timeout", timeout)
         origin(self, *args, **kwargs)
 
     _init_with_idle_timeout._fd_reaping_patch = True
+    _init_with_idle_timeout._fd_reaping_timeout = timeout
+    _init_with_idle_timeout._fd_reaping_origin = origin
     StreamableHTTPSessionManager.__init__ = _init_with_idle_timeout
 
 

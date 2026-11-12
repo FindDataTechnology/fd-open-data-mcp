@@ -1,0 +1,124 @@
+# CANONICAL RECORD of the fd-master/crawl-reconciler CronJob — generated from the
+# LIVE object on 2026-11-11 (kube context xinru). This file did not exist before:
+# the CronJob had been applied ad hoc and no repo tracked it.
+#
+# Why it matters: the live object mounts a `fd-scripts` ConfigMap at /opt/fd-scripts,
+# which supplies the source for every `executor=direct` policy (bulk_ingest_*.py).
+# The object's own `kubectl.kubernetes.io/last-applied-configuration` annotation is
+# OLDER than that volume, so re-applying whatever produced that annotation silently
+# drops the mount and every direct policy fails with "script not found".
+# That is why this record exists — compare against live before applying.
+#
+# Regenerate / check for drift:
+#   kubectl --context xinru -n fd-master get cronjob crawl-reconciler -o yaml
+#   # live vs this file: diff the `spec` block (annotations/status differ by design)
+#
+# Secret values are references only (secretKeyRef) — nothing sensitive is inlined.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  labels:
+    app: crawl-reconciler
+  name: crawl-reconciler
+  namespace: fd-master
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata: {}
+    spec:
+      template:
+        metadata: {}
+        spec:
+          containers:
+          - command:
+            - python
+            - -m
+            - fd_open_data_mcp.refresh.reconciler
+            env:
+            - name: FD_OPEN_DATA_MCP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: fd-db-secret
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_URL
+                  name: fd-db-secret
+            - name: PROXY_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  key: PROXY_REDIS_URL_CONTROL
+                  name: fd-db-secret
+            - name: RECONCILER_LAUNCHER
+              value: k8s-multi
+            - name: SCRAW_K8S_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: fd-db-secret
+            - name: SCRAW_K8S_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_URL
+                  name: fd-db-secret
+            - name: KUBECONFIG_DIR
+              value: /kubeconfigs
+            - name: POLICY_MAX_FETCHES
+              value: '50000'
+            - name: FD_CAPABILITY_CHECK
+              value: enforce
+            - name: PYTHONUNBUFFERED
+              value: '1'
+            - name: DC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  key: DC_API_KEY
+                  name: dc-api-key
+            - name: FD_BINDING_ELIGIBILITY_GATE
+              value: enforce
+            - name: FD_SCRIPTS_DIR
+              value: /opt/fd-scripts/
+            - name: SCRAW_K8S_IMAGE
+              value: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-5539dc5
+            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-5539dc5
+            imagePullPolicy: IfNotPresent
+            name: reconciler
+            resources:
+              limits:
+                cpu: 500m
+                memory: 512Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+            terminationMessagePath: /dev/termination-log
+            terminationMessagePolicy: File
+            volumeMounts:
+            - mountPath: /kubeconfigs
+              name: kubeconfigs
+              readOnly: true
+            - mountPath: /opt/fd-scripts
+              name: fd-scripts
+              readOnly: true
+          dnsPolicy: ClusterFirst
+          imagePullSecrets:
+          - name: fd-harbor-pull
+          restartPolicy: OnFailure
+          schedulerName: default-scheduler
+          securityContext: {}
+          serviceAccount: crawl-reconciler
+          serviceAccountName: crawl-reconciler
+          terminationGracePeriodSeconds: 30
+          volumes:
+          - name: kubeconfigs
+            secret:
+              defaultMode: 420
+              secretName: worker-kubeconfigs
+          - configMap:
+              defaultMode: 420
+              name: fd-scripts
+            name: fd-scripts
+  schedule: 7,22,37,52 * * * *
+  successfulJobsHistoryLimit: 3
+  suspend: false

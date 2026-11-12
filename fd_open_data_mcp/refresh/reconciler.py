@@ -27,6 +27,7 @@ import json
 import logging
 import os
 import subprocess
+import urllib.error
 import urllib.parse
 import urllib.request
 from typing import Optional, Protocol
@@ -381,12 +382,32 @@ class K8sJobLauncher:
         self.namespace = namespace or os.environ.get("SCRAW_K8S_NAMESPACE", "scraw")
         self.image = image or os.environ.get(
             "SCRAW_K8S_IMAGE", "scraw-fd-open-data-mcp:latest")
-        self.database_url = database_url or os.environ.get(
-            "SCRAW_K8S_DATABASE_URL",
-            "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres")
-        self.redis_url = redis_url or os.environ.get(
-            "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:6379/0")
+        # No credential default: this used to fall back to a DSN with a hardcoded
+        # `postgres` password — a password baked into a module that ships on PyPI,
+        # i.e. published. Absent an override the DSN reaches pods through
+        # fd-db-secret (see _db_env below), which is also how the multi-cluster
+        # launcher does it. An explicit override stays a literal on purpose: that
+        # path is for local runs where no Secret exists.
+        self.database_url = database_url or os.environ.get("SCRAW_K8S_DATABASE_URL")
+        self.redis_url = redis_url or os.environ.get("SCRAW_K8S_REDIS_URL")
         self._ctx = kube_context or os.environ.get("KUBE_CONTEXT")
+
+    def _db_env(self) -> list[dict]:
+        """DB/Redis env for a Job: explicit override, else the Secret.
+
+        A plain `value:` lands in the Job spec, where anyone with `get pods`
+        can read it (measured 2026-11-08 on the cheap cluster). The multi-cluster
+        launcher already does this; this one still wrote the DSN literally.
+        """
+        if self.database_url or self.redis_url:
+            return [{"name": "FD_OPEN_DATA_MCP_DATABASE_URL", "value": self.database_url or ""},
+                    {"name": "REDIS_URL", "value": self.redis_url or ""}]
+        return [{"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
+                 "valueFrom": {"secretKeyRef": {"name": "fd-db-secret",
+                                                "key": "DATABASE_URL"}}},
+                {"name": "REDIS_URL",
+                 "valueFrom": {"secretKeyRef": {"name": "fd-db-secret",
+                                                "key": "REDIS_URL"}}}]
 
     # -- transport: kubectl locally, in-cluster REST API inside a pod ---------
     _SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -453,9 +474,7 @@ class K8sJobLauncher:
                                 "volumeMounts": [{"name": "plan-volume", "mountPath": "/plan",
                                                   "readOnly": True}],
                                 "env": [
-                                    {"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
-                                     "value": self.database_url},
-                                    {"name": "REDIS_URL", "value": self.redis_url},
+                                    *self._db_env(),
                                     # the pod's yield reports key on this (D1):
                                     # it equals the job_ref stored on the run row
                                     {"name": "SCRAW_JOB_REF", "value": name},
@@ -589,6 +608,31 @@ class K8sJobLauncher:
 # kubeconfig Secret; ClusterScheduler picks one per plan (tags cover the plan's
 # sources, egress not circuit-open, fewest open runs, < capacity).
 
+
+class WorkerCredentialError(RuntimeError):
+    """The mounted worker credential was rejected by the target cluster.
+
+    Distinct from a generic dispatch failure so the caller/log can say
+    "credential problem" instead of "launch failed" — the two need different
+    reactions (rotate the credential vs. fix the plan).
+    """
+
+
+def worker_credential_hint(cluster: str, status: int) -> str:
+    """Actionable one-liner for a 401/403 from a worker cluster API."""
+    where = f"$KUBECONFIG_DIR/{cluster}.token"
+    if status == 401:
+        return (
+            f"worker 集群 {cluster} 拒绝了挂载凭据（HTTP 401）：{where} 已失效或无资格。"
+            f" 常见原因：token 过期（bound）、SA 被重建（换了 UID）、或该集群凭据已被摘除。"
+            f" 处置：python3 scripts/rotate_worker_credential.py --cluster {cluster} --apply"
+        )
+    return (
+        f"worker 集群 {cluster} 拒绝该请求（HTTP 403）：凭据有效但 RBAC 不足，"
+        f" 或该集群已被禁用。查 clusters 表的 enabled 与该 SA 的 RoleBinding。"
+    )
+
+
 class ClusterK8sClient:
     """K8s API client for ONE worker cluster: api_server (from the DB row) + a
     bearer token + optional CA, read as flat files from the single mounted Secret
@@ -620,8 +664,18 @@ class ClusterK8sClient:
             data=json.dumps(body).encode() if body is not None else None,
             headers={"Authorization": f"Bearer {token}",
                      "Content-Type": "application/json"})
-        with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
-            return json.load(r)
+        try:
+            with urllib.request.urlopen(req, context=ctx, timeout=30) as r:
+                return json.load(r)
+        except urllib.error.HTTPError as e:
+            if e.code in (401, 403):
+                # A bare HTTPError here reads as "launch failed" upstream, which is
+                # indistinguishable from a broken plan. Name the real cause: the
+                # mounted credential is unusable (expired / revoked / pruned).
+                raise WorkerCredentialError(
+                    worker_credential_hint(self.cluster.name, e.code)
+                ) from e
+            raise
 
     def create(self, manifest: dict) -> dict:
         kind = manifest["kind"]
@@ -636,6 +690,16 @@ class ClusterK8sClient:
         ns = self.cluster.namespace
         st = self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}").get("status", {})
         return _job_state(st)
+
+    def get_job(self, name: str) -> dict:
+        """The raw Job object (needed for metadata.creationTimestamp).
+
+        Unlike ``job_status``/``job_deadline_seconds`` this does NOT swallow
+        errors: the caller of ``adopt_job_if_present`` must be able to tell
+        "404 = it really is not there" from "the read itself failed".
+        """
+        ns = self.cluster.namespace
+        return self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}")
 
     def job_deadline_seconds(self, name: str) -> int | None:
         """spec.activeDeadlineSeconds of this Job; None when unset/gone."""
@@ -683,6 +747,86 @@ class ClusterK8sClient:
             raise
 
 
+# How far back a Job's creationTimestamp may be and still be adopted as "the Job
+# this attempt created" (reconcile-lost-launch-response). The name embeds a
+# second-resolution timestamp, so a genuine match is seconds old; the window only
+# exists to refuse a pathological same-named Job.
+LOST_RESPONSE_ADOPTION_WINDOW = dt.timedelta(minutes=15)
+
+
+class LaunchResponseLost(RuntimeError):
+    """A launch request raised, and re-reading could not confirm the Job exists.
+
+    Deliberately NOT a subclass of the original exception type: callers record
+    ``f"launch failed: {e}"`` and the message is what reaches the ledger."""
+
+
+def _creation_timestamp(body: dict) -> dt.datetime | None:
+    raw = ((body.get("metadata") or {})).get("creationTimestamp")
+    if not raw:
+        return None
+    try:
+        return dt.datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return None
+
+
+def adopt_job_if_present(client, name: str, err: BaseException,
+                         now: dt.datetime | None = None) -> None:
+    """Decide a failed launch by object absence instead of by the exception.
+
+    A create request that already reached the API server can time out while the
+    response is being read, leaving a real Job behind (observed live
+    2026-11-11: ``policy_runs`` said ``launch failed: The read operation timed
+    out`` while ``crawl-policy-2487-20261111063707`` ran to success). So after a
+    create error, read the cluster for the name we had already fixed:
+
+    * the Job exists inside the adoption window -> return normally (adopted);
+      the caller keeps its ``running`` row and its ``job_ref``
+    * 404 -> raise ``LaunchResponseLost`` describing a *confirmed* absence
+    * the read itself failed -> raise describing an *unconfirmed* absence
+
+    The last case must not claim absence we did not observe: a run marked failed
+    while the Job runs causes duplicate fetches next cycle, but a run marked
+    running with no Job dangles forever and blocks that policy's single-flight.
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    cluster_name = getattr(getattr(client, "cluster", None), "name", "?")
+    try:
+        body = client.get_job(name)
+    except urllib.error.HTTPError as e:
+        if e.code == 404:
+            raise LaunchResponseLost(
+                f"{err} — 已回合核对：Job {name} 不存在（干净失败，可安全重试）"
+            ) from err
+        raise LaunchResponseLost(
+            f"{err} — 回合核对失败：读 Job 得到 HTTP {e.code}，无法确认是否落地"
+        ) from err
+    except Exception as e:  # noqa: BLE001 - any read failure = unknown, not absent
+        raise LaunchResponseLost(
+            f"{err} — 回合核对失败：{type(e).__name__}: {e}，无法确认是否落地"
+        ) from err
+
+    created = _creation_timestamp(body)
+    if created is None:
+        raise LaunchResponseLost(
+            f"{err} — 回合核对：Job {name} 存在但读不出 creationTimestamp，按失败处理"
+        ) from err
+    if not (now - LOST_RESPONSE_ADOPTION_WINDOW
+            <= created <= now + LOST_RESPONSE_ADOPTION_WINDOW):
+        raise LaunchResponseLost(
+            f"{err} — 回合核对：发现同名 Job 但创建于 {created.isoformat()}"
+            f"（窗口 {LOST_RESPONSE_ADOPTION_WINDOW}），按失败处理"
+        ) from err
+
+    logger.warning(
+        "launch response lost but job exists; adopting cluster=%s job=%s "
+        "created=%s err=%s: %s",
+        cluster_name, name, created.isoformat(), type(err).__name__, err)
+    return None
+
+
+
 
 def _read_script(script_path: str) -> str:
     """Read a script's source from disk for ConfigMap mounting.
@@ -692,21 +836,43 @@ def _read_script(script_path: str) -> str:
     live in the fd-open-data-mcp repo, not scraw), and ``FD_SCRIPTS_DIR``
     (ConfigMap-mounted scripts for control-plane pods that run no repo
     checkout). Raises if not found so launch fails loudly rather than shipping
-    an empty ConfigMap."""
+    an empty ConfigMap.
+
+    First match wins, which is silent by nature: on 2026-11-11 the mounted
+    ``fd-scripts`` ConfigMap (a 2026-08-28 snapshot) still carried five
+    ``bulk_ingest_*.py`` copies that differ from the ones in /app/scripts. The
+    image copy was the one used — correctly — but nothing anywhere said two
+    versions existed, so an edit made only to the ConfigMap (or only to the
+    repo, without a release) would have been invisible. A differing duplicate
+    is now warned about by name.
+    """
     import os
+    name = os.path.basename(script_path)
     search = [
         "/app/scripts",
         "/opt/fd-scripts",
         os.environ.get("FD_SCRIPTS_DIR", ""),
     ]
+    found: list[tuple[str, str]] = []
     for base in search:
         if not base:
             continue
-        p = os.path.join(base, os.path.basename(script_path))
+        p = os.path.join(base, name)
         if os.path.isfile(p):
             with open(p, "r", encoding="utf-8") as f:
-                return f.read()
-    raise FileNotFoundError(f"script not found: {script_path}")
+                found.append((p, f.read()))
+    if not found:
+        raise FileNotFoundError(f"script not found: {script_path}")
+
+    chosen_path, chosen_src = found[0]
+    differing = [p for p, src in found[1:] if src != chosen_src]
+    if differing:
+        logger.warning(
+            "script %s resolved from %s, but a DIFFERENT copy exists at %s — "
+            "editing the shadowed copy has no effect (release the package or "
+            "update the mounted ConfigMap, not both)",
+            name, chosen_path, ", ".join(differing))
+    return chosen_src
 
 
 def pick_cluster(session: Session, plan: CrawlPlan | None, policy: CrawlPolicy | None = None) -> Cluster | None:
@@ -766,11 +932,11 @@ class MultiClusterLauncher:
     at scheduling time."""
 
     def __init__(self, database_url: str | None = None, redis_url: str | None = None):
-        self.database_url = database_url or os.environ.get(
-            "SCRAW_K8S_DATABASE_URL",
-            "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres")
-        self.redis_url = redis_url or os.environ.get(
-            "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:5432/postgres")
+        # Same rule as K8sJobLauncher: no credential default. Jobs get the DSN
+        # from fd-db-secret (see _common_env); these attributes only carry an
+        # explicit override, which is what runtime_hints may template.
+        self.database_url = database_url or os.environ.get("SCRAW_K8S_DATABASE_URL")
+        self.redis_url = redis_url or os.environ.get("SCRAW_K8S_REDIS_URL")
 
     def _common_env(self, cluster) -> list[dict]:
         """Env shared by Scrapy and direct pods: DB, Redis, cluster id, forwarder.
@@ -857,7 +1023,13 @@ class MultiClusterLauncher:
                 c["env"].append({"name": "SCRAW_JOB_REF", "value": job_ref})
         client = ClusterK8sClient(cluster)
         client.create(docs[0])
-        client.create(docs[1])
+        try:
+            client.create(docs[1])
+        except Exception as err:  # noqa: BLE001 - decision is made by re-reading
+            # The create may have been applied before the response was lost;
+            # never report a failed launch for a Job that exists, and never
+            # resend the request (a retry can create a second Job).
+            adopt_job_if_present(client, name, err)
         logger.info("launched policy %s on cluster %s as job=%s", policy.name, cluster.name, name)
         return (job_ref, cluster.id)
 

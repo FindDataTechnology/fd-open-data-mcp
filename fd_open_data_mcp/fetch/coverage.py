@@ -30,6 +30,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Sequence
 
+from fd_open_data_mcp.semantic.dates import observation_period
+
 #: Default minimum width (in days, inclusive) of an interior hole before it is
 #: worth fetching. One missing day inside a dense series is usually a real
 #: non-trading day or an unfillable per-day artifact; a month is a real hole.
@@ -142,52 +144,80 @@ def coverage(
     """
     if start > end:
         raise ValueError(f"start ({start}) is after end ({end})")
-    dates = sorted({d for d in all_dates if start <= d <= end})
+
+    def _span_of(day: str) -> tuple[str, str] | None:
+        period = observation_period(day)
+        return None if period is None else (period[0].isoformat(), period[1].isoformat())
+
+    # 窗口边界也可能是粗粒度的（`start="2019"` 表示整年），先落成具体日子。
+    start_span, end_span = _span_of(start), _span_of(end)
+    win_lo = start_span[0] if start_span else start
+    win_hi = end_span[1] if end_span else end
     whole = sorted(set(all_dates))
     if not whole and not known_empty:
         # Cold: nothing is known. The honest answer is "everything is missing".
-        return Coverage(None, None, (), ((start, end),))
+        return Coverage(None, None, (), ((win_lo, win_hi),))
 
-    span_start, span_end = (whole[0], whole[-1]) if whole else (None, None)
-    gaps: list[tuple[str, str]] = []
+    # 窗口内的判定按**日历区间是否相交**，不按字符串大小：
+    # `"2019"` 与窗口 `("2019-06-01","2019-08-31")` 字典序上不包含，日历上却相交。
+    def _in_window(day: str) -> bool:
+        span = _span_of(day)
+        return bool(span) and span[0] <= win_hi and span[1] >= win_lo
+
+    dates = sorted({d for d in all_dates if _in_window(d)})
+
+    # 宽度按**这条观测代表的日历区间**算，不按字符串长度：
+    # 一条 `2020` 回答的是 2020 全年，一条 `2023-05` 是那个月，一条 `2023-W20`
+    # 是那一周。此前这里把日期串直接当"某一天"喂给 _width/_prev_day，
+    # 于是按年的序列（本项目多数宏观数据就是按年）第一个日期就抛
+    # `ValueError: not enough values to unpack`，异常被上层吞成
+    # "coverage unknown"，每一读都降级却没人看得见（11-11 实测 test_read_series 两条红）。
+    # 「探过为空」必须先收进来：没有任何观测时，它与「从未取过」唯一的分界就是这份申报。
+    # （此前把它放在 span 计算之后，于是无观测的那一档会把它一起丢掉，
+    #  两种状态变得不可区分 —— 11-12 组合回归时被
+    #  test_knowledge_surface_integrity 的两条用例抓住。）
+    known: list[tuple[str, str]] = []
     for lo, hi in known_empty:
-        clipped = (max(lo, start), min(hi, end))
+        clipped = (max(lo, win_lo), min(hi, win_hi))
         if clipped[0] <= clipped[1]:
-            gaps.append(clipped)
-    known = gaps[:]
+            known.append(clipped)
+    gaps: list[tuple[str, str]] = known[:]
 
-    # Outer stretches use the same width threshold as interior holes, for the
-    # same reason: a window whose edges fall on non-trading days (a Saturday
-    # start, a Sunday end) sits just outside the series' first/last point
-    # without anything actually being missing. Reporting those as gaps would
-    # make every loosely-drawn window look unfilled.
-    if span_start and span_start > start:
-        lead = (start, _prev_day(span_start))
+    whole_spans = [sp for sp in (_span_of(d) for d in whole) if sp]
+    if not whole_spans:
+        # 所有日期都摆不到日历上（LATEST 哨兵、垃圾值）：位置未知，按空算。
+        return Coverage(None, None, (), tuple(_merge_intervals(gaps)),
+                        tuple(_merge_intervals(known)))
+    span_start = min(sp[0] for sp in whole_spans)
+    span_end = max(sp[1] for sp in whole_spans)
+
+    # Outer stretches: 第一/最后一个观测**代表**的区间之外，才是真的没覆盖。
+    if span_start > win_lo:
+        lead = (win_lo, _prev_day(span_start))
         if _width(*lead) >= min_hole_days:
             gaps.append(lead)
-    if span_end and span_end < end:
-        # 左端必须裁到窗口：否则"窗口整体在序列末尾之后"会报出一个从
-        # span_end+1 开始的缺口——那段调用方从没要求过。两个后果都真实：
-        # 报表里出现窗口外的缺失，补数会去问窗口之前的日期。
-        trail = (max(start, _next_day(span_end)), end)
+    if span_end < win_hi:
+        trail = (max(win_lo, _next_day(span_end)), win_hi)
         if trail[0] <= trail[1] and _width(*trail) >= min_hole_days:
             gaps.append(trail)
 
-    # Interior: only judged where the series proves it trades (inside its span).
-    inner_lo = max(start, span_start) if span_start else start
-    inner_hi = min(end, span_end) if span_end else end
-    if span_start and inner_lo <= inner_hi:
-        present = _merge(dates)
-        covered_days = sum(_width(a, b) for a, b in present)
+    # Interior: 先按"代表区间"合并出实际覆盖到的日子，再在它们之间找洞。
+    present_spans = [sp for sp in (_span_of(d) for d in dates) if sp]
+    present = _merge_intervals(present_spans)
+    inner_lo = max(win_lo, span_start)
+    inner_hi = min(win_hi, span_end)
+    if inner_lo <= inner_hi:
+        clipped_present = [(max(a, inner_lo), min(b, inner_hi)) for a, b in present]
+        clipped_present = [(a, b) for a, b in clipped_present if a <= b]
+        covered_days = sum(_width(a, b) for a, b in clipped_present)
         span_days = _width(inner_lo, inner_hi)
         if span_days > 0 and covered_days / span_days < min_coverage:
-            # Walk the interior and emit each hole wide enough to fetch.
             cursor = inner_lo
-            for hole_start, hole_end in present:
+            for hole_start, hole_end in clipped_present:
                 if cursor < hole_start:
                     if _width(cursor, _prev_day(hole_start)) >= min_hole_days:
                         gaps.append((cursor, _prev_day(hole_start)))
-                cursor = _next_day(hole_end)
+                cursor = max(cursor, _next_day(hole_end))
             if cursor <= inner_hi and _width(cursor, inner_hi) >= min_hole_days:
                 gaps.append((cursor, inner_hi))
 

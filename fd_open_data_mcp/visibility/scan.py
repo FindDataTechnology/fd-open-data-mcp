@@ -9,9 +9,15 @@ refused / newly-stale runs, dedups each via the Redis alerted-set (each
 (run, event) alerted once, 7-day TTL), batches ALL new events in the window
 into ONE message, sends it, advances the watermark, and prints a JSON summary.
 
+It also checks worker **credential expiry** (rotate-worker-cluster-credentials
+3.2), when ``/kubeconfigs`` is mounted. That check rides this tick instead of
+owning a CronJob, and its dedup window is 24h rather than 7 days: a failed run
+is a one-off event, but "this credential is drifting toward expiry" stays true
+and must re-nag.
+
 Read-only: it never mutates ``policy_runs`` (a stale run is flagged, not
 closed). A sink failure or missing token never breaks a tick — the watermark
-still advances.
+still advances, and a missing credential mount just skips that one check.
 """
 from __future__ import annotations
 
@@ -26,13 +32,23 @@ from sqlalchemy.orm import Session
 
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.models import CrawlPolicy, PolicyRun
-from fd_open_data_mcp.visibility import snapshot
+from fd_open_data_mcp.visibility import credentials, snapshot
 from fd_open_data_mcp.visibility.notifiers.factory import get_notifier
 from fd_open_data_mcp.visibility import state
 
 logger = logging.getLogger(__name__)
 
 _STALE_MIN = int(os.environ.get("SCRAW_STALE_MINUTES", "90"))
+
+# 凭据到期这一类事件的复查间隔。别的告警是"一次性事件"（一次失败只该报一次），
+# 而"凭据正在滑向过期"是一个**持续为真的条件**：7 天静默对一个 10 天跑道太长，
+# 所以每 24h 重提一次，直到刷新把它消掉。
+_CREDENTIAL_REMIND_SEC = 24 * 3600
+
+# 凭据挂载点。没挂就静默跳过——"没挂载"不等于"有风险"，而这条检查是附赠的，
+# 不能因为它让本来的失败/停滞扫描整轮炸掉。
+_CREDENTIALS_DIR = os.environ.get("SCRAW_KUBECONFIGS_DIR",
+                                  credentials.DEFAULT_KUBECONFIGS_DIR)
 
 
 def _classify(run: PolicyRun) -> str | None:
@@ -68,6 +84,64 @@ NO_SIGNAL_STATUSES = ("no_op", "redundant")
 _ALERT_STATUSES = ALERT_STATUSES
 
 
+def check_credential_expiry(now: dt.datetime | None = None) -> tuple[list[dict], bool]:
+    """worker 派发凭据的到期检查。返回 (新告警项, 是否真的查了)。
+
+    为什么挂在 scan 里而不是独立 CronJob：这条检查属于"系统还健康吗"，
+    而 scan 就是那条每 15 分钟问一次这个问题、且**自己带推送通道和去重**的作业。
+    再起一条 CronJob 等于多一个没人看的东西——它自己失败时同样悄无声息，
+    于是"到期告警"本身也到期了，问题只是往旁边挪了一格。
+
+    判定复用 `credentials.lifetime_problems`（与巡检脚本同一份实现）。
+
+    三个刻意选择：
+    - 目录不存在 → 返回 ``checked=False``，不告警。没挂载是部署形态差异，
+      不是风险；把它当告警会让每个未挂载的部署永久假红。
+    - 读 token 失败 → 归为 unknown，`lifetime_problems` 不管它（不知道 ≠ 违规），
+      由巡检脚本去判，因为只有它知道哪些集群"该有"。
+    - legacy（无 exp）→ 不告警。它是选择不是故障（见 DECISION.md）。
+    """
+    now = now or dt.datetime.now(dt.timezone.utc)
+    try:
+        lifetimes = credentials.read_lifetimes(_CREDENTIALS_DIR)
+    except FileNotFoundError:
+        logger.info("credential expiry: %s 未挂载，跳过", _CREDENTIALS_DIR)
+        return [], False
+    except OSError as exc:
+        # 挂载在但读不动：这确实是异常，但也别把整轮 scan 拖垮。
+        logger.warning("credential expiry: 读 %s 失败（%s），本轮跳过",
+                       _CREDENTIALS_DIR, exc)
+        return [], False
+
+    problems = credentials.lifetime_problems(lifetimes)
+    if not problems:
+        return [], True
+
+    # 逐集群去重：一个集群一条，24h 内不重复。问题文案直接用 credentials 的
+    # 那一份（`lifetime_problem_for`），这里不再判断一次阈值。
+    fresh: list[dict] = []
+    for name in sorted(lifetimes):
+        life = lifetimes[name]
+        problem = credentials.lifetime_problem_for(name, life)
+        if problem is None:
+            continue
+        subject = f"credential:{name}"
+        if state.already_alerted(subject, "credential"):
+            continue
+        rem = life["remaining_s"]
+        fresh.append({
+            "cluster": name,
+            "expired": rem is not None and rem < 0,
+            "remaining": credentials.fmt_seconds(rem),
+            "lifetime": credentials.fmt_seconds(life["lifetime_s"]),
+            "expires_at": (dt.datetime.fromtimestamp(life["expires_at"], dt.timezone.utc)
+                           .isoformat() if life["expires_at"] else None),
+            "problem": problem,
+            "_subject": subject,
+        })
+    return fresh, True
+
+
 def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
     """One scan tick. Returns a summary dict (also printed by ``main``)."""
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -76,7 +150,8 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
     notifier = get_notifier()
 
     summary = {"scanned_at": snapshot._iso(now), "failed": [], "refused": [],
-               "zero_yield": [], "stale": [], "notified": False}
+               "zero_yield": [], "stale": [], "credential": [],
+               "credentials_checked": False, "notified": False}
 
     # 1. terminal runs since the watermark (failed / refused / zero_yield)
     wm = state.get_scan_watermark()
@@ -139,10 +214,19 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
     summary["zero_yield"] = new_zero_yield
     summary["stale"] = new_stale
 
+    # 2b. worker 派发凭据到期（rotate-worker-cluster-credentials 3.2）。
+    # 放在运行态扫描之后、合并推送之前：这样它和失败/停滞共用一条消息，
+    # 不额外消耗 ServerChan 的推送额度。
+    new_credential, checked = check_credential_expiry(now)
+    summary["credential"] = new_credential
+    summary["credentials_checked"] = checked
+
     # 3. batch all new events into ONE message (ServerChan rate-limit aware)
-    n_total = len(new_failed) + len(new_refused) + len(new_zero_yield) + len(new_stale)
+    n_total = (len(new_failed) + len(new_refused) + len(new_zero_yield)
+               + len(new_stale) + len(new_credential))
     if n_total > 0:
-        title, body = _format_message(new_failed, new_refused, new_zero_yield, new_stale)
+        title, body = _format_message(new_failed, new_refused, new_zero_yield,
+                                      new_stale, new_credential)
         notifier.send(title, body, level="error")
         summary["notified"] = True
         # mark only AFTER a send attempt so a sink outage doesn't drop alerts
@@ -150,6 +234,9 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
             state.mark_alerted(rec["run_id"], rec["event"])
         for rec in new_stale:
             state.mark_alerted(rec["run_id"], "stale")
+        for rec in new_credential:
+            state.mark_alerted(rec["_subject"], "credential",
+                               ttl_sec=_CREDENTIAL_REMIND_SEC)
 
     # 4. advance the watermark to the newest terminal run covered
     if terminal:
@@ -162,10 +249,23 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
 
 
 def _format_message(failed: list[dict], refused: list[dict],
-                    zero_yield: list[dict], stale: list[dict]) -> tuple[str, str]:
-    n = len(failed) + len(refused) + len(zero_yield) + len(stale)
+                    zero_yield: list[dict], stale: list[dict],
+                    credential: list[dict] | None = None) -> tuple[str, str]:
+    credential = credential or []
+    n = len(failed) + len(refused) + len(zero_yield) + len(stale) + len(credential)
     alerting = failed or refused or zero_yield
-    title = f"🚨 CRAWL FAILURE · {n} run(s)" if alerting else f"⏳ CRAWL STALE · {n} run(s)"
+    if alerting:
+        title = f"🚨 CRAWL FAILURE · {n} run(s)"
+    elif credential:
+        # 凭据到期不是"运行失败"，但同样是"今天不处理明天就断"的事——给它自己的标题，
+        # 免得操作者在一串失败里漏掉它。
+        # 标题在下面被截到 32 字（ServerChan 的限制），而
+        # `🔑 WORKER CREDENTIAL · 1 cluster(s)` 是 38 字——实测被截成
+        # `🔑 WORKER CREDENTIAL · 1 cluster(`，**数量后面的单位被吃掉**，
+        # 只剩一个开括号。所以这里不写单位，把集群数留在可见范围内。
+        title = f"🔑 WORKER CREDENTIAL · {len(credential)}"
+    else:
+        title = f"⏳ CRAWL STALE · {n} run(s)"
     lines: list[str] = []
     for rec in failed:
         ds = " → ".join(rec["datasources"]) or "?"
@@ -182,11 +282,19 @@ def _format_message(failed: list[dict], refused: list[dict],
     for rec in stale:
         ds = " → ".join(rec["datasources"]) or "?"
         lines.append(f" • {rec['policy']}   stale {rec['age_minutes']}min   {rec['job_ref'] or ''}")
+    for rec in credential:
+        lines.append(f" • {rec['problem']}")
     body = "\n".join(lines)
     if alerting:
         jobs = ", ".join(r["job_ref"] for r in (failed + refused + zero_yield) if r.get("job_ref"))
         body += f"\njob: {jobs}" if jobs else ""
         body += '\n→ ask Claude: "scraw status"'
+    if credential:
+        body += ('\n→ 刷新：python3 scripts/rotate_worker_credential.py --cluster '
+                 f'{credential[0]["cluster"]} --mode bound --apply'
+                 if len(credential) == 1 else
+                 '\n→ 刷新：python3 scripts/rotate_worker_credential.py --cluster <name> '
+                 '--mode bound --apply（或等 CI 的 refresh-worker-credentials）')
     return title[:32], body
 
 
