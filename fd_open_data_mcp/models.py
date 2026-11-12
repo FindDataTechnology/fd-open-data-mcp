@@ -199,6 +199,11 @@ class Concept(Base):
     __tablename__ = "concepts"
     __table_args__ = (
         UniqueConstraint("code", "entity_type", "measure", "unit", "frequency", name="uq_concept_identity"),
+        # 0019 建的部分索引：只索引"已声明"的行（待补清单查 IS NULL，那个方向不需要索引）。
+        # 不在这里声明 = `alembic check` 每轮要求把它删掉（迁移建了、模型没有），CI 的
+        # schema 门从 0019 落地起就一直红在这里。
+        Index("ix_concepts_finalize_grace", "finalize_grace_days",
+              postgresql_where=text("finalize_grace_days IS NOT NULL")),
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -404,6 +409,11 @@ class SemanticObservation(Base):
         # reads pick the preferred source at query time via source_rankings.
         UniqueConstraint("concept_id", "entity_type", "entity_id", "date", "granularity",
                          "source_used", name="uq_sem_obs"),
+        # 注：0013 建的写入闸 `semantic_observations_date_shape_check` **刻意不在此声明**。
+        # 它是 PG 正则（`~`）+ NOT VALID，而 sqlite 测试库是 `create_all` 建表，
+        # `~` 在 sqlite 上是语法错误（实测 test_vocabulary_conformance 挂 4 条）。
+        # 归属走 alembic/env.py 的 _CONTRACT_CHECK_CONSTRAINTS（与 pgvector 列同一处理），
+        # 否则 `alembic check` 每轮都要求删掉它。
     )
 
     id = Column(Integer, primary_key=True, autoincrement=True)
@@ -1819,6 +1829,11 @@ class DataRetentionContract(Base):
     __table_args__ = (
         UniqueConstraint("source", "family", name="uq_retention_contract_scope"),
         Index("ix_retention_contracts_scope", "source", "family"),
+        # 0023 建的值域闸：拼错的 'rebuildable' 之类会让淘汰工具静默当成"未声明"而放行。
+        CheckConstraint(
+            "re_fetch_cost IS NULL OR re_fetch_cost IN ('one_http', 'rebuild', 'impossible')",
+            name="ck_retention_re_fetch_cost",
+        ),
     )
 
     id = Column(Integer, primary_key=True)
