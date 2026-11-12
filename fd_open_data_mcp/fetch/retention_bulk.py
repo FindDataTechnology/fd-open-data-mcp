@@ -56,6 +56,26 @@ def _family_of(code: Optional[str]) -> Optional[str]:
     return str(code).split(".", 1)[0] if code else None
 
 
+_EXEMPT_COLS = ("exempt_until", "exempt_owner", "exempt_reason")
+
+
+def _contract_columns(conn) -> set[str]:
+    """`data_retention_contracts` 实际有哪些列（方言无关）。
+
+    为什么需要：豁免三列是 0021 加的。在**没跑 0021 的库**上直接 SELECT 它们会抛
+    ``UndefinedColumn``，把整条批量写入打挂——而"库里没这一列"应当退化成"没有豁免"
+    （谁也没声明过保留），不是让写入失败。审计脚本对同一件事早就是这么处理的
+    （先查 ``information_schema`` 再拼 SQL），这里用 SQLAlchemy inspector 实现，
+    PG 与 sqlite 都能用，也不需要 try/except 兜 SQL 错误。
+    """
+    from sqlalchemy import inspect
+
+    try:
+        return {c["name"] for c in inspect(conn).get_columns("data_retention_contracts")}
+    except Exception:  # noqa: BLE001 - 表都不存在时交给后面的 SELECT 去报
+        return set()
+
+
 def resolve_bulk_contracts(conn, *, source: str, concept_ids: Iterable[int]) -> dict:
     """``concept_id -> {"family":…, "contract": row|None}``（含 source 级 ``*`` 回退）。"""
     ids = _ids(concept_ids)
@@ -69,10 +89,15 @@ def resolve_bulk_contracts(conn, *, source: str, concept_ids: Iterable[int]) -> 
     ).all()
     family_of = {r[0]: _family_of(r[1]) for r in concepts}
 
+    have = _contract_columns(conn)
+    exempt_select = "".join(
+        f", {name}" if name in have else f", NULL AS {name}"
+        for name in _EXEMPT_COLS
+    )
     contracts = conn.execute(
-        text("""
-            SELECT source, family, retention_class, retention_window_days, re_fetchable,
-                   exempt_until, exempt_owner, exempt_reason
+        text(f"""
+            SELECT source, family, retention_class, retention_window_days, re_fetchable
+                   {exempt_select}
               FROM data_retention_contracts
              WHERE source = :src
         """),
