@@ -82,15 +82,19 @@ def _refusal(ct) -> str | None:
 def _victims_sql(cls: str) -> str:
     """返回挑出待淘汰行的 SQL（占位 :src / :fam / :cutoff 由调用方补）。
 
-    T：同一 (概念, 实体) 只留 date 最大的一条。
+    T：同一 (概念, 实体, 粒度) 只留 date 最大的一条。
     W：date 早于窗口下界的全走。
+
+    分区键必须带 `granularity`：库的唯一键是 (…, date, granularity)，月频与日频同一
+    时点是两行**合法**数据。漏了它就会把月频行当成"更旧的一条"搬进隔离区——而写路径
+    的 `retention_bulk._t_victims` 是按 (…, granularity) 分组的，两条路口径必须一致。
     """
     if cls == "T":
         return """
             SELECT id FROM (
               SELECT o.id,
                      row_number() OVER (
-                       PARTITION BY o.concept_id, o.entity_type, o.entity_id
+                       PARTITION BY o.concept_id, o.entity_type, o.entity_id, o.granularity
                        ORDER BY o.date DESC, o.fetched_at DESC
                      ) AS rn
                 FROM semantic_observations o
