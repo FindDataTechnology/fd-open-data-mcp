@@ -24,7 +24,7 @@
 - [x] 3.1 `openspec validate alert-on-credential-surface-mismatch --strict` 通过
 - [x] 3.2 出镜像 → pod 内实测：真挂载（`cheap9` 一致）无告警、`credentials_checked: true`；
   空挂载仍 `false`——验证：两条 pod 探针输出
-- [ ] 3.3 滚 `crawl-watcher-scan` 到新 tag，确认一轮定时 `SuccessCriteriaMet`
+- [x] 3.3 滚 `crawl-watcher-scan` 到新 tag，确认一轮定时 `SuccessCriteriaMet`
 - [ ] 3.4 归档本 change，并补 `worker-credential-lifecycle` 的 Purpose
   （`--strict` 会把 archive 写下的 TBD 占位判红）
 
@@ -61,6 +61,14 @@ JWT——它要回答的是"该有的在不在"，而 401 只在运行期才发�
 
 **3.1**：`openspec validate alert-on-credential-surface-mismatch --strict` → valid
 （改动前后各跑过一次，插入本条记录后再跑仍 valid）。
+
+**3.3（定时轮实证）**：`crawl-watcher-scan` 从 `fd-open-data-mcp:sha-bf7bcb0` 滚到
+`sha-ea8ca09`。手工 `create job --from=cronjob/...` 首跑 `SuccessCriteriaMet`、
+`credential_surface` 1 条（cheap disabled）、`notified=true`（真发了一条）；紧接着
+第二轮 `credential_surface: []`、`notified: false`——24h 去重按设计压住重复。
+真正的定时轮 `crawl-watcher-scan-29908315`（15:55 档）跑在新 tag 上：
+`SuccessCriteriaMet`、`credentials_checked: true`、`credential_surface_checked: true`、
+`credential_surface: []`、`notified: false`。
 
 **3.2（pod 内实测，三种形态，2026-11-12）**：镜像 `fd-open-data-mcp:sha-ea8ca09`（digest
 `c01287a6…`），在 `fd-master` 里用真实 Secret 与真实 `clusters` 表跑 `check_credential_surface`
