@@ -139,7 +139,10 @@ def _load_script():
 # (the one test that pays for the real model)
 
 
-def test_verified_registry_only_indicator_discoverable(session):
+def test_verified_registry_only_indicator_discoverable(session, fake_model):
+    # fake_model 不能漏：这个文件写 `_FakeModel` 就是为了让 embedding 不进网络。
+    # 漏了它，`semantic_search` 工具会走真实 `get_model()`——首次加载要下权重，
+    # 下载被阻断时无超时、永久挂住（2026-11-12 实测本文件退出码 124）。
     """「grain output」 surfaces the verified yearbook indicator 粮食产量 with
     result_type=registry and its source_db — through the public tool path."""
     from fd_open_data_mcp.server import semantic_search as tool
@@ -210,7 +213,8 @@ def test_unverified_entries_invisible_even_on_perfect_match(session, fake_model)
     assert "yr.unverified_grain" not in all_codes
 
 
-def test_missing_tables_fail_soft(session):
+def test_missing_tables_fail_soft(session, fake_model):
+    # 同样不能漏 fake_model：`semantic_search` 工具会真实加载嵌入模型。
     """SQLite dev databases without the registry corpus: empty result, no raise."""
     assert search_registry("grain output", session=session) == []
 

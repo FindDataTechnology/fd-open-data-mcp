@@ -51,7 +51,9 @@ def test_no_machine_specific_paths_in_search_modules(rel):
     assert "MODEL_PATH" not in src
 
 
+@pytest.mark.network
 def test_model_resolves_by_name():
+    """真实加载模型（首次要下载权重）：离线机器上会永久挂住，故标 network。"""
     from fd_open_data_mcp.embeddings.model import MODEL_NAME, get_model
 
     assert MODEL_NAME == "all-MiniLM-L6-v2"
@@ -60,7 +62,14 @@ def test_model_resolves_by_name():
     assert len(emb) == 384  # all-MiniLM-L6-v2 dimension
 
 
+@pytest.mark.network
 def test_model_load_failure_names_the_model(monkeypatch):
+    """这条要**触发一次真实加载失败**才会拿到异常。
+
+    它用的是不存在的模型名，意图是"失败信息要带出模型名"；但加载本身仍先发起
+    权重获取，下载被阻断时 `get_model()` 没有超时、直接挂住（2026-11-12 实测：
+    本文件跑到这里停住、`pytest` 退出码 124）。故按 marker 语义标 `network`。
+    """
     import fd_open_data_mcp.embeddings.model as mod
 
     monkeypatch.setattr(mod, "MODEL_NAME", "no-such-model-xyz")
@@ -177,6 +186,7 @@ def test_graph_write_invalidation(session):
     assert counter["n"] > 0, "invalidation should force a reload on next access"
 
 
+@pytest.mark.network
 def test_entity_search_is_singleton_and_cache_survives(session):
     """EntitySemanticSearch is a process singleton; its embedding query cache
     survives across calls (EMBEDDING_CACHE_SIZE wired)."""
@@ -197,6 +207,7 @@ def test_entity_search_is_singleton_and_cache_survives(session):
     assert s.get_cache_stats()["cache_hits"] == 1
 
 
+@pytest.mark.network
 def test_embedding_cache_size_env_wired(monkeypatch):
     from fd_open_data_mcp.semantic.entity_search import EntitySemanticSearch
 
@@ -318,6 +329,7 @@ def test_fetch_values_exact_date_on_sqlite(session):
     assert values[0]["date"] == "2024-01-01" and values[0]["value"] == "1.1"
 
 
+@pytest.mark.network
 def test_ai_search_end_to_end_on_sqlite(session):
     """Full three-layer orchestration on a SQLite dev database (spec scenario:
     ai_search on SQLite completes without a dialect error)."""

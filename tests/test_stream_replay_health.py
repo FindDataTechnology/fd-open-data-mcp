@@ -39,7 +39,10 @@ def _rows(session, cid):
 
 def test_replay_relands_idempotently(session, concept):
     stream = InMemoryStream("t")
-    stream.publish([_ev(concept.id, i, "2024-12-31") for i in range(1, 4)])
+    # 重放会二次写同一批点，日期必须还在定型窗口内（改写已定型观测按设计被拒）。
+    # 原先写死 "2024-12-31"，到 2026 年它已定型——日期腐化，不是产品缺陷。
+    today = __import__("datetime").date.today().isoformat()
+    stream.publish([_ev(concept.id, i, today) for i in range(1, 4)])
     stream.ensure_group("g")
     ingest_batch(session, stream, group="g", consumer="c1")
     assert _rows(session, concept.id) == 3

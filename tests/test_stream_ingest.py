@@ -74,7 +74,13 @@ def test_event_path_equals_direct_path(session, concept):
 
 def test_redelivery_is_idempotent(session, concept):
     stream = InMemoryStream("t")
-    evs = [_ev(concept.id, 1, "2024-12-31", "year", "s", "7")]
+    # 日期必须落在**未定型**窗口内：本用例验的是"同一点重投是 upsert，不是新行
+    # 也不是报错"，而改写已定型的行按设计会被拒绝（FinalizedObservationError）。
+    # 原先写死 "2024-12-31"，年频定型线是"次年 12-31 + grace"，到 2026 年那条数据
+    # 已经定型，重投就被判成"改写已定型观测"——日期腐化，不是产品缺陷。
+    # 取当年年末：定型线在未来，这条用例不会再随时间变红。
+    year_end = f"{__import__('datetime').date.today().year}-12-31"
+    evs = [_ev(concept.id, 1, year_end, "year", "s", "7")]
     stream.publish(evs)
     stream.ensure_group("g")
     ingest_batch(session, stream, group="g", consumer="c1")
