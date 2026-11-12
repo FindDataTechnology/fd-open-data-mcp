@@ -33,6 +33,11 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        # 三列都在 models 里声明，sqlite 由 create_all 建；迁移链空转（既有约定）。
+        return
+
     op.add_column("data_retention_contracts", sa.Column("exempt_reason", sa.Text()))
     op.add_column("data_retention_contracts",
                   sa.Column("exempt_owner", sa.String(length=128)))

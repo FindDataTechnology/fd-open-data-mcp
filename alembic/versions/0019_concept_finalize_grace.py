@@ -31,6 +31,14 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        # SQLite 消费者按 models 建表（create_all），迁移链在它们上面逐条空转——
+        # 这是 0001/0007/0008/0018 的既有约定。缺这一句的后果不是"少一列"，
+        # 而是 `alembic upgrade head` 在空 sqlite 库上直接抛
+        # `no such table: concepts`（test_scope_system 的链测试从本条起一直红）。
+        return
+
     op.add_column(
         "concepts",
         sa.Column("finalize_grace_days", sa.Integer(), nullable=True),

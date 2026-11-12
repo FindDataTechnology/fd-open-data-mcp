@@ -46,14 +46,17 @@ _COST_DOMAIN = "('one_http', 'rebuild', 'impossible')"
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        # 两列都在 models 里声明，sqlite 由 create_all 建；迁移链空转（既有约定）。
+        # 守卫必须在 DDL **之前**：放在 add_column 之后的话，空 sqlite 库上
+        # `ALTER TABLE data_retention_contracts` 会先抛 `no such table`。
+        return
+
     op.add_column("data_retention_contracts",
                   sa.Column("re_fetch_cost", sa.String(length=16)))
     op.add_column("data_retention_contracts",
                   sa.Column("re_fetch_cost_hours", sa.Integer()))
-
-    bind = op.get_bind()
-    if bind.dialect.name != "postgresql":
-        return
 
     # 只用无歧义的映射回填；NULL 保持 NULL（"没声明"必须继续被审计点名）。
     bind.execute(sa.text(f"""

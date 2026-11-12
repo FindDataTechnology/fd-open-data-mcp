@@ -32,6 +32,12 @@ depends_on = None
 
 
 def upgrade() -> None:
+    bind = op.get_bind()
+    if bind.dialect.name != "postgresql":
+        # SQLite 消费者按 models 建表（`DataRetentionContract` 已在 models 里声明），
+        # 迁移链在它们上面空转——与 0001/0007/0008/0018 同一约定。
+        return
+
     op.create_table(
         "data_retention_contracts",
         sa.Column("id", sa.Integer(), primary_key=True, autoincrement=True),
