@@ -39,10 +39,31 @@ kubectl -n fd-master patch secret worker-kubeconfigs --type=json \
 前提：`ClusterK8sClient` 每次构造都重读 `/kubeconfigs/<name>.token`，
 CronJob 每次新建 pod，所以**改 Secret 即生效，不需要重启任何工作负载**。
 
-### 2.1 legacy 形态（当前）
+**当前形态（2026-11-12 起）：`cheap9` 是 bound，720h。** 唯一启用的集群就是它；
+`cheap` 已 `enabled=false` 且凭据已摘除（要重启它必须另签，见 §3）。
 
-**注意：legacy token 不能单独吊销。** 下面这套只在「token 泄漏」时才有意义，
-且必须连 ServiceAccount 一起换：
+**没有自动化刷新**：`refresh-worker-credentials.yml` 需要 `WORKER_ADMIN_KUBECONFIGS`
+与自托管 runner，两者都**刻意没有建**（把集群 admin kubeconfig 放进 GitHub secret
+是一次不可逆的安全降级，只换来"自动化"）。所以下面这条是**唯一**的刷新路径，
+reminder 也只有一条：`crawl-watcher-scan` 在剩余寿命 < 1/3（30d 寿命 ⇒ **10 天**）时
+推一条微信。**剩 10 天还没人动，就是快到期了。**
+
+```bash
+# 一条命令完成「签 → 写两处 → 成对实测」（加法：旧值仍然可用，无断派发窗口）
+python3 scripts/rotate_worker_credential.py --cluster cheap9 \
+    --api-server https://100.64.0.17:6443 --mode bound --duration 720h --apply
+# 只验当前值（只读）： 换 --verify-only
+# 只打印计划（不动任何东西）：换 --dry-run
+```
+
+脚本的验收不是"返回 0"，而是成对实测：新值必须能打目标集群（PodList），旧值在
+bound 模式下**仍应可用**（它签的是另一个凭据，worker 上的 legacy Secret 没动）。
+
+### 2.1 legacy 形态（只在需要"当场吊销"时用）
+
+**legacy token 不能单独吊销**，所以这套只在「token 泄漏」时才有意义，
+且必须连 ServiceAccount 一起换：换 UID 的瞬间旧值全部失效——**派发会在这一刻断**，
+没有回滚窗口，必须与"写回 + 验证"在同一次操作里做完。
 
 ```bash
 CTX=<worker 集群的 kubectl context>   # 例如 cheap-ts
@@ -69,12 +90,8 @@ kubectl --context $CTX -n scraw get secret crawl-worker-token -o json \
   > /tmp/new.token
 ```
 
-**代价要提前说明**：第 1 步生效的瞬间，所有用该 SA 的派发都会 401，直到第 4 步写完
-Secret。没有回滚窗口（旧值已随 UID 变更失效）。因此这一步必须与「写回 + 验证」
-放在同一次操作里做完。
-
 ```bash
-# 4) 写回控制面（四个位置：fd-master 与 fd-mcp，各 cheap/tencent）
+# 4) 写回控制面（两个命名空间；当前只有 cheap9 有凭据）
 B=$(base64 < /tmp/new.token | tr -d '\n')
 kubectl --context xinru -n fd-master patch secret worker-kubeconfigs --type=merge \
   -p "{\"data\":{\"<name>.token\":\"$B\"}}"
@@ -82,15 +99,19 @@ kubectl --context xinru -n fd-mcp  patch secret worker-kubeconfigs --type=merge 
   -p "{\"data\":{\"<name>.token\":\"$B\"}}"
 ```
 
-### 2.2 bound 形态（未落地，待 ADR 裁决）
+**注意 merge patch 的语义**：上面只写 `<name>.token` 这一个键。若你要一次改多个键，
+必须把所有键一起给全——`data` 是整体替换的语义，漏掉的键会当场消失（历史上踩过）。
+
+### 2.2 bound 形态（现用形态，含"为什么不再静默"）
 
 ```bash
 kubectl --context $CTX -n scraw create token crawl-worker --duration=720h
 ```
 
-写回步骤同 2.1 的第 4 步。差别只有两点：值自带 `exp`；到期后需要重签。
-若采纳此形态，必须先落地 change 任务 3.x（401 点名轮换命令 + 健康面暴露剩余寿命），
-否则会引入「到期静默失效」——派发 401 而 Job 仍可能显示成功。
+与 legacy 的差别只有两点：值自带 `exp`；到期后需要重签。**这两点现在都不再静默**：
+派发侧 401/403 会归因成 `WorkerCredentialError` 并在消息里带可执行的 rotate 命令，
+scan 则在剩余 < 1/3 时告警。所以 bound 是默认选择——它的失效有提前量，legacy 的
+失效没有（legacy 永不失效，也就不可能被提醒）。
 
 ## 3. 恢复被摘除的集群
 
@@ -184,3 +205,24 @@ kubectl --context xinru -n fd-master logs kcfg-probe
 ```bash
 python3 scripts/check_worker_credential_surface.py --kubeconfigs-dir /kubeconfigs
 ```
+
+### 5.1 挂载面 vs `clusters` 表（2026-11-12 起也已自动查）
+
+同一轮 scan 还会比对「挂载里有谁」与「表里谁 enabled」，折进**同一条**消息
+（`credential_surface[]` / `credential_surface_checked`），按
+`credential-surface:<cluster>:<kind>` 去重 24h。三种形态：
+
+| kind | 含义 | 处置 |
+|---|---|---|
+| `orphan` | 挂载里有，表里没这个集群 | 删挂载（谁都不知道它属于谁） |
+| `disabled` | `enabled=false` 却有凭据 | 删挂载（禁用集群留可用凭据＝后门） |
+| `missing` | `enabled=true` 却没凭据 | 签发（否则派发在运行期才 401） |
+
+判据仍是"真的查过吗"：目录不存在时 `credential_surface_checked=false` 且**静默**
+（部署形态差异不是风险）。目录在但零 token 时 `true` + 一条 `missing`——空挂载
+不再算绿。
+
+**已知残留（刻意留的）**：整个 `/kubeconfigs` 挂载被移除时，两路检查都判 `false`
+且都不告警。这是刻意的（"没配上不告警"），代价是"挂载被误删"这件事没有人喊——
+它由 `k8s/fd-master/30-crawl-watcher-scan.yaml` 的 volume 声明保证，而删掉挂载本身
+会立刻打断派发，属"坏得很响"的那一类。
