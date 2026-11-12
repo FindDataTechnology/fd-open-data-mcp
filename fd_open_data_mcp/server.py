@@ -14,7 +14,7 @@ import os
 
 from fastmcp import FastMCP
 
-from fd_open_data_mcp import engines
+from fd_open_data_mcp import engines, wellknown
 from fd_open_data_mcp.annotations import annotations_for
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.search_cache import cached_search
@@ -34,6 +34,15 @@ mcp = FastMCP(
         "• Rank / inspect candidate sources for a concept -> rank_sources."
     ),
 )
+
+# ── 线自描述端点（converge-line-identity-and-keys 1.4）────────────────────────
+# 公开、免鉴权、零网络；原样回吐仓根 line-manifest.json。路由与豁免是两处落点：
+# 只挂路由不加豁免，配了 MCP_BEARER_TOKEN 的线仍会对匿名发现请求回 401。
+# 路径字面量只在 wellknown 里出现一次，这里引用它，不复制第二份。
+wellknown.register(mcp)
+
+#: 共享令牌门必须放行的精确路径。**不含 /mcp**——门本身没有被这条豁免削弱。
+EXEMPT_PATHS = (wellknown.WELL_KNOWN_PATH,)
 
 # Attach the crawl-policy control-plane tools (add-fund-crawl-control-center).
 from fd_open_data_mcp.policy_tools import register_policy_tools
@@ -1887,6 +1896,9 @@ class BearerAuthMiddleware:
     def __call__(self, scope, receive, send):
         token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
         if scope["type"] != "http" or not token:
+            return self.asgi_app(scope, receive, send)
+        if (scope.get("path") or "") in EXEMPT_PATHS:
+            # 公开元数据（线自描述）：未持本线凭据的调用方也要能读到「这条线认哪些钥匙」。
             return self.asgi_app(scope, receive, send)
 
         headers = dict(scope.get("headers") or [])

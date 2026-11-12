@@ -38,4 +38,8 @@ RUN useradd --create-home --uid 1000 appuser
 USER appuser
 
 EXPOSE 8300
+# 线自描述端点 /.well-known/line-manifest.json（change 1.4）：清单在仓根，
+# builder 阶段的 COPY . . 不进运行镜像，必须显式放进运行期 WORKDIR。
+COPY line-manifest.json ./
+
 ENTRYPOINT ["fd-open-data-mcp", "serve", "--transport", "http", "--host", "0.0.0.0", "--port", "8300"]
