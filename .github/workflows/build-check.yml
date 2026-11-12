@@ -126,7 +126,11 @@ jobs:
       - name: Install (no data extras — selfcheck only needs stdlib + sqlalchemy + pyyaml)
         run: |
           python -m pip install --upgrade pip
-          pip install -e . pyyaml
+          # `[dev]` 只带 pytest（见 pyproject 的 optional-dependencies.dev）。
+          # 2026-11-12 之前这里是 `pip install -e . pyyaml`，于是下面那步
+          # `pytest` 报 command not found（exit 127），整个 Build Check 因此常红——
+          # 红的原因不是用例失败，而是这个 job 从来没跑过用例。
+          pip install -e .[dev] pyyaml
 
       - name: Price calibre gate selfcheck (三条判据该绿时绿、该红时红)
         run: python scripts/price_caliber_gate.py --selfcheck
