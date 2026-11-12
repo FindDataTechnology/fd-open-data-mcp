@@ -38,7 +38,8 @@ from pathlib import Path
 # `sys.path[0]` 是脚本所在目录（scripts/），裸 `import fd_open_data_mcp` 会解析
 # **环境里装的那个包**：CI runner 上常常没有（工作流只 checkout、不 pip install），
 # 开发机上则可能指向另一个检出。把 repo 根放进 sys.path 首位，脚本才和它所在的
-# 代码一致；ConfigMap 副本场景下 parents[1] 是 `/`，不满足条件，照旧用镜像里的包。
+# 代码一致；挂载副本场景（ConfigMap/镜像里拷出来的脚本）下 parents[1] 是 `/`，
+# 不满足条件，照旧用镜像里的包。
 _ROOT = Path(__file__).resolve().parents[1]
 if (_ROOT / "fd_open_data_mcp").is_dir() and str(_ROOT) not in sys.path:
     sys.path.insert(0, str(_ROOT))
@@ -56,8 +57,9 @@ try:
     )
 except ImportError as exc:  # 镜像/环境里的包比脚本旧：点名说清楚，退出码 2
     print(f"ERROR 当前的 fd_open_data_mcp 缺少 visibility.credentials（{exc}）。\n"
-          f"      本脚本需要 fd-open-data-mcp >= 0.5.62；在镜像/环境更新前**不要**重新生成\n"
-          f"      ConfigMap credential-alert-scripts。", file=sys.stderr)
+          f"      本脚本需要 fd-open-data-mcp >= 0.5.62；在镜像/环境更新前不要把它装进\n"
+          f"      任何巡检 Job 或 ConfigMap 副本（那份副本会用旧包判出'健康'）。",
+          file=sys.stderr)
     raise SystemExit(2) from exc
 
 

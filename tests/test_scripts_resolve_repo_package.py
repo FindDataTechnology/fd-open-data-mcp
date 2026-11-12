@@ -49,31 +49,12 @@ def test_surface_check_runs_without_an_installed_package(tmp_path):
     assert "clusters 表: 1 个" in r.stdout
 
 
-def test_alert_script_imports_the_repo_package(tmp_path):
-    """`credentials` 模块只存在于本仓的包里；能算出寿命即证明用的是本仓那份。"""
-    import base64
-    import json
-    import time
+def test_surface_script_names_the_problem_when_the_package_is_too_old(tmp_path):
+    """镜像/环境里的包比脚本旧时，必须点名，而不是抛一个没人读得懂的裸 traceback。
 
-    def seg(obj):
-        return base64.urlsafe_b64encode(json.dumps(obj).encode()).rstrip(b"=").decode()
-
-    now = int(time.time())
-    (tmp_path / "cheap.token").write_text(
-        f"{seg({'alg': 'RS256'})}.{seg({'iat': now - 5 * 86400, 'exp': now + 25 * 86400})}.sig",
-        encoding="utf-8")
-
-    r = _run([str(SCRIPTS / "alert_stale_credentials.py"),
-              "--kubeconfigs-dir", str(tmp_path), "--dry-run"])
-    assert r.returncode == 0, r.stderr
-    assert "剩余" in r.stdout and "OK 没有到期风险" in r.stdout
-
-
-def test_alert_script_names_the_problem_when_the_package_is_too_old(tmp_path):
-    """镜像里的包比脚本旧时，必须点名，而不是抛一个没人读得懂的裸 traceback。
-
-    这是本 change 自己引入的时序风险：脚本进 ConfigMap 比镜像进集群快，
-    于是"到期告警"可能因为 ImportError 而哑掉——正好是它要防的那件事。
+    这条覆盖原先挂在已退役的 `alert_stale_credentials.py` 上；脚本删了，但**这个
+    风险没删**：巡检脚本同样是"先进集群、包后到"，ImportError 会让它变成一条
+    没人看得懂的失败，正好是它要防的那件事。
 
     构造方式刻意做成**真实形态**：把脚本复制到挂载点那样的目录（祖先里没有
     `fd_open_data_mcp/`，于是 bootstrap 不生效），再用 PYTHONPATH 造一个**旧版包**
@@ -86,17 +67,17 @@ def test_alert_script_names_the_problem_when_the_package_is_too_old(tmp_path):
     (fake / "fd_open_data_mcp" / "__init__.py").write_text("__version__ = '0.5.61'\n", encoding="utf-8")
     (fake / "fd_open_data_mcp" / "visibility" / "__init__.py").write_text("", encoding="utf-8")
 
-    # 2. 脚本挂在类似 /opt/credential-alert/ 的位置
-    mounted = tmp_path / "credential-alert"
+    # 2. 脚本挂在类似 /opt/ops-scripts/ 的位置（ConfigMap 副本就是这个形状）
+    mounted = tmp_path / "ops-scripts"
     mounted.mkdir()
-    script = mounted / "alert_stale_credentials.py"
-    script.write_text((SCRIPTS / "alert_stale_credentials.py").read_text(encoding="utf-8"),
+    script = mounted / "check_worker_credential_surface.py"
+    script.write_text((SCRIPTS / "check_worker_credential_surface.py").read_text(encoding="utf-8"),
                       encoding="utf-8")
 
     env = dict(os.environ)
     env["PYTHONPATH"] = str(fake)   # 旧包排在 site-packages 之前
-    r = subprocess.run([sys.executable, str(script), "--kubeconfigs-dir", str(tmp_path)],
+    r = subprocess.run([sys.executable, str(script), "--report-only"],
                        cwd=str(tmp_path), env=env, capture_output=True, text=True, timeout=120)
     assert r.returncode == 2, (r.returncode, r.stdout, r.stderr)
     assert "0.5.62" in r.stderr
-    assert "ConfigMap" in r.stderr
+    assert "visibility.credentials" in r.stderr

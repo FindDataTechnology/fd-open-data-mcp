@@ -347,6 +347,20 @@ kubectl --context xinru -n fd-master delete cronjob worker-credential-expiry
 # 与 ConfigMap credential-alert-scripts；check_worker_credential_surface.py 仍保留（离线巡检用）
 ```
 
+**退役实际完成时间（2026-11-12，补记）**：CronJob、ConfigMap、k8s 清单当时就删了，
+但 `scripts/alert_stale_credentials.py` 与它那份测试留在了仓里——上面的前置条件
+（`crawl-watcher-scan` 的 `credentials_checked` 为真）当天已由定时轮满足，是**漏删**而不是
+"还在等"。现已删除：脚本 + `tests/test_alert_stale_credentials.py`，并确认三个集群里
+没有任何工作负载或 ConfigMap 引用它。它带来的语义覆盖没有一起丢——`test_scan_credential_expiry.py`
+本来就覆盖健康/临期/已过期/legacy/不可解五种判定；其中唯一属于**脚本 bootstrap** 的那条
+（"包太旧要点名而不是裸 traceback"）已转到巡检脚本上：
+`test_scripts_resolve_repo_package.py::test_surface_script_names_the_problem_when_the_package_is_too_old`
+（注入验证：抹掉错误信息里的 `0.5.62` 后该用例报红，只有它红）。
+
+留着一个没人调度、没人看、却仍会推送的第二个告警发送者，正是本 change 一路在批的
+"多名真值"：它一旦被谁手工跑起来，就会绕过 scan 的 24h 去重，重复消耗 ServerChan 额度，
+并给出与看板不一致的第二口径。
+
 仍存的残留（诚实记下）：scan **自身**失败时依旧没人看（递归的最后一格无法靠自己消掉）。
 这一格靠不住 scan，只能靠外部：`failedJobsHistoryLimit: 3` 留了 Job 记录，需要人去查。
 真正的解是跨集群监视（把 xinru 侧的 CronJob 状态汇到 cheap-ts 的 ops-console），那是一条**独立
