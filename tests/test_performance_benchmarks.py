@@ -1,11 +1,17 @@
 """
 Performance benchmarks for graph search and semantic search.
+
+这些基准连**真实** Postgres（DSN 里还是字面量口令占位）并加载真实嵌入模型，两者都
+不是离线/CI 环境具备的条件；模型首次加载要下载权重，下载被阻断时会**永久挂住**
+而不是失败（`get_model()` 没有超时）。按 marker 的既定语义整文件标 `network`。
 """
 import time
 import pytest
 from fd_open_data_mcp.graph.manager import EntityGraphManager
 from fd_open_data_mcp.semantic.entity_search import EntitySemanticSearch
 from fd_open_data_mcp.embeddings.generator import EntityEmbeddingGenerator
+
+pytestmark = pytest.mark.network
 
 
 class TestGraphPerformance:
