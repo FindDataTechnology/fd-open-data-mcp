@@ -24,5 +24,23 @@
 
 ## 4. 落地
 
-- [ ] 4.1 出片 + 滚版后核对线上 KPI 从 45.5% 变为 62.5%（同一窗口、同一数据）。
+- [x] 4.1 出片 + 滚版后核对线上 KPI 从 45.5% 变为 62.5%（同一窗口、同一数据）。
   验证：`kubectl -n fd-prod exec deploy/fd-open-data-mcp -- python -c "...kpi_snapshot..."`。
+  **已完成（2026-11-12）**：
+  - 镜像 `sha-b264435` 由 run 43162173596 铸造（digest 变了才铸：
+    `NEW sha256:f907ac0b… / OLD sha256:7bfb8de7…`）。上产前用短命 pod 实测**可拉**
+    （`Running`，不是 `ImagePullBackOff`）——ccr 靠 cheap-3 的 tcr-relay 回灌，首次
+    直拉会 NotFound；不手动补 relay（抢 flock 会得到假成功）。
+  - 清单 `fd-infra-deploy@2960bbe`：init `migrate-schema` 与主容器**两处**同滚到
+    `sha-b264435`（只改一处会让 init 跑旧片）。Argo `all-services-prod` 同步到
+    `2960bbe`，`deploy/fd-open-data-mcp` 滚动完成。
+  - 新 pod `fd-open-data-mcp-7bf9b45476-q5t28`：`init(migrate-schema)=Completed(0)`、
+    主容器 ready、restarts=0 —— 纯读侧改动，库头未动，无 CrashLoop。
+  - 同窗口实测（pod 内）：`24h 分布 {'failed': 3, 'no_op': 3, 'success': 5}` →
+    `kpi_snapshot {'running': 0, 'success_rate': 62, 'failures': 3, 'no_signal': 3,
+    'unknown': 0}`。改动前同一函数给 45。
+  - 页面实证（走发布入口，不只看函数）：`http://100.64.0.12:31851/panel` →
+    `62% | 24h 成功率（可判定）`、`3 | 24h 失败 · 无信号 3`。
+    ⚠ 记一个坑：`https://mcp.finddatatech.cloud/panel` 返回的是**网关 SPA**
+    （889 字节，`AI Gateway & Registry`）而不是本面板；本面板入口是 Service
+    `fd-open-data-mcp` 的 NodePort **31851**（容器端口 8300）。
