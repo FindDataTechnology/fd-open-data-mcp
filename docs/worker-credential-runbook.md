@@ -119,7 +119,7 @@ spec:
   volumes: [{name: kubeconfigs, secret: {secretName: worker-kubeconfigs}}]
   containers:
     - name: probe
-      image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-5539dc5
+      image: ccr.ccs.tencentyun.com/finddata/fd-open-data-mcp:sha-9678e95
       volumeMounts: [{name: kubeconfigs, mountPath: /kubeconfigs}]
       command: ["python3","-c"]
       args:
@@ -151,3 +151,23 @@ kubectl --context xinru -n fd-master logs kcfg-probe
 | `kubectl patch` 输出 `(no change)` | 也可能是读法错误造成的假象 |
 | `kubectl get secret -o jsonpath={.data.a.b}` | 点被当嵌套路径，恒为空串 |
 | 本机 `kubectl --token=X auth can-i` | kubectl 会连 kubeconfig 的客户端证书一起送，量到的是证书权限 |
+
+## 5. 到期前的眼睛：已经折进 scan，不再有独立 CronJob
+
+2026-11-12 起，`crawl-watcher-scan`（每 15 分钟）自己就会检查凭据寿命：
+`SCRAW_KUBECONFIGS_DIR=/kubeconfigs` + secret `worker-kubeconfigs` 挂载，
+扫描输出的 JSON 里有 `credentials_checked` 与 `credential[]`。
+
+**判据**：`credentials_checked: true` 才代表"查过了"。`false` 是「挂载没生效」，
+不是「凭据都健康」——这两件事长得像，但一个是沉默的成功，一个是沉默的失效。
+
+过渡期的 `CronJob/worker-credential-expiry` + `ConfigMap/credential-alert-scripts`
+已于同日退役（`k8s/fd-master/60-credential-expiry-alert.yaml` 一并删除）。
+退役顺序不能反：先换镜像并确认 `credentials_checked: true`，再删旧的；
+反过来会有一段完全没有凭据到期告警的窗口。
+
+要手工看一次当前寿命（只读）：
+
+```bash
+python3 scripts/check_worker_credential_surface.py --kubeconfigs-dir /kubeconfigs
+```

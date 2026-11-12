@@ -73,8 +73,14 @@ class TestEntityGraphManager:
         assert result[-1]['code'] == 'KR'
 
 
+@pytest.mark.network
 class TestEntityEmbeddingGenerator:
-    """Tests for EntityEmbeddingGenerator."""
+    """Tests for EntityEmbeddingGenerator.
+
+    `EntityEmbeddingGenerator.__init__` 会真实加载嵌入模型（首次要下载权重），
+    连只验文本拼装的用例也不例外。下载被阻断的机器上 `get_model()` 没有超时、
+    永久挂住，故整类标 `network`（与 marker 的既定语义一致）。
+    """
 
     def test_generate_embedding(self):
         """Test generating embedding for text."""
@@ -104,8 +110,13 @@ class TestEntityEmbeddingGenerator:
         assert 'CN' in text
 
 
+@pytest.mark.network
 class TestEntitySemanticSearch:
-    """Tests for EntitySemanticSearch."""
+    """Tests for EntitySemanticSearch.
+
+    `EntitySemanticSearch.__init__` 同样在构造时 `get_model()`（要下权重）——
+    连"两个向量的余弦相似度"这种纯算术用例也逃不过。整类标 `network`。
+    """
 
     def test_cosine_similarity(self):
         """Test cosine similarity calculation."""

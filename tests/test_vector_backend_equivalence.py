@@ -68,6 +68,18 @@ def _clean_vector_state(monkeypatch):
     engines.reset_engines()
 
 
+def _require_real_model() -> None:
+    """两个 helper 都要**真实**嵌入模型：首次加载会下载权重。
+
+    下载被阻断时 `get_model()` 没有超时、会永久挂住（2026-11-12 实测整套测试因此
+    卡死在 40%）。按 `network` 标记的同一契约处理：未设 ``RUN_NETWORK_TESTS=1``
+    就跳过调用它的用例——两条只验环境变量归一化的用例不受影响。
+    """
+    if not os.environ.get("RUN_NETWORK_TESTS"):
+        pytest.skip("needs the real embedding model (network); "
+                    "set RUN_NETWORK_TESTS=1 to run")
+
+
 def _seed_corpus(session) -> None:
     """Seed concepts/embeddings/bindings + entities/embeddings (raw SQL).
 
@@ -75,6 +87,7 @@ def _seed_corpus(session) -> None:
     SQLite test database (conftest-built from the models) and the minimal
     pgvector schema the PG-only tests create.
     """
+    _require_real_model()
     model = get_model()
 
     # Binding target chain (sources -> functions -> columns) for FK integrity.
@@ -160,6 +173,7 @@ def _seed_corpus(session) -> None:
 
 
 def _query_embedding(query: str) -> list[float]:
+    _require_real_model()
     return get_model().encode([query])[0].tolist()
 
 

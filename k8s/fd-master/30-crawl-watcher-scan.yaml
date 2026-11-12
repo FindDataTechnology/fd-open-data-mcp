@@ -63,7 +63,10 @@ spec:
               value: /kubeconfigs
             - name: PYTHONUNBUFFERED
               value: '1'
-            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-416737f
+            # 0.5.62 起这个 CronJob 用本仓的镜像：`python -m fd_open_data_mcp.visibility.scan`
+# 的入口、依赖与 schema 闸都在本仓镜像里（2026-11-12 实测：换过去后
+# credentials_checked=true，schema gate 报 0023）。
+            image: ccr.ccs.tencentyun.com/finddata/fd-open-data-mcp:sha-9678e95
             imagePullPolicy: IfNotPresent
             name: watcher-scan
             resources:
