@@ -226,7 +226,8 @@ def load_db_contracts(conn) -> dict:
 
 
 def classify_violations(contract: Contract | None, *, rows: int, over_window: int,
-                        rows_per_entity_recent: float, family: str) -> list[str]:
+                        rows_per_entity_recent: float, family: str,
+                        bad_dates: int = 0) -> list[str]:
     """纯函数：给一个数据族的读数，返回违规原因列表（空 = 合规）。
 
     这是整套原则里最要紧的一段：**它能抓住"契约写了但没人执行"**。
@@ -235,6 +236,13 @@ def classify_violations(contract: Contract | None, *, rows: int, over_window: in
     out: list[str] = []
     if contract is None:
         return ["no_contract：该 (源, 族) 没有留存契约，按原则不得继续写入"]
+    if contract.cls in (T, W) and bad_dates > 0:
+        # 淘汰与合并都靠 date 的**字符串**序：W 的 `o.date < 'YYYY-MM-DD'`、T 的
+        # `ORDER BY o.date DESC`。非 ISO 值只在恰好定长时与时间序一致，所以这类行
+        # 在 W 里永不被淘汰、在 T 里会挤掉真正的当期行——都无声。判 capacity 而不是
+        # contract_gap：它不是"还没声明契约"，是契约**执行不了**。
+        out.append(f"date_not_iso：{bad_dates} 行 date 不是 YYYY-MM-DD——W 的窗口比较与 "
+                   f"T 的取最新都退化成字符串序，这些行不会被淘汰/会挤掉当期行")
     if rows > 0 and contract.budget_mb and rows * AVG_ROW_BYTES > contract.budget_mb * 1024 * 1024:
         out.append(f"over_budget：约 {rows * AVG_ROW_BYTES // (1024 * 1024)}MB "
                    f"超过预算 {contract.budget_mb}MB")
@@ -322,7 +330,18 @@ def main(argv=None) -> int:
                        split_part(co.code, '.', 1) AS fam,
                        count(*) AS n,
                        count(DISTINCT (o.entity_type, o.entity_id)) AS entities,
-                       min(o.date) AS d0, max(o.date) AS d1
+                       min(o.date) AS d0, max(o.date) AS d1,
+                       -- date 是 varchar，W 的淘汰判据是 `o.date < 'YYYY-MM-DD'` 的**字符串**
+                       -- 比较，T 的合并判据是 `ORDER BY o.date DESC`。两者都只在 date 恰好是
+                       -- 定长 ISO 日期时才与"按时间先后"一致。一个 `LATEST`、`2026-10` 或
+                       -- `2026-10-13T22:00Z` 混进 W 就永远不会被淘汰（'LATEST' 比任何日期串都
+                       -- 大），混进 T 会让它挤掉真正的当期行——两种都是**静默**的。
+                       -- 用 length+substr 判而不是正则：审计要能在 sqlite 上跑，`~` 是 PG 专属。
+                       sum(CASE WHEN o.date IS NULL
+                                  OR length(o.date) <> 10
+                                  OR substr(o.date, 5, 1) <> '-'
+                                  OR substr(o.date, 8, 1) <> '-'
+                                THEN 1 ELSE 0 END) AS bad_date
                   FROM semantic_observations o
                   JOIN concepts co ON co.id = o.concept_id
                  GROUP BY 1, 2
@@ -378,7 +397,8 @@ def main(argv=None) -> int:
         ov = over_by_window.get(
             (m["src"], m["fam"], contract.window_days if contract else None), 0) or 0
         v = classify_violations(contract, rows=m["n"], over_window=ov,
-                               rows_per_entity_recent=pe, family=m["fam"])
+                               rows_per_entity_recent=pe, family=m["fam"],
+                               bad_dates=m["bad_date"] or 0)
         sev = severity_of(v)
         if sev == "capacity":
             capacity += 1
@@ -391,6 +411,7 @@ def main(argv=None) -> int:
             "class": contract.cls if contract else None,
             "window_days": contract.window_days if contract else None,
             "over_window_rows": ov, "rows_per_entity_7d": round(pe, 2),
+            "non_iso_dates": m["bad_date"] or 0,
             "severity": sev, "violations": v,
         })
 

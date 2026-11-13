@@ -243,3 +243,41 @@ def test_cost_is_co_presented_with_over_window():
                                 rows_per_entity_recent=0.0, family="aum")
     hit = [x for x in v if x.startswith("over_window")][0]
     assert "1128" in hit, f"超窗提示必须带重算成本，实际：{hit}"
+
+
+def test_non_iso_date_in_a_window_class_is_a_capacity_violation():
+    """date 是 varchar，W 的 `o.date < 'YYYY-MM-DD'` 与 T 的 `ORDER BY o.date DESC` 都是
+    字符串序。`LATEST` / `2026-10` / ISO 带时分秒 这类值混进 W 就永不淘汰，混进 T 会挤掉
+    当期行——两种都无声，所以要有一条判据把它们报成 capacity。
+
+    **先证明它会红**：同一条契约、同一批读数，只把 bad_dates 从 0 改成 1。
+    """
+    mod = load()
+    ct = mod.resolve_contract("akshare", "price")
+    assert ct.cls in (mod.W, mod.T)
+
+    clean = mod.classify_violations(ct, rows=1000, over_window=0,
+                                    rows_per_entity_recent=0.0, family="price",
+                                    bad_dates=0)
+    assert not any(x.startswith("date_not_iso") for x in clean), clean
+
+    dirty = mod.classify_violations(ct, rows=1000, over_window=0,
+                                    rows_per_entity_recent=0.0, family="price",
+                                    bad_dates=3)
+    hit = [x for x in dirty if x.startswith("date_not_iso")]
+    assert hit, dirty
+    assert "3 行" in hit[0]
+    assert mod.severity_of(dirty) == "capacity", "执行不了的契约不是待补清单，必须红灯"
+
+
+def test_non_iso_date_in_permanent_or_full_class_is_not_a_violation():
+    """P/F 从不做窗口比较、也不靠 date 取最新（P 永不删、F 全保留），
+    所以它们的混格式 date 是历史遗留，不该把整张报表打红。"""
+    mod = load()
+    for src, fam in (("worldbank", "gdp"), ("akshare", "financials")):
+        ct = mod.resolve_contract(src, fam)
+        assert ct is not None and ct.cls in (mod.P, mod.F), (src, fam, ct)
+        v = mod.classify_violations(ct, rows=100, over_window=0,
+                                    rows_per_entity_recent=0.0, family=fam,
+                                    bad_dates=7)
+        assert not any(x.startswith("date_not_iso") for x in v), v
