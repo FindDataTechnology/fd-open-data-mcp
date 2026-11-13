@@ -58,21 +58,24 @@ DEFAULT_CONTRACTS: tuple[tuple[str, str, str, int | None, bool, bool, int], ...]
     ("dounan-flower-price", "*", F, None, False, True, 64),
     ("mct-star-hotel", "*", F, None, False, True, 64),
     # 滚动窗口
+    # 2026-11-13：用户裁决「保留最近五年」是**地板**，W 类窗口一律 ≥1826 天；
+    # 原先的 730 是初始矩阵默认值，从未对过裁决。`rating`/`return` 已在 11-11
+    # 由 T 改判 W（判 T 会搬走 256,746 行 ≈87MB），此处同步，勿再改回 T。
     # 2026-11-12 订正：上一版把它写成 re_fetchable=False，理由是"五年日频历史只能由
     # 「最新规模」快照接口取回"。**技术上它能重取**，只是要重算 40 万行 ≈ 1,128 小时
     # （tasks 5.1 实测 0.1 行/秒）。布尔装不下"很贵"，才被迫写成 false——那是在契约里
     # 写一句假话。0023 加了 re_fetch_cost 三态后，这里如实写成 rebuild + 耗时。
-    ("akshare", "aum", W, 1826, True, True, 512, "rebuild", 1128),
-    ("polygon", "price", W, 730, True, True, 128),
-    ("polygon", "trading_volume", W, 730, True, True, 128),
-    ("akshare", "price", W, 730, True, True, 128),
+    ("akshare", "aum", W, 2190, True, True, 512, "rebuild", 1128),
+    ("polygon", "price", W, 1826, True, True, 128),
+    ("polygon", "trading_volume", W, 1826, True, True, 128),
+    ("akshare", "price", W, 1826, True, True, 128),
     # T：只留当期（快照型派生指标）——防复发判据主要盯这一组
     ("akshare", "tenure_days", T, 30, True, False, 64),
     ("akshare", "best_return", T, 30, True, False, 64),
     ("akshare", "aum_total", T, 30, True, False, 64),
     ("akshare", "funds_count", T, 30, True, False, 64),
-    ("akshare", "return", T, 30, True, False, 64),
-    ("akshare", "rating", T, 30, True, False, 64),
+    ("akshare", "return", W, 1826, True, False, 64),
+    ("akshare", "rating", W, 1826, True, False, 64),
     ("akshare", "yield", T, 30, True, False, 64),
     ("akshare", "nav", T, 30, True, False, 64),
     # 2026-11-12 补的两条快照族（原先完全没有契约；形状实测：每实体一条记录）
@@ -80,8 +83,8 @@ DEFAULT_CONTRACTS: tuple[tuple[str, str, str, int | None, bool, bool, int], ...]
     ("nrdl-national-catalog", "catalog", T, None, True, True, 64),
     # 三条原先只缺 re_fetchable；T 只留当期、W 为订阅制接口，故均可重取
     ("akshare", "performance", T, None, True, False, 64),
-    ("polygon", "employee_count", W, 730, True, True, 64),
-    ("polygon", "market_capitalization", W, 730, True, True, 64),
+    ("polygon", "employee_count", W, 1826, True, True, 64),
+    ("polygon", "market_capitalization", W, 1826, True, True, 64),
 )
 
 
