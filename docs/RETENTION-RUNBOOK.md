@@ -1,0 +1,162 @@
+# Data retention runbook
+
+Operational procedures for `data_retention_contracts` and everything that enforces it.
+The *history and reasoning* live in the archived change
+`openspec/changes/archive/2026-11-12-establish-data-retention-principle/decisions-2026-11-11-phase1.md`
+(this repo's sibling workspace). This file is only the **procedure** — what to do, in what
+order, and how to tell whether it worked.
+
+## 1. The model in one paragraph
+
+`data_retention_contracts` is the **only** source of truth: one row per `(source, family)`
+declaring a class, and for windows a length in days. Four classes, each answering a
+different question:
+
+| Class | Means | Deletes? |
+|---|---|---|
+| **P** | permanent (irrecoverable or our own product) | never |
+| **F** | full history (upstream statistics that revise history; as-of needs it) | never |
+| **W** | rolling window of N days | rows older than N days |
+| **T** | only the current period | every point except the newest per key |
+
+**The floor is 1826 days (5 years) for every W family.** A W contract shorter than that is a
+bug, not a preference — it was the stated retention ruling, and the short values that shipped
+originally were bootstrap defaults nobody had checked.
+
+## 2. Where it is enforced
+
+| Path | Who | What it does |
+|---|---|---|
+| write path (package) | `fetch/retention_bulk.apply_bulk_retention` | after an insert, in the **same transaction**: W delete + T keep-latest, one batch revision per merged entity |
+| write path (crawler) | `scraw-fd-open-data-mcp` `db.apply_retention` called from `close_spider` | same call, once per job |
+| offline sweep | `scripts/evict_retention_window.py --apply` | moves W-over-window / T-superseded rows into `semantic_observations_quarantine` |
+| observability | `scripts/audit_retention_contracts.py` | read-only; reports capacity violations, contract gaps, and `T_class_accruing_history` |
+
+The offline sweep runs daily as the CronJob `fd-master/retention-audit` (`20 5 * * *`
+Asia/Shanghai): audit first, then evict, then a quarantine-size report. It is the **backstop**
+for every writer we do not own (other repos' extractors).
+
+## 3. Changing a window safely (four steps — skipping one is how data disappears)
+
+1. **Write the rollback point first.** One line per row: current class + `retention_window_days`.
+2. **Widen or narrow deliberately.** Narrowing is irreversible; widening is reversible. If the
+   matrix in `scripts/audit_retention_contracts.py` disagrees with the DB, fix the **matrix
+   first** — `seed_retention_contracts.py --overwrite` rewrites from it, and it refuses to
+   narrow without `--allow-narrowing`.
+3. **Move rows back in if the window got wider.** A contract change does not resurrect rows;
+   they sit in quarantine. Move back the ones that are now legal, in one transaction, keeping
+   only ids that actually inserted:
+
+   ```sql
+   WITH cand AS (
+       SELECT id, concept_id, entity_type, entity_id, date, granularity, value, unit,
+              source_used, fetched_at, obs_month
+         FROM semantic_observations_quarantine
+        WHERE batch_id = :batch AND length(date) = 10
+          AND date >= to_char(now() - (:days || ' days')::interval, 'YYYY-MM-DD')
+   ), ins AS (
+       INSERT INTO semantic_observations (id, concept_id, entity_type, entity_id, date,
+              granularity, value, unit, source_used, fetched_at, obs_month)
+       SELECT id, concept_id, entity_type, entity_id, date,
+              granularity, value, unit, source_used, fetched_at, obs_month FROM cand
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id
+   )
+   DELETE FROM semantic_observations_quarantine q USING ins WHERE q.id = ins.id
+   RETURNING q.id;
+   ```
+
+   `ON CONFLICT (id) DO NOTHING` + deleting only the returned ids is the whole point: a row
+   that failed to insert must stay parked, otherwise you have "restore failed *and* the
+   original is gone".
+
+4. **Verify with the four criteria in §5** — do not trust the absence of errors.
+
+## 4. Adding a new family
+
+1. Decide the class with the three questions (does upstream revise history / how deep does the
+   analysis need / how expensive is a re-fetch). Never guess: an undeclared family is `unknown`,
+   and `unknown` is not "safe to delete".
+2. Insert the contract (**and** the matching row in `DEFAULT_CONTRACTS`).
+3. Make every writer of that family apply retention: call
+   `apply_bulk_retention(..., concept_ids=[...])` in the same transaction as the insert, or
+   route through `fetch.cache`. Static guards exist in **both** repos —
+   `tests/test_bulk_retention_guard.py` here and
+   `scraw-fd-open-data-mcp/tests/test_retention_bypass_guard.py` in the crawler — and each
+   scans `INSERT INTO semantic_observations` without a retention call, which is how a missed
+   writer is supposed to be caught. A guard only scans its own tree, so "one repo has a guard"
+   proves nothing about the other.
+4. Confirm `audit_retention_contracts.py` reports `契约待补 0`.
+
+## 5. The four verification criteria
+
+```sql
+-- (a) no same-date duplicates. The key MUST include source_used: the same point written by
+--     two sources is by design, not a duplicate.
+SELECT count(*) FROM (
+  SELECT concept_id, entity_type, entity_id, granularity, source_used,
+         count(*) n, count(DISTINCT date) d
+    FROM semantic_observations GROUP BY 1,2,3,4,5) x WHERE n > d;          -- expect 0
+
+-- (b) no W row outside its window
+SELECT ct.source, ct.family, count(*)
+  FROM data_retention_contracts ct
+  JOIN concepts co ON split_part(co.code,'.',1) = ct.family
+  JOIN semantic_observations o ON o.concept_id = co.id AND o.source_used = ct.source
+ WHERE ct.retention_class = 'W' AND length(o.date) = 10
+   AND o.date < to_char(now() - (ct.retention_window_days || ' days')::interval, 'YYYY-MM-DD')
+ GROUP BY 1,2;                                                           -- expect 0 rows
+
+-- (c) every T key has exactly one date
+SELECT max(n) FROM (
+  SELECT concept_id, entity_type, entity_id, granularity, source_used, count(DISTINCT date) n
+    FROM semantic_observations GROUP BY 1,2,3,4,5) x
+ WHERE concept_id IN (SELECT ...T concepts...);                          -- expect 1
+
+-- (d) quarantine holds nothing that is now legal. Run per batch, against the CURRENT contract:
+--     W: rows >= now() - window;  T: rows with no newer row on the same key. Expect 0.
+```
+
+`reason='crawler_write'` in `observation_revisions` is the marker that the crawler's write path
+actually ran a merge (batch ids are always `bulk-consolidate-*`, so the id cannot be used).
+
+## 6. Rollback recipes
+
+| What | How |
+|---|---|
+| window too short | update the contract back, then re-run the §3.3 restore for that batch |
+| wrongly evicted rows | re-run §3.3 with `date >= <cutoff>` of the old window; rows keep their original ids |
+| crawler fleet on a bad image | `UPDATE clusters SET image='...:<old-sha>'` — the fleet reads that row, **not** the manifest |
+| evicted then need the bytes back? | the quarantine is the only copy; nothing purges it, and that is deliberate |
+
+## 7. Five traps that have actually bitten
+
+1. **The fleet's image is a DB row.** `clusters.image` is what dispatched Jobs run; the
+   `SCRAW_K8S_IMAGE` env in the reconciler manifest is only the single-cluster default. Editing
+   the manifest does not roll anything.
+2. **A second copy of the contracts will drift.** `DEFAULT_CONTRACTS` in
+   `audit_retention_contracts.py` is a bootstrap matrix, not the truth. After any manual contract
+   edit, align it — otherwise the next `seed --overwrite` silently reverts you (it can move
+   ~250k rows at exit code 0; hence `narrowing_changes()`).
+3. **The quarantine table has two writers.** `retention-*` batches come from window eviction;
+   everything else comes from misattached-row isolation. Report them separately or the classes
+   in one look like they were evicted by the other.
+4. **Calibers must match the unique key.** The key is
+   `(concept_id, entity_type, entity_id, date, granularity, source_used)`. Any "per key" query
+   that drops `source_used` reports multi-source coexistence as duplicates; any T victim
+   selection that drops `granularity` deletes monthly rows in favour of daily ones.
+5. **"Move first, delete later" is not optional.** It is what makes every decision in this file
+   reversible. Turning eviction into a `DELETE` would make §3.3 impossible and §6's second row
+   a lie.
+
+## 8. Exit codes (they decide whether anyone notices)
+
+`audit_retention_contracts.py`: `0` clean / `1` capacity violation / `3` contract gaps only /
+`2` unknown-or-failed. `evict_retention_window.py`: `0` nothing to do / `1` has work (dry-run)
+or done (`--apply`) / `2` failure.
+
+The CronJob maps `evict 1` and `audit 3` to success — otherwise it would be red every day and
+nobody would read it — and keeps `audit 1` and `audit 2` red, because "unknown is not a pass".
+`scraw-fd-open-data-mcp/tests/test_retention_cronjob_exit_codes.py` pins all eight combinations
+against the real manifest text (it parses the CronJob YAML and drives it with a `python` shim, so
+the test exercises the shipped text rather than a copy of it).
