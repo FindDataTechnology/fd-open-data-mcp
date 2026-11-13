@@ -88,7 +88,7 @@ for every writer we do not own (other repos' extractors).
    proves nothing about the other.
 4. Confirm `audit_retention_contracts.py` reports `契约待补 0`.
 
-## 5. The four verification criteria
+## 5. The five verification criteria
 
 ```sql
 -- (a) no same-date duplicates. The key MUST include source_used: the same point written by
@@ -119,10 +119,32 @@ SELECT max(n) FROM (
 --       T: legal = inside the window AND the newest date on its key. An older date inside the
 --          window is *supposed* to be evicted — that is the whole difference between T and W.
 --     Skipping the class filter makes ~320k legitimate T evictions look like a 320k-row mistake.
+
+-- (e) every (source, family) that holds data has a contract. Resolve the WILDCARD before
+--     reporting a gap: a contract with family='*' covers every family of that source.
+SELECT count(*) FROM (
+  SELECT o.source_used, split_part(co.code,'.',1) fam
+    FROM semantic_observations o JOIN concepts co ON co.id = o.concept_id
+   GROUP BY 1,2) p
+ WHERE NOT EXISTS (SELECT 1 FROM data_retention_contracts ct
+                    WHERE ct.source = p.source_used
+                      AND ct.family IN (p.fam, '*')
+                      AND ct.retention_class IS NOT NULL);            -- expect 0
 ```
 
 `reason='crawler_write'` in `observation_revisions` is the marker that the crawler's write path
 actually ran a merge (batch ids are always `bulk-consolidate-*`, so the id cannot be used).
+
+**The `family='*'` row is a whole-source fallback, and forgetting it manufactures a false gap.**
+On 2026-11-13 an ad-hoc join on exact family equality reported 22 "data but no contract" pairs
+(43k rows in the largest). Every one of them had a `(`source`, `*`, F)` row: the source had been
+blanket-declared full-history and never split per family. Read the other way, the same query is
+also how you find families that are governed only by a blanket "keep everything" decision — those
+22 pairs (all F) have never been looked at individually, which is legal but worth knowing.
+
+Current reading (2026-11-13): 107 data-bearing pairs = 85 exact contracts + 22 wildcard-only
+(all F) + **0 truly ungoverned**. That matches the audit's own "共 107 个 (源, 族)".
+
 
 **Quarantine baseline (measure before calling growth a leak).** First reading on 2026-11-13 was
 1,725,302 rows ≈ 584 MB, which looks alarming. Split by day it is one historical bill plus a
