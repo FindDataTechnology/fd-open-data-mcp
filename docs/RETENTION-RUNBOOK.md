@@ -88,7 +88,7 @@ for every writer we do not own (other repos' extractors).
    proves nothing about the other.
 4. Confirm `audit_retention_contracts.py` reports `契约待补 0`.
 
-## 5. The five verification criteria
+## 5. The five verification criteria (master-local — see the shard caveat below)
 
 ```sql
 -- (a) no same-date duplicates. The key MUST include source_used: the same point written by
@@ -144,6 +144,15 @@ also how you find families that are governed only by a blanket "keep everything"
 
 Current reading (2026-11-13): 107 data-bearing pairs = 85 exact contracts + 22 wildcard-only
 (all F) + **0 truly ungoverned**. That matches the audit's own "共 107 个 (源, 族)".
+
+**Every criterion above — and the audit itself — sees `semantic_observations` on the MASTER
+only.** Shard-hosted families are written through foreign tables (`ft_sem_obs_<shard>_w`) and
+are invisible here: `astock_daily` alone holds 48,316,490 rows ≈16 GB on xinru3 while the master
+reports 0 rows for it, so it is neither reported as `no_contract` nor evicted. The cross-shard
+read caliber is the `semantic_observations_all` view. Whenever you state "no gaps database-wide",
+name the surface you scanned — and if the answer matters, check `semantic_observations_all`
+(expect it to be slow: it unions 250 partitions with a foreign table). Shard coverage is an open
+item (`F13` in the archived change), not a solved one.
 
 
 **Quarantine baseline (measure before calling growth a leak).** First reading on 2026-11-13 was
