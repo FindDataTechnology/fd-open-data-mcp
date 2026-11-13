@@ -113,12 +113,31 @@ SELECT max(n) FROM (
     FROM semantic_observations GROUP BY 1,2,3,4,5) x
  WHERE concept_id IN (SELECT ...T concepts...);                          -- expect 1
 
--- (d) quarantine holds nothing that is now legal. Run per batch, against the CURRENT contract:
---     W: rows >= now() - window;  T: rows with no newer row on the same key. Expect 0.
+-- (d) quarantine holds nothing that is now legal. Run per batch, against the CURRENT contract
+--     and PER CLASS. W and T disagree on what "legal" means:
+--       W: legal = inside the window.
+--       T: legal = inside the window AND the newest date on its key. An older date inside the
+--          window is *supposed* to be evicted — that is the whole difference between T and W.
+--     Skipping the class filter makes ~320k legitimate T evictions look like a 320k-row mistake.
 ```
 
 `reason='crawler_write'` in `observation_revisions` is the marker that the crawler's write path
 actually ran a merge (batch ids are always `bulk-consolidate-*`, so the id cannot be used).
+
+**Quarantine baseline (measure before calling growth a leak).** First reading on 2026-11-13 was
+1,725,302 rows ≈ 584 MB, which looks alarming. Split by day it is one historical bill plus a
+trickle:
+
+| day | rows into quarantine | T | W |
+|---|---|---|---|
+| 2026-11-10 | 1,363,140 | 1,021,677 | 341,463 |
+| 2026-11-11 | 10,372 | 10,372 | 0 |
+| 2026-11-12 | 40 | 40 | 0 |
+| 2026-11-13 | 0 | 0 | 0 |
+
+≈3.5 MB/day afterwards. The quarantine has **no expiry by decision** (that is what makes §6's
+last row true), so the daily report's §3 is the only thing that will ever tell you it sped up.
+
 
 ## 6. Rollback recipes
 
@@ -160,3 +179,29 @@ nobody would read it — and keeps `audit 1` and `audit 2` red, because "unknown
 `scraw-fd-open-data-mcp/tests/test_retention_cronjob_exit_codes.py` pins all eight combinations
 against the real manifest text (it parses the CronJob YAML and drives it with a `python` shim, so
 the test exercises the shipped text rather than a copy of it).
+
+## 9. After editing the CronJob: run *that* version once
+
+A `Complete 1/1` in the job history proves *some* version ran. Check which:
+
+```bash
+git log -1 --format=%cd -- k8s/retention-audit-cronjob.yaml
+kubectl -n fd-master get cronjob retention-audit \
+  -o jsonpath='{.status.lastScheduleTime}{"\n"}'
+```
+
+If the manifest is newer than `lastScheduleTime`, the last run was the previous text — the changes
+have never executed. Run the current text once, read the log, then delete the job so it does not
+eat a slot in `successfulJobsHistoryLimit`:
+
+```bash
+kubectl -n fd-master create job retention-audit-verify-$(date +%H%M) --from=cronjob/retention-audit
+kubectl -n fd-master logs job/retention-audit-verify-<HHMM>
+kubectl -n fd-master delete job retention-audit-verify-<HHMM>
+```
+
+Read all three sections, not just the exit code: (1) audit's per-class table, (2) evict's "refused"
+lines — a family whose re-fetch cost exceeds the budget must refuse and name the hours, never
+evict quietly, (3) the §3 quarantine report. A suspiciously short runtime is a clue: 12s for
+"audit 107 families + evaluate 17" was the signature of a different, older code path.
+
