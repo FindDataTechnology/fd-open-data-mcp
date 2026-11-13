@@ -170,7 +170,7 @@ last row true), so the daily report's §3 is the only thing that will ever tell 
 | crawler fleet on a bad image | `UPDATE clusters SET image='...:<old-sha>'` — the fleet reads that row, **not** the manifest |
 | evicted then need the bytes back? | the quarantine is the only copy; nothing purges it, and that is deliberate |
 
-## 7. Five traps that have actually bitten
+## 7. Seven traps that have actually bitten
 
 1. **The fleet's image is a DB row.** `clusters.image` is what dispatched Jobs run; the
    `SCRAW_K8S_IMAGE` env in the reconciler manifest is only the single-cluster default. Editing
@@ -189,6 +189,21 @@ last row true), so the daily report's §3 is the only thing that will ever tell 
 5. **"Move first, delete later" is not optional.** It is what makes every decision in this file
    reversible. Turning eviction into a `DELETE` would make §3.3 impossible and §6's second row
    a lie.
+6. **`date` is varchar, and both enforcement paths compare it as a string.** W evicts with
+   `o.date < to_char(now() - interval 'N days','YYYY-MM-DD')`; T merges with
+   `ORDER BY o.date DESC`. String order equals time order only for fixed-length ISO dates.
+   A `LATEST` in W is never evicted; in T it outranks every real date and displaces the genuine
+   current row. Both silent. Measured 2026-11-13: W (918,629 rows) and T (28,233) are 100%
+   `YYYY-MM-DD`, while P and F legitimately hold 23,721 non-ISO values (`1961`, `2026-10`,
+   `2026-10-13T22:00Z`, `LATEST`) — so the audit now reports `date_not_iso` as a capacity
+   violation for T/W only. Before trusting any date query, `\d+` the column.
+7. **A relay tag can be "in the ledger" and still not exist.** `tcr-relay-sync.sh` copies only
+   `main`, `anchors.conf` entries, and *first-seen* tags; `--seed` records tags **without**
+   copying. A tag that was seeded before it was copied is therefore skipped by every full
+   round forever, while the log happily shows other tags' `OK` lines. The only valid criterion
+   is `skopeo inspect ccr:<ns>/<repo>:<tag>` returning a digest — `manifest unknown` means
+   backfill it by hand: `tcr-relay-sync.sh <ns>/<repo> <tag>` (a non-empty tag argument skips
+   all filters), then inspect again.
 
 ## 8. Exit codes (they decide whether anyone notices)
 
