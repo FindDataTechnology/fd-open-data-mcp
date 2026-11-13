@@ -55,6 +55,21 @@ _OPEN = "running"  # policy_runs.status value for an open run
 # counts toward cluster capacity (pick_cluster counts _OPEN).
 CANCELLED = "cancelled"
 
+# ─── stalled / skipped (unblock-silent-dispatch-stalls) ─────────────────────
+# 2026-11-13 生产实历：policy 2659 的 run id=2383 在 `running` 上挂了 3.6 小时，
+# 而它的 Job 早在 3 小时处被 activeDeadlineSeconds 杀掉、随后被 ttl 回收。
+# 根因是 `poll()` 在 Job 读不到时返回 "unknown"，而完成探针只在
+# {success, failed, deadline_exceeded} 时关行——**"unknown" 永远不关行**。
+# 而派发是单飞的：一条悬着的行 = 这条策略永久停更，且"被跳过"只写日志
+# （日志随 pod 回收消失，这是既有运维页记过的丢证据方式）。
+# 所以这里补两件事：传输层说不清且已超龄的行判 `stalled`；跳过落 `skipped` 行。
+STALLED = "stalled"   # terminal: executor never reported, row exceeded its age ceiling
+SKIPPED = "skipped"   # terminal: dispatch skipped by single-flight (a record, never a run)
+
+#: reconciler 的 tick 间隔（与部署的 CronJob 默认一致）。卡死阈值要把这一跳算进去：
+#: 执行侧上限到点的那一刻本轮还没观察，多等一跳才是"确实没人管了"。
+RECONCILER_TICK_SECONDS = 15 * 60
+
 
 # ─── failure diagnosis (2026-10-05 incident) ─────────────────────────────────
 # A Job whose container crashes before the runner's first yield report (the
@@ -100,6 +115,45 @@ def _active_deadline_seconds() -> int:
                        DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS)
         return DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS
     return value
+
+
+def policy_run_max_age_seconds() -> int:
+    """``policy_runs`` 超龄即判卡死。**派生自执行侧自己的上限**，不另立常量。
+
+    与 `_active_deadline_seconds()` 同源 + 一个 reconciler 跳间容差：
+    执行侧上限到点那一刻，本轮 reconciler 还没来得及观察，多等一跳才算"没人管了"。
+
+    为什么必须派生而不是另写一个数字：两份阈值一旦漂移，两种方向各有独立的坏事——
+    ① 判定比执行侧紧 → Job 还活着、行已判 `stalled` → 下一跳重跑 ⇒ **双跑**；
+    ② 判定比执行侧松（或不判）→ Job 早死了、行永不关 ⇒ **本缺陷本身**（策略永久停更）。
+    要调就调 `SCRAW_JOB_ACTIVE_DEADLINE_SECONDS` 那一个，这里自动跟随。
+    """
+    return _active_deadline_seconds() + RECONCILER_TICK_SECONDS
+
+
+def _run_age_seconds(run: PolicyRun, now: dt.datetime) -> float | None:
+    """Open run 已存活多少秒。DB 列常为 naive（SQLite 剥 tzinfo），按 UTC 补齐。"""
+    started = run.started_at
+    if started is None:
+        return None
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=dt.timezone.utc)
+    return (now - started).total_seconds()
+
+
+def _stall_detail(run: PolicyRun, age_seconds: float, max_age: int, *,
+                  state: str) -> str:
+    """卡死判定的证据：说清"为什么认为它不会再报"。
+
+    不写产出数字：这一行代表"执行器没说话"，任何产出数都会被读成"跑了但没数据"，
+    与 `zero_yield` 混淆——而 `zero_yield` 是"抓到了没写进来"的唯一线索。
+    """
+    return (
+        f"stalled: row open {age_seconds / 60:.0f}min, past the {max_age / 60:.0f}min ceiling "
+        f"derived from the executor activeDeadlineSeconds; last poll state={state!r} "
+        f"(job {run.job_ref or '—'} unresolvable — Job likely reclaimed by ttl/backoff). "
+        "Closed so single-flight stops blocking this policy; yield unknown, not zero."
+    )
 
 
 def _deadline_exceeded(status: dict) -> bool:
@@ -1386,9 +1440,22 @@ def launch_policy(
     if now.tzinfo is None:
         now = now.replace(tzinfo=dt.timezone.utc)
 
-    if _open_run(session, policy.id) is not None:
+    blocker = _open_run(session, policy.id)
+    if blocker is not None:
+        # 跳过必须**留痕**，不能只写日志：执行器 pod 会被 ttl/backoff 回收，
+        # 等有人来问"昨晚为什么没跑"时，那条日志通常已经不在了
+        # （2026-11-13 实测：pod 已回收，kubectl logs 报 timed out waiting for the condition）。
+        # skipped 是**记录**不是**运行**：它不是 _OPEN，不参与单飞、不计抓取尝试与产出。
+        started = blocker.started_at.isoformat() if blocker.started_at else "unknown"
+        detail = (f"single-flight: blocked by open run {blocker.id} "
+                  f"(started {started}, job {blocker.job_ref or '—'})")
         logger.info("policy %s due but has an open run; skipping (single-flight)", policy.name)
-        return {"policy": policy.name, "status": "skipped", "reason": "open run (single-flight)"}
+        session.add(PolicyRun(policy_id=policy.id, status=SKIPPED,
+                              started_at=now, finished_at=now, detail=detail))
+        session.commit()
+        return {"policy": policy.name, "status": "skipped",
+                "reason": "open run (single-flight)",
+                "blocked_by_run": blocker.id}
 
     # direct-script policies skip plan_crawl (they run a script, not a Scrapy
     # spider) but keep single-flight, cron, policy_runs tracking, and the
@@ -1725,7 +1792,8 @@ def reconcile_once(
     now = now or dt.datetime.now(dt.timezone.utc)
     if now.tzinfo is None:
         now = now.replace(tzinfo=dt.timezone.utc)
-    summary = {"probed_closed": 0, "launched": [], "skipped": [], "refused": []}
+    summary = {"probed_closed": 0, "stalled": 0, "launched": [], "skipped": [],
+               "refused": []}
 
     # 0. completion probe: close open runs whose executor job ended (D5 step 5).
     # A succeeded job is classified by its recorded yield (D3) — never plain
@@ -1735,6 +1803,18 @@ def reconcile_once(
     closed: list[PolicyRun] = []
     for run in session.query(PolicyRun).filter_by(status=_OPEN).all():
         if not run.job_ref:
+            # 没有 job_ref 的行永远无法被 poll 关掉（探针只能靠 job_ref 说话）。
+            # 超龄即判卡死，否则它会永久占着单飞位。
+            age = _run_age_seconds(run, now)
+            max_age = policy_run_max_age_seconds()
+            if age is not None and age > max_age:
+                run.status = STALLED
+                run.detail = _stall_detail(run, age, max_age, state="no-job-ref")
+                run.finished_at = now
+                summary["stalled"] += 1
+                closed.append(run)
+                logger.warning("run %d stalled after %.0fmin with no job_ref",
+                               run.id, age / 60)
             continue
         if run.job_ref.startswith("lease:"):
             # leasing run: close when the per-run queue has nothing in flight
@@ -1747,8 +1827,40 @@ def reconcile_once(
                 closed.append(run)
                 logger.info("lease run %d closed as %s (queue drained)",
                             run.id, run.status)
+            else:
+                # 队列还有在飞/待领的条目，但已经超过执行侧上限：消费者没了。
+                # 与 job 路径同一判据（超龄且没有可信的"还活着"证据）。
+                age = _run_age_seconds(run, now)
+                max_age = policy_run_max_age_seconds()
+                if age is not None and age > max_age:
+                    run.status = STALLED
+                    run.detail = _stall_detail(run, age, max_age, state="lease-undrained")
+                    run.finished_at = now
+                    summary["stalled"] += 1
+                    closed.append(run)
+                    logger.warning(
+                        "lease run %d stalled after %.0fmin with %d available / %d leased",
+                        run.id, age / 60, st["available"], st["leased"])
             continue
         state = launcher.poll(run.job_ref)
+        # ── stall reaper (unblock-silent-dispatch-stalls) ──────────────────
+        # 只有"传输层说不出状态"才算卡死。"running" 是 Job 系统在说"它还活着"——
+        # 那种情况下不回收：Job 自己的 activeDeadlineSeconds 会把它变成 Failed，
+        # 由上面那条正常路径关行。误收一个真在跑的任务会双跑，比晚收更坏。
+        if state == "unknown":
+            age = _run_age_seconds(run, now)
+            max_age = policy_run_max_age_seconds()
+            if age is not None and age > max_age:
+                run.status = STALLED
+                run.detail = _stall_detail(run, age, max_age, state=state)
+                run.finished_at = now
+                summary["stalled"] = summary.get("stalled", 0) + 1
+                closed.append(run)
+                logger.warning(
+                    "run %d stalled after %.0fmin (job %s unresolvable); "
+                    "single-flight released for this policy",
+                    run.id, age / 60, run.job_ref)
+                continue
         if state in ("success", "failed", "deadline_exceeded"):
             run.status = classify_yield(run) if state == "success" else "failed"
             if state == "deadline_exceeded":

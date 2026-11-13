@@ -300,7 +300,12 @@ def register_policy_tools(mcp: FastMCP) -> None:
         status: str | None = None,
         limit: int = 50,
     ) -> list[dict]:
-        """List policy runs. Optional filters: policy_id, status (running/success/failed)."""
+        """List policy runs. Optional filters: policy_id, status
+        (running/success/failed/stalled/skipped/no_op/redundant/cancelled).
+
+        stalled = the executor never reported and the row passed its age ceiling;
+        skipped = dispatch skipped by single-flight (a record, never a run).
+        """
         s = _session()
         try:
             q = s.query(PolicyRun)

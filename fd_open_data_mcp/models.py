@@ -646,7 +646,12 @@ class PolicyRun(Base):
     # without a persistent policy row; policy runs keep a non-null policy_id.
     policy_id = Column(Integer, ForeignKey("crawl_policies.id", ondelete="CASCADE"), nullable=True, index=True)
     origin = Column(String(16), nullable=False, default="policy")  # policy / adhoc
-    status = Column(String(32), nullable=False, default="running")  # running / success / failed / refused / cancelled
+    # running | success | failed | refused | cancelled | stalled | skipped.
+    # stalled (unblock-silent-dispatch-stalls): the executor never reported a terminal
+    # state and the row passed its age ceiling — closed so single-flight stops blocking.
+    # skipped: dispatch was skipped by single-flight; a record, never a run (never _OPEN,
+    # never counted as an attempt or a yield).
+    status = Column(String(32), nullable=False, default="running")
     plan_json = Column(JSONB, nullable=True)               # the compiled CrawlPlan
     job_ref = Column(String(255), nullable=True)           # "{cluster_name}/{job}" or scrapyd jobid
     cluster_id = Column(Integer, ForeignKey("clusters.id", ondelete="SET NULL"),
