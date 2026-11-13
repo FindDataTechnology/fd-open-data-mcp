@@ -165,6 +165,21 @@ live on xinru2.** So `_all` silently drops an entire shard — using it as "the 
 is barely better than the master alone. Use `semantic_observations_read`, and expect it to be
 slow (250 partitions unioned with two foreign tables).
 
+**How much of the corpus this actually governs (measured 2026-11-13, per surface):**
+
+| surface | dominant sources | rows | audit sees it | eviction reaches it |
+|---|---|---|---|---|
+| master `semantic_observations` | 107 (source, family) pairs | 1,042,939 | yes | yes |
+| `ft_sem_obs_xinru2` | `akshare` 19,559,474 / `akshare_misbound` 561,141 | 20,120,615 | no | no |
+| `ft_sem_obs_xinru3` | `astock_daily` 48,316,490 | 48,316,490 | no | no |
+| **total** | | **≈69,480,044** | **1.5%** | **1.5%** |
+
+Read that as: **the contract is a declaration; enforcement covers 1.5% of the corpus, and the
+two can differ by 65×.** akshare's 19.6M shard rows *do* have contracts (so for them the gap is
+enforcement, not declaration); `astock_daily` only got one on 2026-11-13 (gap was both). Any
+"the window is enforced" claim must say which surface it means.
+
+
 
 
 **Quarantine baseline (measure before calling growth a leak).** First reading on 2026-11-13 was
