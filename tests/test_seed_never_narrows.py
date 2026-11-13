@@ -76,3 +76,15 @@ def test_matrix_keeps_rating_and_return_as_windowed_not_current_only():
     by_key = {(s, f): cls for (s, f, cls, *_r) in audit.DEFAULT_CONTRACTS}
     assert by_key[("akshare", "rating")] == "W"
     assert by_key[("akshare", "return")] == "W"
+
+
+def test_matrix_declares_the_shard_hosted_astock_daily_price_family():
+    """分片族也必须进矩阵——否则下次 `seed --overwrite` 会把它当"多余契约"删掉。
+
+    `astock_daily` 的行住在 xinru3 分片（master 本地 0 行），审计看不见它，
+    所以**只有矩阵里这一条能在 seed 之后把它留住**。口径照同行取 W/1826。
+    """
+    audit = _load("audit_retention_contracts")
+    by_key = {(s, f): (cls, win) for (s, f, cls, win, *_r) in audit.DEFAULT_CONTRACTS}
+    assert ("astock_daily", "price") in by_key, sorted(by_key)[:5]
+    assert by_key[("astock_daily", "price")] == (audit.W, 1826)

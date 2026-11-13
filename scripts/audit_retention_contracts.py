@@ -69,6 +69,12 @@ DEFAULT_CONTRACTS: tuple[tuple[str, str, str, int | None, bool, bool, int], ...]
     ("polygon", "price", W, 1826, True, True, 128),
     ("polygon", "trading_volume", W, 1826, True, True, 128),
     ("akshare", "price", W, 1826, True, True, 128),
+    # 2026-11-13 补：A 股日线 OHLCV（concepts price.open/close/high/low）住 xinru3 分片，
+    # master 本地 0 行，所以审计与淘汰一直看不见它——这是**视野**上的盲区，不是判据上的
+    # （详见 establish-data-retention-principle §5.76 / F13）。口径照同行 polygon/price
+    # 与 akshare/price 取 W/1826，不设 volume_budget：一旦设成 16GB 那档，分片支持落地
+    # 当天就会以 over_budget 变红，而容量问题那时才该按真读数谈。
+    ("astock_daily", "price", W, 1826, True, False, 0),
     # T：只留当期（快照型派生指标）——防复发判据主要盯这一组
     ("akshare", "tenure_days", T, 30, True, False, 64),
     ("akshare", "best_return", T, 30, True, False, 64),
