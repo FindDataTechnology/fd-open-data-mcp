@@ -179,6 +179,14 @@ two can differ by 65×.** akshare's 19.6M shard rows *do* have contracts (so for
 enforcement, not declaration); `astock_daily` only got one on 2026-11-13 (gap was both). Any
 "the window is enforced" claim must say which surface it means.
 
+**The daily CronJob now prints all four surfaces**, so none of this has to be re-measured by
+hand: section `4/4 分片体量` reports each shard separately (own connection,
+`statement_timeout=240s`, `|| true` — a shard being down is the shard's problem, not the job's
+verdict), and section `1/2` is labelled "范围＝master 本地" so nobody reads it as whole-database.
+Current shard reading: xinru2 20,120,615 (`akshare` 19,559,474 / `akshare_misbound` 561,141),
+xinru3 48,316,490 (`astock_daily`) — watch the trend, not the absolute.
+
+
 
 
 
