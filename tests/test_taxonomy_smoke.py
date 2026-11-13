@@ -25,9 +25,16 @@ def _host_resolves(host: str) -> bool:
 # When that host is unresolvable (no VPN / off-network), these are environment
 # skips, not failures — the same distinction the spec suite makes for
 # network-dependent sources.
+#
+# 第二个条件同样属于"这台机器上用不了这个库"：`taxonomy.py` 把 `PG_PASSWORD`
+# 缺省成空串，DSN 于是带着空口令发出，PG 回 `fe_sendauth: no password supplied`。
+# 只判"主机解析得到"是不够的——在 tailnet 内该主机名解析成功但没人给口令，
+# 六条用例就会以红色出现，而它们要证明的（远端库能连）根本没被证伪。
+_NO_CREDENTIALS = not (os.environ.get("PG_PASSWORD") or "").strip()
 pytestmark = pytest.mark.skipif(
-    not _host_resolves(os.environ.get("PG_HOST", "guangzhou-xinru")),
-    reason="remote taxonomy Postgres host unreachable (internal network / VPN required)",
+    _NO_CREDENTIALS or not _host_resolves(os.environ.get("PG_HOST", "guangzhou-xinru")),
+    reason="remote taxonomy Postgres not usable from here "
+           "(host unreachable, or PG_PASSWORD unset)",
 )
 
 
