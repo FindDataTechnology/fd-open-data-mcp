@@ -148,11 +148,23 @@ Current reading (2026-11-13): 107 data-bearing pairs = 85 exact contracts + 22 w
 **Every criterion above — and the audit itself — sees `semantic_observations` on the MASTER
 only.** Shard-hosted families are written through foreign tables (`ft_sem_obs_<shard>_w`) and
 are invisible here: `astock_daily` alone holds 48,316,490 rows ≈16 GB on xinru3 while the master
-reports 0 rows for it, so it is neither reported as `no_contract` nor evicted. The cross-shard
-read caliber is the `semantic_observations_all` view. Whenever you state "no gaps database-wide",
-name the surface you scanned — and if the answer matters, check `semantic_observations_all`
-(expect it to be slow: it unions 250 partitions with a foreign table). Shard coverage is an open
-item (`F13` in the archived change), not a solved one.
+reports 0 rows for it, so it is neither reported as `no_contract` nor evicted. Whenever you state
+"no gaps database-wide", name the surface you scanned. Shard coverage is an open item (`F13` in
+the archived change), not a solved one.
+
+**Pick the right federated view — two names differ by one word and by a whole shard** (verified
+2026-11-13 with `pg_get_viewdef`):
+
+| view | unions |
+|---|---|
+| `semantic_observations_all` | `ft_sem_obs_xinru3` **only** |
+| `semantic_observations_read` | `ft_sem_obs_xinru2` **+** `ft_sem_obs_xinru3`, deduped with astock_daily priority |
+
+Shard split: **astock_daily daily bars live on xinru3; akshare daily bars and *all* financials
+live on xinru2.** So `_all` silently drops an entire shard — using it as "the whole database"
+is barely better than the master alone. Use `semantic_observations_read`, and expect it to be
+slow (250 partitions unioned with two foreign tables).
+
 
 
 **Quarantine baseline (measure before calling growth a leak).** First reading on 2026-11-13 was
