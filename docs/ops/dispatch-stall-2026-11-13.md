@@ -181,6 +181,25 @@ ARG FD_ODM_REF="9221ec2647b4e8ff89f0035561efdb0c996b6a33"
 ```bash
 kubectl --context xinru -n fd-master get cronjob crawl-reconciler \
   -o jsonpath='{..image}'
+```
+
+**更省事的一条（2026-11-14 实测，不需要 DB 凭据）**：新片的 reconciler 每轮往日志打一行
+JSON 摘要，而**它多了一个 `stalled` 键**——这个键的存在本身就是「代码上线了」的证据
+（旧片 `sha-00817fb` 同一行只有 `probed_closed` / `launched` / `skipped` / `refused`）：
+
+```bash
+kubectl --context xinru -n fd-master logs job/$(kubectl --context xinru -n fd-master \
+  get jobs --no-headers -o custom-columns=':metadata.name' | grep crawl-reconciler | tail -1) --tail=8
+# 新片：{"probed_closed":0,"stalled":0,"launched":[],"skipped":[],"refused":[]}
+# 旧片：{"probed_closed":0,"launched":[],"skipped":[],"refused":[]}   ← 没有 stalled
+#
+# 判据两段分开读：没有 `stalled` 键 ⇒ 片没换（别往下读）；有键且值 0 ⇒ 本轮无悬行可收
+# （这是「跑了但没东西收」，不是「没跑」）；值 >0 ⇒ 真收了，再去 policy_runs 对行。
+```
+
+剩下的片确认（看 tag 值）：
+
+```bash
 # 2026-11-14 05:00Z 实测已是 sha-2f2ccd2（含修复）。若又回到 sha-00817fb
 # ⇒ 修复不在运行中，「没有 stalled/skipped 行」只能读成「写这些行的代码还没上」。
 ```
