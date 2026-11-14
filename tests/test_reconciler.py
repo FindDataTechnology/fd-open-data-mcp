@@ -780,3 +780,56 @@ def test_common_env_passes_the_retention_gate_through(monkeypatch):
     monkeypatch.delenv("FD_RETENTION_GATE", raising=False)
     env2 = {e["name"]: e for e in launcher._common_env(cluster)}
     assert "FD_RETENTION_GATE" not in env2, "不设档位时不要凭空写一个值进去"
+
+
+# ── 2026-11-14: 判不出的时候说「判不出」，不要替它编一个原因 ─────────────────
+def test_diagnosis_error_travels_into_the_detail(monkeypatch):
+    """API 查询失败时，detail 必须点名失败本身。
+
+    实况：policy 2659 连续三天失败，detail 全是「pod 已回收，无终态可抓」，
+    而上游其实是东财封机房出口——那句话把一次「问不到」写成了「没什么可问」，
+    让封禁多藏了三天。
+    """
+    from fd_open_data_mcp.refresh.reconciler import (
+        K8sJobLauncher, _synthesize_failure_detail,
+    )
+
+    launcher = K8sJobLauncher(namespace="scraw")
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+
+    def boom(self, m, p, b=None):
+        raise PermissionError("pods is forbidden: User cannot list resource")
+
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api", boom)
+    detail = _synthesize_failure_detail(launcher, "crawl-policy-2659-x")
+
+    assert "PermissionError" in detail
+    assert "诊断查询失败" in detail
+    assert "pod 已回收" not in detail
+
+
+def test_reclaimed_pod_keeps_the_original_wording(monkeypatch):
+    """pod 列表查得到但为空 = 真回收了：这条要保住原文案，别把两种情形混成一句。"""
+    from fd_open_data_mcp.refresh.reconciler import (
+        K8sJobLauncher, _synthesize_failure_detail,
+    )
+
+    launcher = K8sJobLauncher(namespace="scraw")
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
+                        lambda self, m, p, b=None: {"items": []})
+
+    detail = _synthesize_failure_detail(launcher, "crawl-policy-2659-x")
+    assert "pod 已回收" in detail
+
+
+def test_diagnose_that_raises_itself_is_reported_not_swallowed():
+    """launcher.diagnose 抛异常（不是返回 None）也要留下原因，且不能把关行打断。"""
+    from fd_open_data_mcp.refresh.reconciler import _synthesize_failure_detail
+
+    class Raising:
+        def diagnose(self, job_ref):
+            raise RuntimeError("client exploded")
+
+    detail = _synthesize_failure_detail(Raising(), "cheap/job-1")
+    assert "诊断未完成" in detail and "RuntimeError" in detail

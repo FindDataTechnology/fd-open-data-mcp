@@ -235,17 +235,33 @@ def _synthesize_failure_detail(launcher, job_ref: str) -> str:
     """Non-empty error summary for a failed run, via the launcher's diagnose.
 
     Launchers without diagnose (scrapyd — whose poll never reports 'failed')
-    and pods already reclaimed fall back to a terse but non-empty note."""
+    and pods already reclaimed fall back to a terse but non-empty note.
+
+    2026-11-14: that note used to assert a *cause* — "pod 已回收" — for a state
+    the code cannot observe. When the pod-list query itself fails (API
+    unreachable, RBAC denied, cluster row missing) nothing was reclaimed; the
+    truth is "we could not ask". Three consecutive days of policy-2659 failures
+    were recorded as "pod reclaimed" with no upstream error anywhere, which is
+    how an eastmoney IP ban stayed invisible until someone went digging. Now the
+    launcher's own reason travels into the detail."""
     diagnose = getattr(launcher, "diagnose", None)
     summary = ""
     if callable(diagnose):
         try:
             summary = (diagnose(job_ref) or "").strip()
-        except Exception:  # noqa: BLE001 - diagnosis must never break the close
+        except Exception as exc:  # noqa: BLE001 - diagnosis must never break the close
             logger.warning("failure diagnosis errored for job %s",
                            job_ref, exc_info=True)
+            reason = f"{type(exc).__name__}: {exc}"
+            return (f"job {job_ref} failed before the runner checked in; "
+                    f"诊断未完成：{reason}")[:FAILURE_DETAIL_MAX_CHARS]
     if summary:
         return summary
+    why = getattr(launcher, "last_diagnosis_error", None)
+    if why:
+        # 判不出要写判不出的原因，不要替它编一个（"pod 已回收" 曾经就是这么骗过三天的）。
+        return (f"job {job_ref} failed before the runner checked in; "
+                f"诊断查询失败，本次没读到任何容器终态：{why}")[:FAILURE_DETAIL_MAX_CHARS]
     return (f"job {job_ref} failed before the runner checked in; "
             "pod 已回收，无终态可抓 (pod reclaimed, no terminal state to grab)")
 
@@ -387,6 +403,12 @@ class K8sJobLauncher:
         self.redis_url = redis_url or os.environ.get(
             "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:6379/0")
         self._ctx = kube_context or os.environ.get("KUBE_CONTEXT")
+        # Why the last `diagnose()` produced no evidence, when the answer is
+        # "we could not ask" rather than "there was nothing left to read".
+        # Not part of the Launcher Protocol (which keeps `None` = no evidence);
+        # `_synthesize_failure_detail` reads it opportunistically so the ledger
+        # distinguishes a reclaimed pod from an unreachable API.
+        self.last_diagnosis_error: str | None = None
 
     # -- transport: kubectl locally, in-cluster REST API inside a pod ---------
     _SA_DIR = "/var/run/secrets/kubernetes.io/serviceaccount"
@@ -538,10 +560,14 @@ class K8sJobLauncher:
         """Terminal-state evidence for a failed Job's pods; None = pods gone.
 
         Best-effort by contract — an API failure reads as 'no evidence'; the
-        close path's fallback note still keeps the run's error non-empty."""
+        close path's fallback note still keeps the run's error non-empty. The
+        failure reason is parked on ``last_diagnosis_error`` so the close path
+        can say *which* of the two it was."""
+        self.last_diagnosis_error = None
         try:
             pods = self.pods_for_job(job_ref)
-        except Exception:  # noqa: BLE001 - api unreachable / rbac denied
+        except Exception as exc:  # noqa: BLE001 - api unreachable / rbac denied
+            self.last_diagnosis_error = f"{type(exc).__name__}: {exc}"
             logger.warning("failure diagnosis failed for job %s",
                            job_ref, exc_info=True)
             return None
@@ -771,6 +797,9 @@ class MultiClusterLauncher:
             "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres")
         self.redis_url = redis_url or os.environ.get(
             "SCRAW_K8S_REDIS_URL", "redis://fd-open-redis.scraw:5432/postgres")
+        # See K8sJobLauncher.last_diagnosis_error: carries "why we have no
+        # evidence" out of diagnose() without changing its None contract.
+        self.last_diagnosis_error: str | None = None
 
     def _common_env(self, cluster) -> list[dict]:
         """Env shared by Scrapy and direct pods: DB, Redis, cluster id, forwarder.
@@ -1020,9 +1049,12 @@ class MultiClusterLauncher:
 
     def diagnose(self, job_ref: str) -> str | None:
         """Pod terminal-state evidence for a failed dispatched Job
-        ("{cluster}/{job}"); None = cluster unknown / pods gone (see
-        K8sJobLauncher.diagnose)."""
+        ("{cluster}/{job}"); None = cluster unknown / pods gone / API error
+        (see K8sJobLauncher.diagnose). The reason is parked on
+        ``last_diagnosis_error``."""
+        self.last_diagnosis_error = None
         if "/" not in job_ref:
+            self.last_diagnosis_error = f"job_ref {job_ref!r} carries no cluster prefix"
             return None
         cluster_name, job_name = job_ref.split("/", 1)
         session = self._session()
@@ -1031,11 +1063,13 @@ class MultiClusterLauncher:
         finally:
             session.close()
         if cluster is None:
+            self.last_diagnosis_error = f"cluster {cluster_name!r} is not in the clusters table"
             return None
         client = ClusterK8sClient(cluster)
         try:
             pods = client.pods_for_job(job_name)
-        except Exception:  # noqa: BLE001 - api unreachable / rbac denied
+        except Exception as exc:  # noqa: BLE001 - api unreachable / rbac denied
+            self.last_diagnosis_error = f"{type(exc).__name__}: {exc}"
             logger.warning("failure diagnosis failed for job %s",
                            job_ref, exc_info=True)
             return None
