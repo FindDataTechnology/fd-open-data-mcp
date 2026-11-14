@@ -40,6 +40,8 @@ spec:
             - -m
             - fd_open_data_mcp.visibility.scan
             env:
+            - name: SCRAW_KUBECONFIGS_DIR
+              value: /kubeconfigs
             - name: FD_OPEN_DATA_MCP_DATABASE_URL
               valueFrom:
                 secretKeyRef:
@@ -59,14 +61,12 @@ spec:
                   name: crawl-watcher-secret
             - name: SCRAW_STALE_MINUTES
               value: '90'
-            - name: SCRAW_KUBECONFIGS_DIR
-              value: /kubeconfigs
             - name: PYTHONUNBUFFERED
               value: '1'
             # 0.5.62 起这个 CronJob 用本仓的镜像：`python -m fd_open_data_mcp.visibility.scan`
 # 的入口、依赖与 schema 闸都在本仓镜像里（2026-11-12 实测：换过去后
 # credentials_checked=true，schema gate 报 0023）。
-            image: ccr.ccs.tencentyun.com/finddata/fd-open-data-mcp:sha-9678e95
+            image: ccr.ccs.tencentyun.com/finddata/fd-open-data-mcp:sha-ea8ca09
             imagePullPolicy: IfNotPresent
             name: watcher-scan
             resources:

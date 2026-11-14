@@ -85,7 +85,7 @@ spec:
                   name: crawl-watcher-secret
             - name: PYTHONUNBUFFERED
               value: '1'
-            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-5539dc5
+            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-625c804
             imagePullPolicy: Always
             name: expander
             resources:
