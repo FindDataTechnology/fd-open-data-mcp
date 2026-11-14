@@ -601,9 +601,16 @@ def create_station(
                 "reason": (f"no identity {source}/{account_alias} — register "
                            f"it first (ensure_identity_with_egress)")}
     proxy_url = proxy_url_for_ref(session, ident.egress_ref)
+    # 行里只存**脱敏**的 egress：`proxy_url` 是 `http://user:pass@host:port` 形态，
+    # 带真口令。它唯一的用途是显示「这站走哪个出口」——主机端口就够了；真正的口令
+    # 只走 Job 的 env（下一行 `proxy_url=proxy_url`，那是 pod 需要的，不进库）。
+    # 2026-11-14 实历：库里躺了 70+ 行明文 egress 口令，而我用 `select *` 查证时
+    # 直接把一行打到了屏幕上——「凭据不过会话输出」那条规矩需要一个更硬的落点。
     station = CrawlLoginStation(
         identity_id=ident.id, source=source, account_alias=account_alias,
-        status="launching", proxy_url=proxy_url, created_at=now,
+        status="launching",
+        proxy_url=(mask_proxy_url(proxy_url) if proxy_url else None),
+        created_at=now,
         deadline_at=now + dt.timedelta(seconds=station_deadline_seconds()))
     session.add(station)
     session.flush()  # station.id -> STATION_ID env + labels

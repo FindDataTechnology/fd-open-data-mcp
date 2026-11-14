@@ -383,7 +383,10 @@ def test_create_station_job_and_service_spec(session):
         assert row.status == "waiting_operator"
         assert station_ops._as_aware(row.deadline_at) == \
             NOW + dt.timedelta(seconds=station_ops.station_deadline_seconds())
-        assert row.proxy_url == "http://user:pw@10.0.0.7:3128"
+        # 库里只存脱敏 egress（2026-11-14）：`proxy_url` 是 http://user:pass@host:port，
+        # 带真口令。显示只需要「走哪个出口」，真口令只走 Job 的 env（上面已单独断言）。
+        assert row.proxy_url == "http://••••@10.0.0.7:3128"
+        assert "user:pw@" not in row.proxy_url
     finally:
         s.close()
     # launch is evented on the identity
