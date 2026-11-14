@@ -681,6 +681,49 @@ def test_prearm_plan_skips_when_a_station_is_already_open(session):
     assert len(station_ops.prearm_plan(session, now=PREARM_NOW)) == 1
 
 
+def test_prearm_plan_ignores_a_station_whose_deadline_passed(session):
+    """2026-11-14 实历的回归：僵尸站不许永久挡住预拉起。
+
+    station #72（rmfyalk/acct001）11-10T18:28 建、19:28 过期、`finished_at`
+    一直为空（Job 被 deadline 杀掉，没来得及上报终态）。超时兜底是「读时生效」，
+    而这个 5 分钟的后台循环从不读站表 ⇒ 那一行 `waiting_operator` 让预拉起从
+    11-10 起每一轮都判「操作者正看着」，再也不开新站；panel 日志每 5 分钟一句
+    `prearm: no station needed this pass`，而源从 11-05 起零产出。
+    判据要按「有效窗口」表达：过了 deadline 的站等于已关。
+    """
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    _station(iid, "rmfyalk", "acct001", status="waiting_operator",
+             deadline=PREARM_NOW - dt.timedelta(minutes=30))
+
+    assert len(station_ops.prearm_plan(session, now=PREARM_NOW)) == 1
+
+
+def test_prearm_tick_closes_expired_station_before_planning(session, monkeypatch):
+    """兜底那一半：过期站在 tick 里要真的被收成 timeout（留痕），不只是被计划忽略。"""
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    _station(iid, "rmfyalk", "acct001", status="waiting_operator",
+             deadline=PREARM_NOW - dt.timedelta(minutes=30))
+    monkeypatch.setattr(station_ops, "ensure_identity_with_egress",
+                        lambda *a, **k: {"status": "queued"})
+    monkeypatch.setattr(station_ops, "create_station",
+                        lambda *a, **k: {"status": "launched", "station_id": 2})
+
+    station_ops.prearm_tick(session, now=PREARM_NOW, client=object())
+
+    s = get_database().get_session()
+    try:
+        assert s.get(CrawlLoginStation, 1).status == "timeout"
+        assert s.get(CrawlLoginStation, 1).finished_at is not None
+    finally:
+        s.close()
+
+
 def test_prearm_plan_skips_fires_beyond_the_window(session):
     # 19:00 UTC -> next fire 19:10 (10 min, inside 45); at 18:00 the same fire
     # is 70 min out, beyond the window

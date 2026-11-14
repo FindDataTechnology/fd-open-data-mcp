@@ -861,8 +861,21 @@ def prearm_plan(session: Session,
         # for one login unit: pre-arm/dispatcher key identities by
         # auth_profile, while the panel's manual form posts the crawl source
         # name. A crawl source has one profile, so nothing else is suppressed.
+        #
+        # `deadline_at > now` 是 2026-11-14 补的，它是这条判据的**全部漏洞**：
+        # 超时兜底 `_apply_timeouts` 是「读时生效」（panel 列站/打开 VNC 才跑），
+        # 而这个 5 分钟的后台循环**从不读站表**，于是任何一次「Job 被 deadline
+        # 杀掉、没来得及上报终态」都会留下一行 waiting_operator 永不过期——预拉起
+        # 从此永远认为「操作者正看着」，再也不开新站，源就这么静默断流。
+        # 实历：station #72（rmfyalk/acct001，11-10T18:28 建、19:28 过期、
+        # finished_at 一直为空）把 11-10 之后的每一次预拉起都吃掉；panel 日志每
+        # 5 分钟一句 "prearm: no station needed this pass"，而 rmfyalk 从 11-05
+        # 起零产出、pending_runs 里 19 次 failed。
+        # 判据因此要按「有效窗口」表达，不是「行状态」：过了 deadline 的站等于已关。
         open_station = (session.query(CrawlLoginStation)
                         .filter(CrawlLoginStation.status.in_(STATION_OPEN),
+                                CrawlLoginStation.deadline_at.isnot(None),
+                                CrawlLoginStation.deadline_at > now,
                                 CrawlLoginStation.source.in_(
                                     (profile, src.source)))
                         .first())
@@ -900,6 +913,16 @@ def prearm_tick(session: Session, now: dt.datetime | None = None,
     """
     now = _as_aware(now) or _utcnow()
     client = client or get_station_client()
+    # 先跑一次超时兜底，把「Job 被 deadline 杀掉、没来得及上报终态」的僵尸站从
+    # waiting_operator 收成 timeout（留痕 + 事件）。理由与 prearm_plan 里那条
+    # `deadline_at > now` 是同一件事的两半：那条保证**决策**不被僵尸站挡住，这条
+    # 保证**状态**真的被关掉（否则 Console 上永远挂着一个「等待操作者」的窗口，
+    # 让人以为还有人在登录）。两处都要，缺一条就会出现「计划放行、面板仍显示在飞」。
+    closed = _apply_timeouts(session, now)
+    if closed:
+        logger.warning("prearm: closed %d expired login station(s) before "
+                       "planning (deadline passed with no terminal report)",
+                       closed)
     launched: list[dict] = []
     for item in prearm_plan(session, now=now):
         source, alias = item["source"], item["account_alias"]
