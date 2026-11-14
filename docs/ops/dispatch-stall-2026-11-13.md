@@ -117,6 +117,17 @@ ARG FD_ODM_REF="9221ec2647b4e8ff89f0035561efdb0c996b6a33"
 "契约少了一条"，不是报错。所以抬 pin 的验收要同时看两个数：`policy_runs` 出现
 `stalled`/`skipped`，以及保留契约行数 **103 → 104**。
 
+> **订正（2026-11-14）：「103 → 104」这条判据已经用不上了。** 现在
+> `select count(*) from data_retention_contracts` 就是 **104**（`2549fcb` 那一行已在库里），
+> 所以「104」既可能意味着「同步成功」也可能意味着「本来就 104」，**没有区分力**。
+> 要看的是那一行本身在不在，而不是总数：
+>
+> ```sql
+> SELECT source, family, retention_class, retention_window_days, re_fetchable
+> FROM data_retention_contracts WHERE family = 'price' AND source = 'astock_daily';
+> -- 期望：W / 1826 / re_fetchable = true
+> ```
+
 出片是**三处**，少一处就等于没出：
 
 1. 镜像 `FD_ODM_REF` 抬到含这两笔的 sha（重建 `scraw-fd-open-data-mcp`）；
@@ -142,6 +153,19 @@ ARG FD_ODM_REF="9221ec2647b4e8ff89f0035561efdb0c996b6a33"
 删掉的 dev DSN 兜底）。判据与它为什么「没有清单＝对所有按清单扫的闸隐形」，见
 
     python3 fd-infra-deploy/tools/check_fd_scripts_configmap.py
+
+**同步之前先看这四族的契约**（2026-11-14 查 `data_retention_contracts`）：
+
+| 族 | 被哪些脚本写 | 契约 | 窗口 | `re_fetchable` |
+|---|---|---|---|---|
+| `financials` | `bulk_ingest_financials_aggregate.py`、`bulk_ingest_stock_financials.py` | **T** | 30 天 | true |
+| `nav` | `bulk_ingest_fund_nav_daily.py` | **T** | 30 天 | true |
+| `price` | `bulk_ingest_astock_daily.py` | W | 1826 天 | true |
+
+也就是说：同步之后这三族**第一次真的按契约收尾**，而 `financials` / `nav` 是 **T 类（只留当期、
+30 天窗）**——那等于把 30 天以前的行删掉（补一条 `revision_kind='batch'` 的痕迹）。契约上这么写，
+且两族都 `re_fetchable = true`（删了能重取），但这仍是**一次真实的批量删除**，不是"补个补丁"。
+所以同步要按族分开做、每族先记下删前行数与删后行数；`price` 那一族窗口 1826 天，实际删不动多少。
 
 **同步的前置条件现在满足了**（目标镜像自带 `retention_bulk`，否则会 ImportError），但同步
 等于给这四族**新开一条按契约删历史行的路径**——所以它要按族想清楚再动，别顺手抄。顺序：
