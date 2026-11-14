@@ -2,6 +2,22 @@
 
 All notable changes to this project will be documented in this file.
 
+## [0.5.64] - 2026-11-14
+- **feat(price-sources): 声明基金价格族 `price.fund.daily`，场内基金（ETF/LOF）终于有首选源。**
+  原先 `price_families` 只有个股/指数两族，注释写「基金净值族暂不在册：源名未确认，宁缺勿猜」。
+  2026-11-14 用实测把这条理由消解：场内基金日线就写在 `source_used='akshare'` 下，
+  实体 `entity_type='fund'`、概念族 383-388（open/high/low/close/volume/amount，
+  frequency=daily、verified=true）、水位 2026-11-13、11-06 起六列齐全
+  （`510300` close=4.083 @ 11-13）。
+  新源 id 是 `fund_akshare` 而**不是**复用 `akshare`：同一 source_id 只能有一个
+  `adjustment`，个股那份是 `qfq`（锚点 per_fetch，已知有害），基金这份是**不复权成交价**
+  （`none`）。两者物理落点都是 `akshare`，靠声明的 `db_source` 各自指回去。
+  **场外基金仍不在册**（如 007355：只有 nav.unit，从无交易所价格）——按净值估值是另一条口径。
+- **test(price-sources)**: 新增「基金族解析到自己那份不复权源」判据；「未声明族拒绝读取」
+  那条的示例族改成永不声明的名字（规则断言一字未改，原先它借 `price.fund.daily` 当例子）。
+  这条声明的消费者是 `fd-paper-trading` 的 astock provider：它按实体类型所属价格族解析
+  源，族未声明即报 gap（不回落）。
+
 ## [0.5.61] - 2026-11-10
 - **fix(akshare): 按「已安装签名」过滤 kwargs，`timeout` 不再打死四条抓取路径。**
   akshare 1.20 把原生 `timeout` 参数从 `fund_individual_basic_info_xq` / `stock_zh_a_hist` /

@@ -128,11 +128,32 @@ def test_unknown_family_in_preferred_for_is_rejected(tmp_path):
 
 
 def test_unclaimed_family_refuses_resolution():
-    """没有首选源的族必须拒绝读取，不得回落到"排名最高的那个"。"""
+    """没有首选源的族必须拒绝读取，不得回落到"排名最高的那个"。
+
+    示例族本来用的是 `price.fund.daily`——2026-11-14 起它**已被声明**
+    （fund-price-channel：场内基金），于是换成一个永不声明的族。
+    **规则一字未改**：断言的是"未声明即拒绝"，不是某个具体族名。
+    """
     reg = load_registry()
-    assert "price.fund.daily" not in reg.price_families
+    assert "price.crypto.daily" not in reg.price_families
     with pytest.raises(FamilyNotClaimed, match="claimed by no source"):
-        reg.resolve_for_family("price.fund.daily")
+        reg.resolve_for_family("price.crypto.daily")
+
+
+def test_fund_family_resolves_to_its_own_unadjusted_source():
+    """基金族有且只有一个首选源，且它的口径**不是**个股的前复权。
+
+    这条是 fund-price-channel 的正面判据：两个族共用物理 source_used（akshare），
+    但必须是两套声明——否则基金行会按 qfq 被读出来。
+    """
+    reg = load_registry()
+    fund = reg.resolve_for_family("price.fund.daily")
+    assert fund.source_id == "fund_akshare"
+    assert "fund" in fund.instrument_types
+    assert fund.db_source == "akshare"
+    assert fund.adjustment not in ("qfq", "hfq")
+    # 个股族的首选源没被基金族抢走，两族各一个 owner
+    assert reg.resolve_for_family("price.stock.daily").source_id == "astock_daily"
 
 
 def test_ackshare_does_not_claim_the_stock_family():

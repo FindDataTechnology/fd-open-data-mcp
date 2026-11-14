@@ -11,10 +11,16 @@
 schema_version: "1"
 
 # 每个"价格概念族"必须恰好有一个首选源。没有首选源的族，读取会被拒绝（fail-closed）。
-# 基金净值族暂不在册：它的源名尚未在注册表里确认，宁缺勿猜。
+#
+# 基金族原先不在册（"源名尚未在注册表里确认，宁缺勿猜"）。2026-11-14 用实测把它消解了：
+# 场内基金的日线行就写在 ``source_used='akshare'`` 下，实体 ``entity_type='fund'``，
+# 概念族 383-388（open/high/low/close/volume/amount，frequency=daily，verified=true），
+# 水位 2026-11-13、11-06 起六列齐全。于是 ``price.fund.daily`` 有了可声明的源。
+# **场外基金**（只有净值、无交易所价格）仍不在册——那是另一条口径。
 price_families:
   - price.stock.daily
   - price.index.daily
+  - price.fund.daily
 
 sources:
   # ---------------------------------------------------------------- A 股个股
@@ -106,3 +112,42 @@ sources:
       实测指数实体与 index 概念族全库零观测——"并入 astock 家族"是死路，没有存量可读。
       基准端到端收口的真前置是指数日线抓取，而价格抓取处于政策冻结，
       故本口径只先立形状：种子导入后同一 source_id 可用，持牌源到位后换 id 即换源。
+
+  # ---------------------------------------------------------------- 场内基金
+  # ETF / LOF 的交易所日线。与 ``akshare``（个股对照源）**共用物理 source_used**
+  # （都是 ``akshare``），但必须是两个独立的 source 声明：口径不同。个股那份是
+  # ``qfq``（且锚点是已知有害的 per_fetch），基金这份是**不复权成交价**。
+  # 一条声明只能有一个 ``adjustment``，把两者合并不了——这正是"同一 source_id
+  # 不能同时承担两个口径"的直接后果，不是重复登记。
+  #
+  # 为什么不是"把基金行写进 astock_daily"：那会让 16GB 那个前复权家族里混进
+  # 不复权的基金价，下游按族取数时口径就错了，而错误形态是"看着像正常数字"。
+  fund_akshare:
+    instrument_types: [fund]
+    markets: [XSHG, XSHE]
+    adjustment: none             # 场内按成交价原值入库，不做复权
+    adjustment_anchor: null      # 不复权就没有锚点（有锚点反而是声明错）
+    factor_source: null
+    frequency: daily
+    license_state: legacy        # 与 akshare 个股源同出身，按种别推演为不可对外交付
+    preferred_for: [price.fund.daily]
+    # 物理落点：库里这批行的 source_used 就是 ``akshare``（实测 entity 67/68/66,
+    # concept 383-388, 2026-11-13）。
+    db_source: akshare
+    access:
+      kind: federated_view
+      dsn_env: ASTOCK_DSN
+    watermark:
+      entity_type: fund
+      concept_codes: [price.close]
+      # 参照篮取三只成交最密的宽基 ETF：沪深300 / 上证50 / 创业板。
+      # 篮子给的是水位**下界**，低估只会让陈旧更早被发现（安全方向）。
+      reference_basket: ["510300", "510050", "159915"]
+      lookback_days: 400
+    notes: >-
+      2026-11-14 实测：``510300`` close=4.083 @ 2026-11-13，11-06 起 open/high/low/
+      close/volume/amount 六列齐全；``510050``/``159915`` 同形。基金策略
+      （policy 5 ``fund-etf-lohv``）每天在写这批行，此前交易面读不到——因为
+      provider 只认 stock/index 实体且源钉死 ``astock_daily``。
+      **不含场外基金**（如 007355，subtype=open）：那类只有净值、没有交易所价格，
+      按净值估值是另一条口径（无买卖价、T+1 确认），不在本声明内。
