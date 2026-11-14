@@ -128,6 +128,9 @@ def migrate_astock_daily(session, symbols: list[str] | None = None) -> dict:
         raise ValueError(f"missing canonical stock concepts: {sorted(missing)}")
 
     from sqlalchemy import text
+    # 迁移也是写入路径：不在这里执行契约，一次全历史迁移就会把窗口外的行整批写回去，
+    # 夜里那次淘汰白跑。要留更长的历史，先改契约的窗口，不要绕过它。
+    from fd_open_data_mcp.fetch.retention_bulk import apply_bulk_retention
 
     sym_filter = "AND a.symbol = ANY(:symbols)" if symbols else ""
     params: dict = {"symbols": symbols} if symbols else {}
@@ -153,5 +156,9 @@ def migrate_astock_daily(session, symbols: list[str] | None = None) -> dict:
         p = {**params, "cid": cid, "unit": unit}
         res = session.execute(text(sql), p)
         results[col] = res.rowcount
+        # 迁移也是写入路径：不在这里执行契约，一次全历史迁移就会把窗口外的行整批
+        # 写回去，夜里那次淘汰白跑。要留更长的历史，先改契约的窗口，不要绕过它。
+        apply_bulk_retention(session, source=params["src"], concept_ids=[cid],
+                             reason="migrate_astock_daily")
         session.commit()
     return {"concept_map": code_to_id, "inserted_by_column": results}

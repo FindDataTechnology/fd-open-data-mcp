@@ -66,9 +66,11 @@ def test_kpi_snapshot_reflects_24h_window(session):
     try:
         k = kpi_snapshot(s)
         assert k["running"] == 1
-        assert k["success_rate"] == 75  # 6 success / 8 terminal
+        assert k["success_rate"] == 75  # 6 success / 8 decidable
         assert k["new_rows"] == 12500
         assert k["failures"] == 2  # failed + zero_yield, stale excluded
+        assert k["no_signal"] == 0
+        assert k["unknown"] == 0
     finally:
         s.close()
 
@@ -77,12 +79,67 @@ def test_kpi_snapshot_reflects_24h_window(session):
     assert "12,500" in text
 
 
+def test_success_rate_excludes_no_signal_runs(session):
+    """口径：no_op / redundant 是"这一轮没有信号"，不是失败。
+
+    这条是**负例**：若有人把分母改回"所有非 running 终态"，这里会变成 50%
+    （1 success / 2 终态）而不是 100%。线上真实形状就是这一类
+    （failed 3 / no_op 3 / success 5 → 旧口径 45.5%，可判定口径 62.5%）。
+    """
+    s = get_database().get_session()
+    try:
+        pid = _policy("kpi-no-signal")
+        now = dt.datetime.utcnow()
+        s.add_all([
+            _run(pid, "success", finished=now - dt.timedelta(hours=1), rows_new=10),
+            _run(pid, "no_op", finished=now - dt.timedelta(hours=2)),
+            _run(pid, "redundant", finished=now - dt.timedelta(hours=3)),
+        ])
+        s.commit()
+    finally:
+        s.close()
+
+    s = get_database().get_session()
+    try:
+        k = kpi_snapshot(s)
+        assert k["success_rate"] == 100, "no_op/redundant 不得进分母"
+        assert k["no_signal"] == 2, "但必须计数，不能悄悄消失"
+        assert k["failures"] == 0
+    finally:
+        s.close()
+
+
+def test_success_rate_counts_failure_and_surfaces_unknown(session):
+    """真失败要进分母；未登记状态不进分母但必须显式计数（否则静默消失）。"""
+    s = get_database().get_session()
+    try:
+        pid = _policy("kpi-fail-unknown")
+        now = dt.datetime.utcnow()
+        s.add_all([
+            _run(pid, "success", finished=now - dt.timedelta(hours=1), rows_new=1),
+            _run(pid, "failed", finished=now - dt.timedelta(hours=2)),
+            _run(pid, "partial", finished=now - dt.timedelta(hours=3)),
+        ])
+        s.commit()
+    finally:
+        s.close()
+
+    s = get_database().get_session()
+    try:
+        k = kpi_snapshot(s)
+        assert k["success_rate"] == 50, "1 success / (1 success + 1 failed)"
+        assert k["failures"] == 1
+        assert k["unknown"] == 1, "未登记的状态必须暴露出来"
+    finally:
+        s.close()
+
+
 def test_kpi_snapshot_empty_db(session):
     s = get_database().get_session()
     try:
         k = kpi_snapshot(s)
         assert k == {"running": 0, "success_rate": None, "new_rows": 0,
-                     "failures": 0}
+                     "failures": 0, "no_signal": 0, "unknown": 0}
     finally:
         s.close()
     # home still renders with an em-dash instead of a rate

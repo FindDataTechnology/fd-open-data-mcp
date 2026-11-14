@@ -58,21 +58,30 @@ DEFAULT_CONTRACTS: tuple[tuple[str, str, str, int | None, bool, bool, int], ...]
     ("dounan-flower-price", "*", F, None, False, True, 64),
     ("mct-star-hotel", "*", F, None, False, True, 64),
     # 滚动窗口
+    # 2026-11-13：用户裁决「保留最近五年」是**地板**，W 类窗口一律 ≥1826 天；
+    # 原先的 730 是初始矩阵默认值，从未对过裁决。`rating`/`return` 已在 11-11
+    # 由 T 改判 W（判 T 会搬走 256,746 行 ≈87MB），此处同步，勿再改回 T。
     # 2026-11-12 订正：上一版把它写成 re_fetchable=False，理由是"五年日频历史只能由
     # 「最新规模」快照接口取回"。**技术上它能重取**，只是要重算 40 万行 ≈ 1,128 小时
     # （tasks 5.1 实测 0.1 行/秒）。布尔装不下"很贵"，才被迫写成 false——那是在契约里
     # 写一句假话。0023 加了 re_fetch_cost 三态后，这里如实写成 rebuild + 耗时。
-    ("akshare", "aum", W, 1826, True, True, 512, "rebuild", 1128),
-    ("polygon", "price", W, 730, True, True, 128),
-    ("polygon", "trading_volume", W, 730, True, True, 128),
-    ("akshare", "price", W, 730, True, True, 128),
+    ("akshare", "aum", W, 2190, True, True, 512, "rebuild", 1128),
+    ("polygon", "price", W, 1826, True, True, 128),
+    ("polygon", "trading_volume", W, 1826, True, True, 128),
+    ("akshare", "price", W, 1826, True, True, 128),
+    # 2026-11-13 补：A 股日线 OHLCV（concepts price.open/close/high/low）住 xinru3 分片，
+    # master 本地 0 行，所以审计与淘汰一直看不见它——这是**视野**上的盲区，不是判据上的
+    # （详见 establish-data-retention-principle §5.76 / F13）。口径照同行 polygon/price
+    # 与 akshare/price 取 W/1826，不设 volume_budget：一旦设成 16GB 那档，分片支持落地
+    # 当天就会以 over_budget 变红，而容量问题那时才该按真读数谈。
+    ("astock_daily", "price", W, 1826, True, False, 0),
     # T：只留当期（快照型派生指标）——防复发判据主要盯这一组
     ("akshare", "tenure_days", T, 30, True, False, 64),
     ("akshare", "best_return", T, 30, True, False, 64),
     ("akshare", "aum_total", T, 30, True, False, 64),
     ("akshare", "funds_count", T, 30, True, False, 64),
-    ("akshare", "return", T, 30, True, False, 64),
-    ("akshare", "rating", T, 30, True, False, 64),
+    ("akshare", "return", W, 1826, True, False, 64),
+    ("akshare", "rating", W, 1826, True, False, 64),
     ("akshare", "yield", T, 30, True, False, 64),
     ("akshare", "nav", T, 30, True, False, 64),
     # 2026-11-12 补的两条快照族（原先完全没有契约；形状实测：每实体一条记录）
@@ -80,8 +89,8 @@ DEFAULT_CONTRACTS: tuple[tuple[str, str, str, int | None, bool, bool, int], ...]
     ("nrdl-national-catalog", "catalog", T, None, True, True, 64),
     # 三条原先只缺 re_fetchable；T 只留当期、W 为订阅制接口，故均可重取
     ("akshare", "performance", T, None, True, False, 64),
-    ("polygon", "employee_count", W, 730, True, True, 64),
-    ("polygon", "market_capitalization", W, 730, True, True, 64),
+    ("polygon", "employee_count", W, 1826, True, True, 64),
+    ("polygon", "market_capitalization", W, 1826, True, True, 64),
 )
 
 
@@ -223,7 +232,8 @@ def load_db_contracts(conn) -> dict:
 
 
 def classify_violations(contract: Contract | None, *, rows: int, over_window: int,
-                        rows_per_entity_recent: float, family: str) -> list[str]:
+                        rows_per_entity_recent: float, family: str,
+                        bad_dates: int = 0) -> list[str]:
     """纯函数：给一个数据族的读数，返回违规原因列表（空 = 合规）。
 
     这是整套原则里最要紧的一段：**它能抓住"契约写了但没人执行"**。
@@ -232,6 +242,13 @@ def classify_violations(contract: Contract | None, *, rows: int, over_window: in
     out: list[str] = []
     if contract is None:
         return ["no_contract：该 (源, 族) 没有留存契约，按原则不得继续写入"]
+    if contract.cls in (T, W) and bad_dates > 0:
+        # 淘汰与合并都靠 date 的**字符串**序：W 的 `o.date < 'YYYY-MM-DD'`、T 的
+        # `ORDER BY o.date DESC`。非 ISO 值只在恰好定长时与时间序一致，所以这类行
+        # 在 W 里永不被淘汰、在 T 里会挤掉真正的当期行——都无声。判 capacity 而不是
+        # contract_gap：它不是"还没声明契约"，是契约**执行不了**。
+        out.append(f"date_not_iso：{bad_dates} 行 date 不是 YYYY-MM-DD——W 的窗口比较与 "
+                   f"T 的取最新都退化成字符串序，这些行不会被淘汰/会挤掉当期行")
     if rows > 0 and contract.budget_mb and rows * AVG_ROW_BYTES > contract.budget_mb * 1024 * 1024:
         out.append(f"over_budget：约 {rows * AVG_ROW_BYTES // (1024 * 1024)}MB "
                    f"超过预算 {contract.budget_mb}MB")
@@ -319,7 +336,18 @@ def main(argv=None) -> int:
                        split_part(co.code, '.', 1) AS fam,
                        count(*) AS n,
                        count(DISTINCT (o.entity_type, o.entity_id)) AS entities,
-                       min(o.date) AS d0, max(o.date) AS d1
+                       min(o.date) AS d0, max(o.date) AS d1,
+                       -- date 是 varchar，W 的淘汰判据是 `o.date < 'YYYY-MM-DD'` 的**字符串**
+                       -- 比较，T 的合并判据是 `ORDER BY o.date DESC`。两者都只在 date 恰好是
+                       -- 定长 ISO 日期时才与"按时间先后"一致。一个 `LATEST`、`2026-10` 或
+                       -- `2026-10-13T22:00Z` 混进 W 就永远不会被淘汰（'LATEST' 比任何日期串都
+                       -- 大），混进 T 会让它挤掉真正的当期行——两种都是**静默**的。
+                       -- 用 length+substr 判而不是正则：审计要能在 sqlite 上跑，`~` 是 PG 专属。
+                       sum(CASE WHEN o.date IS NULL
+                                  OR length(o.date) <> 10
+                                  OR substr(o.date, 5, 1) <> '-'
+                                  OR substr(o.date, 8, 1) <> '-'
+                                THEN 1 ELSE 0 END) AS bad_date
                   FROM semantic_observations o
                   JOIN concepts co ON co.id = o.concept_id
                  GROUP BY 1, 2
@@ -375,7 +403,8 @@ def main(argv=None) -> int:
         ov = over_by_window.get(
             (m["src"], m["fam"], contract.window_days if contract else None), 0) or 0
         v = classify_violations(contract, rows=m["n"], over_window=ov,
-                               rows_per_entity_recent=pe, family=m["fam"])
+                               rows_per_entity_recent=pe, family=m["fam"],
+                               bad_dates=m["bad_date"] or 0)
         sev = severity_of(v)
         if sev == "capacity":
             capacity += 1
@@ -388,6 +417,7 @@ def main(argv=None) -> int:
             "class": contract.cls if contract else None,
             "window_days": contract.window_days if contract else None,
             "over_window_rows": ov, "rows_per_entity_7d": round(pe, 2),
+            "non_iso_dates": m["bad_date"] or 0,
             "severity": sev, "violations": v,
         })
 

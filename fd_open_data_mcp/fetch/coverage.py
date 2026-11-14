@@ -27,10 +27,10 @@ changing the shape of the result.
 
 from __future__ import annotations
 
-import calendar
 from dataclasses import dataclass
-from datetime import date, timedelta
-from typing import Iterable, Optional, Sequence
+from typing import Iterable, Sequence
+
+from fd_open_data_mcp.semantic.dates import observation_period
 
 #: Default minimum width (in days, inclusive) of an interior hole before it is
 #: worth fetching. One missing day inside a dense series is usually a real
@@ -40,10 +40,6 @@ DEFAULT_MIN_HOLE_DAYS = 5
 #: Fraction of the series' own dates inside the window that must be present
 #: before an interior hole is treated as noise rather than a gap.
 DEFAULT_MIN_COVERAGE = 0.98
-
-#: 单条日期展开成日期的上限（见 ``expand_periods``）。一年 366 天足够覆盖任何
-#: 正常周期；超出的只能是周期判断错误或畸形日期。
-_MAX_EXPAND_DAYS = 400
 
 
 @dataclass(frozen=True)
@@ -123,120 +119,6 @@ def _width(start: str, end: str) -> int:
     return (b - a).days + 1
 
 
-def period_bounds(obs_date: str, frequency: Optional[str]) -> tuple[str, str]:
-    """一条存储日期**回答**的日期段（含两端），而不是它字面上的那一天。
-
-    为什么必须有这一步：``coverage()`` 是拿日期做字符串比较的，而存储日期并不规范——
-    年度行可能是裸 ``"2019"``、月度行可能是 ``"2019-05"``。裸年份 ``"2019"`` 在
-    字符串序里**小于** ``"2019-01-01"``，于是窗口写成 ``2019-01-01..2019-12-31``
-    时那条年度行整条落在窗口外，读面会声称"整年缺失"——而我们明明有这一年的值。
-
-    这条口径与读点的既有规则一致（"窗口落在这一年内，年度行就回答它"，
-    ``cache.period_prefixes`` 负责取点）：一条年度行回答的是整年，不是元旦那天。
-
-    周期无法判断时按字面处理（窄），不替上游扩大范围。
-    """
-    raw = str(obs_date).strip()
-    f = (frequency or "").lower()
-    try:
-        if len(raw) >= 4 and f in ("yearly", "annual", "year"):
-            y = int(raw[:4])
-            return f"{y:04d}-01-01", f"{y:04d}-12-31"
-        if len(raw) >= 7 and f in ("monthly", "month"):
-            y, m = int(raw[:4]), int(raw[5:7])
-            return (f"{y:04d}-{m:02d}-01",
-                    f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}")
-        if len(raw) >= 7 and f in ("quarterly", "quarter"):
-            y, m = int(raw[:4]), int(raw[5:7])
-            q0 = ((m - 1) // 3) * 3 + 1
-            q1 = q0 + 2
-            return (f"{y:04d}-{q0:02d}-01",
-                    f"{y:04d}-{q1:02d}-{calendar.monthrange(y, q1)[1]:02d}")
-        if len(raw) >= 10 and f in ("weekly", "week"):
-            d0 = date.fromisoformat(raw[:10])
-            return d0.isoformat(), (d0 + timedelta(days=6)).isoformat()
-        if len(raw) >= 10:
-            d = date.fromisoformat(raw[:10]).isoformat()
-            return d, d
-    except ValueError:
-        pass
-    return raw, raw
-
-
-def expand_periods(dates: Iterable[str], frequency: Optional[str]) -> list[str]:
-    """把每条存储日期展开成它回答的全部日历日，供 ``coverage()`` 做日粒度比较。
-
-    日频序列是恒等变换（存储日期本来就是那一天），所以这条路径不会改变价格读面
-    的行为；只有年/月/季/周频会展开。展开规模有上限保护：一条日期若展开超过
-    ``_MAX_EXPAND_DAYS`` 天（周期判断错误或日期畸形），按字面值处理而不是让一次
-    读请求在内存里铺开几十年。
-    """
-    out: list[str] = []
-    for d in dates:
-        lo, hi = period_bounds(d, frequency)
-        if lo == hi:
-            out.append(lo)
-            continue
-        try:
-            cur, end = date.fromisoformat(lo), date.fromisoformat(hi)
-        except ValueError:
-            out.append(str(d))
-            continue
-        span = (end - cur).days + 1
-        if span <= 0 or span > _MAX_EXPAND_DAYS:
-            out.append(lo)
-            continue
-        while cur <= end:
-            out.append(cur.isoformat())
-            cur += timedelta(days=1)
-    return out
-
-
-def _shape_bounds(raw: str) -> Optional[tuple[str, str]]:
-    """按**日期串自身的形状**定位它回答的那一段；无法定位时返回 None。
-
-    与 :func:`period_bounds` 的分工：那个按概念的 ``frequency`` 判（读面要如实说
-    "这条年度行回答整年"），这个只按形状兜底，用于 ``coverage()`` 内部防止区间运算
-    在畸形/不规范日期上崩——它不需要、也拿不到概念频率。
-
-    ``"2023-W20"``、``"LATEST"`` 这类无法定位在日历上的值返回 None：它们不参与
-    区间运算（读面另有 ``excluded``/``gaps`` 报告通道），但也不会把一次读请求打崩。
-    """
-    raw = str(raw).strip()
-    try:
-        if len(raw) == 4 and raw.isdigit():
-            y = int(raw)
-            return f"{y:04d}-01-01", f"{y:04d}-12-31"
-        if len(raw) == 7 and raw[4] == "-":
-            y, m = int(raw[:4]), int(raw[5:7])
-            return (f"{y:04d}-{m:02d}-01",
-                    f"{y:04d}-{m:02d}-{calendar.monthrange(y, m)[1]:02d}")
-        if len(raw) >= 10:
-            d = date.fromisoformat(raw[:10])
-            return d.isoformat(), d.isoformat()
-    except ValueError:
-        return None
-    return None
-
-
-def _expand_shaped(dates: Iterable[str]) -> list[str]:
-    """``_shape_bounds`` 的批量版本：无法定位的日期被丢弃（不参与区间运算）。"""
-    out: list[str] = []
-    for d in dates:
-        b = _shape_bounds(d)
-        if b is None:
-            continue
-        lo, hi = b
-        if lo == hi:
-            out.append(lo)
-            continue
-        cur, end = date.fromisoformat(lo), date.fromisoformat(hi)
-        while cur <= end:
-            out.append(cur.isoformat())
-            cur += timedelta(days=1)
-    return out
-
-
 def coverage(
     all_dates: Sequence[str],
     start: str,
@@ -262,62 +144,80 @@ def coverage(
     """
     if start > end:
         raise ValueError(f"start ({start}) is after end ({end})")
-    # 区间运算只认"能定位在日历上的一天"。存储日期并不规范（裸年 ``"2019"``、
-    # 裸月 ``"2019-05"``、周标记 ``"2023-W20"``、哨兵 ``"LATEST"``），
-    # ``_next_day("2019")`` 会直接抛 ValueError——此前这条异常被上层的
-    # ``except Exception`` 兜成 ``coverage unknown`` + ``degraded=True``，
-    # 于是每一次年频/月频读都在报警"取不到"，而真相只是"我们存的是裸年份"。
-    # 这里先把每条日期展开成它回答的日、再按窗口过滤（顺序不能反：裸年份
-    # ``"2019"`` 在字符串序里小于 ``"2019-01-01"``，先过滤会把它整条丢掉），
-    # 定位不了的日期不参与区间运算（读面另有 excluded 通道报告它们），
-    # 而不是让整次读失败。
-    shape_days = _expand_shaped(sorted(set(all_dates)))
-    dates = sorted({d for d in shape_days if start <= d <= end})
-    whole = sorted(set(shape_days))
+
+    def _span_of(day: str) -> tuple[str, str] | None:
+        period = observation_period(day)
+        return None if period is None else (period[0].isoformat(), period[1].isoformat())
+
+    # 窗口边界也可能是粗粒度的（`start="2019"` 表示整年），先落成具体日子。
+    start_span, end_span = _span_of(start), _span_of(end)
+    win_lo = start_span[0] if start_span else start
+    win_hi = end_span[1] if end_span else end
+    whole = sorted(set(all_dates))
     if not whole and not known_empty:
         # Cold: nothing is known. The honest answer is "everything is missing".
-        return Coverage(None, None, (), ((start, end),))
+        return Coverage(None, None, (), ((win_lo, win_hi),))
 
-    span_start, span_end = (whole[0], whole[-1]) if whole else (None, None)
-    gaps: list[tuple[str, str]] = []
+    # 窗口内的判定按**日历区间是否相交**，不按字符串大小：
+    # `"2019"` 与窗口 `("2019-06-01","2019-08-31")` 字典序上不包含，日历上却相交。
+    def _in_window(day: str) -> bool:
+        span = _span_of(day)
+        return bool(span) and span[0] <= win_hi and span[1] >= win_lo
+
+    dates = sorted({d for d in all_dates if _in_window(d)})
+
+    # 宽度按**这条观测代表的日历区间**算，不按字符串长度：
+    # 一条 `2020` 回答的是 2020 全年，一条 `2023-05` 是那个月，一条 `2023-W20`
+    # 是那一周。此前这里把日期串直接当"某一天"喂给 _width/_prev_day，
+    # 于是按年的序列（本项目多数宏观数据就是按年）第一个日期就抛
+    # `ValueError: not enough values to unpack`，异常被上层吞成
+    # "coverage unknown"，每一读都降级却没人看得见（11-11 实测 test_read_series 两条红）。
+    # 「探过为空」必须先收进来：没有任何观测时，它与「从未取过」唯一的分界就是这份申报。
+    # （此前把它放在 span 计算之后，于是无观测的那一档会把它一起丢掉，
+    #  两种状态变得不可区分 —— 11-12 组合回归时被
+    #  test_knowledge_surface_integrity 的两条用例抓住。）
+    known: list[tuple[str, str]] = []
     for lo, hi in known_empty:
-        clipped = (max(lo, start), min(hi, end))
+        clipped = (max(lo, win_lo), min(hi, win_hi))
         if clipped[0] <= clipped[1]:
-            gaps.append(clipped)
-    known = gaps[:]
+            known.append(clipped)
+    gaps: list[tuple[str, str]] = known[:]
 
-    # Outer stretches use the same width threshold as interior holes, for the
-    # same reason: a window whose edges fall on non-trading days (a Saturday
-    # start, a Sunday end) sits just outside the series' first/last point
-    # without anything actually being missing. Reporting those as gaps would
-    # make every loosely-drawn window look unfilled.
-    if span_start and span_start > start:
-        lead = (start, _prev_day(span_start))
+    whole_spans = [sp for sp in (_span_of(d) for d in whole) if sp]
+    if not whole_spans:
+        # 所有日期都摆不到日历上（LATEST 哨兵、垃圾值）：位置未知，按空算。
+        return Coverage(None, None, (), tuple(_merge_intervals(gaps)),
+                        tuple(_merge_intervals(known)))
+    span_start = min(sp[0] for sp in whole_spans)
+    span_end = max(sp[1] for sp in whole_spans)
+
+    # Outer stretches: 第一/最后一个观测**代表**的区间之外，才是真的没覆盖。
+    if span_start > win_lo:
+        lead = (win_lo, _prev_day(span_start))
         if _width(*lead) >= min_hole_days:
             gaps.append(lead)
-    if span_end and span_end < end:
-        # 左端必须裁到窗口：否则"窗口整体在序列末尾之后"会报出一个从
-        # span_end+1 开始的缺口——那段调用方从没要求过。两个后果都真实：
-        # 报表里出现窗口外的缺失，补数会去问窗口之前的日期。
-        trail = (max(start, _next_day(span_end)), end)
+    if span_end < win_hi:
+        trail = (max(win_lo, _next_day(span_end)), win_hi)
         if trail[0] <= trail[1] and _width(*trail) >= min_hole_days:
             gaps.append(trail)
 
-    # Interior: only judged where the series proves it trades (inside its span).
-    inner_lo = max(start, span_start) if span_start else start
-    inner_hi = min(end, span_end) if span_end else end
-    if span_start and inner_lo <= inner_hi:
-        present = _merge(dates)
-        covered_days = sum(_width(a, b) for a, b in present)
+    # Interior: 先按"代表区间"合并出实际覆盖到的日子，再在它们之间找洞。
+    present_spans = [sp for sp in (_span_of(d) for d in dates) if sp]
+    present = _merge_intervals(present_spans)
+    inner_lo = max(win_lo, span_start)
+    inner_hi = min(win_hi, span_end)
+    if inner_lo <= inner_hi:
+        clipped_present = [(max(a, inner_lo), min(b, inner_hi)) for a, b in present]
+        clipped_present = [(a, b) for a, b in clipped_present if a <= b]
+        covered_days = sum(_width(a, b) for a, b in clipped_present)
         span_days = _width(inner_lo, inner_hi)
         if span_days > 0 and covered_days / span_days < min_coverage:
-            # Walk the interior and emit each hole wide enough to fetch.
             cursor = inner_lo
-            for hole_start, hole_end in present:
+            for hole_start, hole_end in clipped_present:
                 if cursor < hole_start:
                     if _width(cursor, _prev_day(hole_start)) >= min_hole_days:
                         gaps.append((cursor, _prev_day(hole_start)))
-                cursor = _next_day(hole_end)
+                cursor = max(cursor, _next_day(hole_end))
             if cursor <= inner_hi and _width(cursor, inner_hi) >= min_hole_days:
                 gaps.append((cursor, inner_hi))
 

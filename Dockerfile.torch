@@ -78,6 +78,12 @@ RUN if [ -d "$FD_MCP_FASTEMBED_CACHE/fast-all-MiniLM-L6-v2" ] && [ -n "$(ls -A "
 WORKDIR /app
 COPY alembic/ /app/alembic/
 COPY alembic.ini /app/alembic.ini
+# 线自描述端点 /.well-known/line-manifest.json（change 1.4）：清单在仓根，builder
+# 阶段的 COPY . . 只落在 /build，运行期 WORKDIR 里必须有它。绝对目标 + 构建期断言：
+# 清单不在镜像里就让构建红，而不是让端点静默变成 404
+# （2026-11-13 实测：本变体曾漏这一行，两个部署的端点都 404，pod 里 /app 只有 alembic*）。
+COPY line-manifest.json /app/line-manifest.json
+RUN test -s /app/line-manifest.json && ls -l /app/line-manifest.json
 
 EXPOSE 8899
 ENTRYPOINT ["fd-open-data-mcp", "serve", "--transport", "http", "--host", "0.0.0.0", "--port", "8899"]
