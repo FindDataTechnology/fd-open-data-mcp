@@ -74,10 +74,16 @@ WHERE id = 2383 AND status = 'running';
 测试：`tests/test_reconciler_stall_reaper.py` 15 条（含阈值→0、阈值→无穷两条破坏实验，
 以及一条因果证明"skipped 只在真的被挡住时出现"）；控制面回归 77 passed。
 
-## 但修复还没出片（2026-11-14 补）
+## 但修复还没出片（2026-11-14 上午补；当天 05:00Z 已出片，见下）
+
+> **状态更新（2026-11-14 05:00Z 实测）：已经出片了。** `crawl-reconciler` 的镜像从
+> `sha-00817fb` 换到了 **`sha-2f2ccd2`**，进镜像 grep：`policy_run_max_age_seconds` **4** 处、
+> `stalled` **12** 处；第一轮用新片的 Job 是 `crawl-reconciler-29910517`（04:52Z）。
+> 下面这一节保留原样，因为「合进 main ≠ 出片」这条判据仍然成立，而且它解释了
+> 为什么当时看起来一切都好。
 
 **上面第 2 节写「合进 main ＝ 治本」，这句话现在只对了一半：合进 main 只是治本的一半，
-另一半是出片，而它还没做。**运行中断行的那份代码里没有这个修复。
+另一半是出片。**（写这一节的时刻，运行中断行的那份代码里没有这个修复。）
 
 判据（只认进镜像 grep，不看 git 有没有那笔）：
 
@@ -117,10 +123,30 @@ ARG FD_ODM_REF="9221ec2647b4e8ff89f0035561efdb0c996b6a33"
 2. 派发器 `crawl-reconciler` 的镜像 tag 换到新片（xinru 与 cheap9 两个集群都要换）；
 3. `clusters.image` + `SCRAW_K8S_IMAGE`——**改 `fd-scripts` ConfigMap 对已派发的 Job 无效**。
 
-**为什么没有当场推**：`crawl-reconciler` 是全平台所有策略的唯一控制面，坏片的爆炸半径
-是整支舰队（不是某一条源），所以出片要单独一个窗口、一次只动一个集群、跑一轮看清
-`policy_runs` 再动第二个；这条线也有 owner。周末 A 股不开盘，硬期限落在**周一 18:17
-那次触发之前**。
+**2026-11-14 05:00Z 复核：三处都已到位**（另一条线做的，逐处验过，不只看了 git）：
+
+| 处 | 实测 |
+|---|---|
+| 1. pin | `scraw-fd-open-data-mcp/Dockerfile` 的 `FD_ODM_REF` = `82831c9…`（含 `cc8607e` 与 `2549fcb`），仓 head 与线上片 tag 同名：`sha-2f2ccd2` |
+| 2. 派发器 | CronJob 镜像 = `scraw-fd-open-data-mcp:sha-2f2ccd2`；进镜像 grep：`policy_run_max_age_seconds` **4**、`stalled` **12**、`fetch/retention_bulk.py` **在**；第一轮用新片的 Job = `crawl-reconciler-29910517`（04:52Z） |
+| 3. 分片 | `clusters.image` 四个集群（america/baidu/cheap/cheap9）**全是** `sha-eb366d0`，`SCRAW_K8S_IMAGE` 同片；该片进镜像 grep `retention_bulk` **在**、`retention.py` **在**。只有 `cheap9` 是 `enabled=true` |
+
+**「为什么没有当场推」这段保留**：当晚确实不宜单方面推——`crawl-reconciler` 是全平台所有
+策略的唯一控制面，坏片的爆炸半径是整支舰队（不是某一条源），出片要单独一个窗口、一次只
+动一个集群、跑一轮看清 `policy_runs` 再动第二个；这条线也有 owner。
+
+### 还剩一处：`fd-scripts` ConfigMap 里 4 份脚本落后仓
+
+出片之后，写入侧镜像都带 `retention_bulk` 了，但**脚本正文仍从 `fd-scripts` 取**，而那里
+5 个有出处的键里 **4 个比仓里少约 1KB**（缺直写路径的留存收尾、其中两份还留着已被仓里
+删掉的 dev DSN 兜底）。判据与它为什么「没有清单＝对所有按清单扫的闸隐形」，见
+
+    python3 fd-infra-deploy/tools/check_fd_scripts_configmap.py
+
+**同步的前置条件现在满足了**（目标镜像自带 `retention_bulk`，否则会 ImportError），但同步
+等于给这四族**新开一条按契约删历史行的路径**——所以它要按族想清楚再动，别顺手抄。顺序：
+先跑上面那道闸确认差异只在预期处 → 一次只同步一族 → 实跑一轮看 `policy_runs` 与行数变化。
+
 
 ## 周一（2026-11-16）该看什么
 
@@ -131,8 +157,24 @@ ARG FD_ODM_REF="9221ec2647b4e8ff89f0035561efdb0c996b6a33"
 ```bash
 kubectl --context xinru -n fd-master get cronjob crawl-reconciler \
   -o jsonpath='{..image}'
-# 仍是 sha-00817fb ⇒ 修复不在运行中。「没有 stalled/skipped 行」此时只能读成
-# 「写这些行的代码还没上」，不能读成「没发生停更」。
+# 2026-11-14 05:00Z 实测已是 sha-2f2ccd2（含修复）。若又回到 sha-00817fb
+# ⇒ 修复不在运行中，「没有 stalled/skipped 行」只能读成「写这些行的代码还没上」。
+```
+
+**第 0.5 步：别把那条手工行当成 reaper 的产出。** 全库现有**唯一**一条 `stalled`
+是 `id=2383`，`detail` 以 `stalled (manual repair, 2026-11-13)` 开头——那是人工关的。
+所以「出现了 stalled」这个判据必须带 id 界限：
+
+```sql
+-- 已经拿到过的基线（2026-11-14 05:00Z）：success 26 / failed 11 / no_op 11 /
+-- zero_yield 4 / redundant 3 / stalled 1（就是 2383），open_runs = 0。
+SELECT status, count(*) FROM policy_runs
+WHERE started_at > now() - interval '4 days' GROUP BY 1 ORDER BY 2 DESC;
+
+-- reaper 真的开火了吗？只认 id > 2383 的新行（2383 是人工那条）
+SELECT id, policy_id, status, started_at, left(coalesce(detail,''), 90)
+FROM policy_runs WHERE id > 2383 AND status IN ('stalled','skipped')
+ORDER BY id DESC LIMIT 10;
 ```
 
 ```sql
