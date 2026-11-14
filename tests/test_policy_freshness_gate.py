@@ -225,3 +225,86 @@ def test_executor_ceiling_honours_the_env_override(monkeypatch):
         pytest.skip("reconciler 不可导入（沙箱）")
     monkeypatch.setenv("SCRAW_JOB_ACTIVE_DEADLINE_SECONDS", "600")
     assert gate._active_deadline_seconds() == 600
+
+
+# ---------------------------------------------------------------- 零产出（zero_yield）
+#
+# 2026-11-15：这个状态原先不在这道闸的任何一档里（既不在 FAILED 也不在 TERMINAL），
+# 于是每条策略的「最近一次终态」都跳过它、读到上一次 success。实况是 policy 2
+# `fund-pilot-aum` 在 11-08/09/10 连出三次 zero_yield，而这三天的闸输出写的是
+# 「最近一次终态 success」。`reconciler.classify_yield` 把这个状态叫 the outage shape，
+# 面板 cockpit 同期已把它算进 failures。
+
+def _zy(hours_ago: float, *, cells=630, att=0, new=0, detail=""):
+    return gate.PolicyRun(status="zero_yield", started_at=NOW - timedelta(hours=hours_ago),
+                          detail=detail, plan_cells=cells,
+                          rows_attempted=att, rows_new=new)
+
+
+def _judge_one(runs, *, cron="0 6 * * *"):
+    und: list[str] = []
+    findings, facts = gate.judge([gate.PolicyState(1, "p", cron, "UTC", runs)],
+                                 now=NOW, undetermined=und)
+    return findings, facts, und
+
+
+def test_zero_yield_is_a_terminal_state_not_invisible():
+    """旧版最坏的那种错：最新一跳是零产出，读出来却说「最近一次终态 success」。"""
+    findings, facts, _ = _judge_one([_zy(5), _run("success", 29)])
+    assert not any("success" in f for f in facts), facts
+    assert any("zero_yield" in f for f in facts), facts
+
+
+def test_three_consecutive_zero_yields_count():
+    findings, _, _ = _judge_one([_zy(5), _zy(29), _zy(53), _run("success", 77)])
+    rules = [f.rule for f in findings]
+    assert rules.count("repeated_zero_yield") == 1
+
+
+def test_two_consecutive_zero_yields_are_a_fact_only():
+    """周末连着两天是常态形态。两天就红，闸会每周红一次、然后被无视。"""
+    findings, facts, _ = _judge_one([_zy(5), _zy(29), _run("success", 53)])
+    assert not findings
+    assert any("zero_yield" in f and "只报事实" in f for f in facts)
+
+
+def test_a_single_zero_yield_is_a_fact_only():
+    findings, facts, _ = _judge_one([_zy(5), _run("success", 29)])
+    assert not findings
+    assert any("zero_yield" in f for f in facts)
+
+
+def test_the_streak_counts_terminal_rows_only():
+    """中间夹一条 running 不该把连续计数打断（它自己会被 R3 单独判）。"""
+    findings, _, _ = _judge_one([
+        _zy(5), _run("running", 10), _zy(29), _zy(53), _run("success", 77),
+    ])
+    assert any(f.rule == "repeated_zero_yield" for f in findings)
+
+
+def test_zero_yield_shape_names_the_two_causes():
+    """两种成因的处置相反：查 pod 为什么早退 vs 查上游为什么空返回。"""
+    died = gate._zero_yield_shape(gate.PolicyRun("zero_yield", NOW, plan_cells=630))
+    empty = gate._zero_yield_shape(
+        gate.PolicyRun("zero_yield", NOW, plan_cells=630, rows_attempted=0, rows_new=0))
+    assert "首次上报前就结束" in died
+    assert "上游没有给数据" in empty
+    assert died != empty
+
+
+def test_unknown_status_is_undetermined_not_green():
+    """`aborted` 这种没有 run 侧语义的状态：既不猜成失败，也不静默成成功。"""
+    findings, facts, und = _judge_one([gate.PolicyRun("aborted", NOW - timedelta(hours=5)),
+                                       _run("success", 29)])
+    assert not findings
+    assert not any("success" in f for f in facts), facts
+    assert len(und) == 1 and "aborted" in und[0]
+
+
+def test_inject_zero_yield_makes_a_healthy_policy_red():
+    states = [gate.PolicyState(5, "healthy", "0 6 * * *", "UTC", [_run("success", 5)])]
+    notes = gate._inject(states, assume_failed=None, assume_missed_slot=None,
+                         now=NOW, assume_zero_yield="5")
+    assert notes and "已注入" in notes[0]
+    findings, _, _ = _judge_one(states[0].runs)
+    assert any(f.rule == "repeated_zero_yield" for f in findings)

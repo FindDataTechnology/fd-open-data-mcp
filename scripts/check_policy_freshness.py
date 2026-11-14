@@ -17,13 +17,23 @@
 可抓」**——连"上游拒绝"都没留下。判据不管这件事，「每天跑、每天失败、没人知道」
 就是一个稳定形态。
 
-## 判据（四条硬档 + 两条只报事实）
+## 判据（五条硬档 + 两条只报事实）
 
 硬档命中即 EXIT=1：
 
+- **R0 `unknown_status`（判不出）** —— 最新一跳的状态不在这道闸认识的集合里。
+  不认识的状态既不能当成功也不能当失败（`policy_runs` 里出现过 `aborted` 173 行，
+  仓内只有 wave 侧语义、没有 run 侧语义），所以**整条策略判不出**，进 EXIT=2。
+  这一条是结构性的：没有它，下一个新状态会像 `zero_yield` 一样静默走绿路。
 - **R1 `latest_failed`** —— 最近一次**终态**运行是 `failed`/`stalled`。
   这是"现在坏了"的直接信号；`no_op`/`redundant`/`skipped` 是合法不产出，**不算失败**
   （否则月度策略在"本期还没结束"时会常年红）。
+- **R1b `repeated_zero_yield`** —— 最近 **连续 ≥3 次**终态都是 `zero_yield`。
+  生产者把这个状态叫 **the outage shape**：计划里有格子、却一行都没抓到，或连一次
+  flush 都没上报。它与 R1 分开的理由是处置不同——**没有任何报错**、job 每次成功退出、
+  日志里只有一次正常结束，要看的是上游还在不在给数据。
+  取 3 次而不是 1 次：单次零产出在周末/长假/上游迟发时都会出现，逐次报警会得到一道
+  每逢周末必红的闸；而周末连着两天只有 2 次，两天永远不够。
 - **R2 `no_recent_run`** —— 最近一次运行早于该策略**自己的**排期周期 × 1.5
   （周期由 `croniter` 从 `cron_expr` 推，取未来 60 次触发的最大间隔：工作日 cron 的
   最大间隔是 3 天，不是 1 天）。**一次都没跑过**单独成 `never_ran`。
@@ -35,20 +45,23 @@
   R1 说"坏了"，R4 说"而且它什么理由都没留下"，后者要靠留痕修复，不是靠重跑。
 
 只报事实、不计命中：最近一次是 `no_op`/`redundant`/`skipped`（合法不产出）、
+`zero_yield` 但未连续 3 次（单次形态，会连成因一起打印）、
 `cron_expr` 为空（不排期，`last_run_at` 空是设计）。
 
 ## 退出码
 
 `0` 无命中；`1` 有命中；`2` 判不出（连不上库 / 一条启用策略都没有 / 某条 cron 解析
-不出）。**判不出不许退 0**——"什么都没查"与"全部健康"同码是这一族闸最常见的假绿。
+不出 / 最新一跳是未知状态）。**判不出不许退 0**——"什么都没查"与"全部健康"同码是
+这一族闸最常见的假绿。
 
 ## 用法
 
     python scripts/check_policy_freshness.py --db-url "$FD_OPEN_DATA_MCP_DATABASE_URL"
     python scripts/check_policy_freshness.py --only astock           # 只判名字含该子串
     python scripts/check_policy_freshness.py --json
-    python scripts/check_policy_freshness.py --self-test             # 六条分支自证
+    python scripts/check_policy_freshness.py --self-test             # 九条分支自证
     python scripts/check_policy_freshness.py --assume-failed 2659    # 注入红证
+    python scripts/check_policy_freshness.py --assume-zero-yield 2   # 注入零产出红证
 
 只读：所有查询都在 `set_session(readonly=True)` 下，写盘为零。
 """
@@ -80,8 +93,29 @@ FIRE_GRACE_SECONDS = 3600
 
 OPEN_STATUSES = {"running", "queued"}
 FAILED_STATUSES = {"failed", "stalled"}
+#: 生产者自己把这个状态叫 **the outage shape**（`reconciler.classify_yield`）：计划里有
+#: 格子，却一行都没抓到，或者连一次 flush 都没上报。它**不是**「合法不产出」——
+#: `no_op`（计划为空）与 `redundant`（抓到了但都已在库）才是。
+#:
+#: 2026-11-15 量到：这个状态此前**不在这道闸的任何一档里**（既不在 FAILED、也不在
+#: TERMINAL），于是每条策略的「最近一次终态」都跳过它、读到上一次 success。实况：
+#: policy 2 `fund-pilot-aum` 在 11-08/09/10 连出三次 zero_yield，而这三天的闸输出
+#: 写的是「最近一次终态 success」——生产者已经把「供数中断」记进账本了，读的人却
+#: 看不见。面板 cockpit 同期已把它算进 `failures`，这道闸是那一圈里唯一的漏档。
+ZERO_YIELD_STATUS = "zero_yield"
+#: 零产出按**连续次数**判，不按单次：单次「计划了却没抓到」在周末/长假/上游迟发时
+#: 都会出现，逐次报警会得到一道每逢周末必红的闸（本仓已有结论：常年红的闸会被无视）。
+#: 取 3 而不是 2：周末连着两天是常态形态，两天永不够；真断供到第三天就红。
+ZERO_YIELD_STREAK_LIMIT = 3
 NON_YIELD_OK = {"no_op", "redundant", "skipped"}
-TERMINAL_STATUSES = {"success", *FAILED_STATUSES, *NON_YIELD_OK, "cancelled"}
+TERMINAL_STATUSES = {"success", *FAILED_STATUSES, *NON_YIELD_OK, "cancelled",
+                     ZERO_YIELD_STATUS}
+#: 认识的全部状态。**不认识的状态出现在最新一跳 ⇒ 判不出**，不许静默走进绿路。
+#: 2026-11-15 量到 policy_runs 里另有 `aborted`（173 行，全在 08-30..09-18，只有 1 行
+#: 属于启用策略且是 09-18 的老行），仓里没有一处定义它在 run 侧的语义（`expander` 里
+#: 那个是 wave 状态）。猜一个含义去归类，等于替未定义的语义背书，所以只让它变成
+#: 「判不出」，不变成绿也不变成红。
+KNOWN_STATUSES = OPEN_STATUSES | TERMINAL_STATUSES
 
 #: 「读不出原因」的指纹。这些是**已知的留痕缺陷**，不是判断上游好坏的依据。
 OPAQUE_MARKERS = (
@@ -100,6 +134,12 @@ class PolicyRun:
     started_at: datetime
     finished_at: datetime | None = None
     detail: str = ""
+    #: `classify_yield` 就是拿这三列把一次"job 成功"的跑批分成 no_op / zero_yield /
+    #: redundant / success。少了它们，零产出只能报「零产出」，说不清是「pod 在首次
+    #: 上报前就死了」还是「抓了但上游没给」——而这两件事的处置完全不同。
+    plan_cells: int | None = None
+    rows_attempted: int | None = None
+    rows_new: int | None = None
 
 
 @dataclass
@@ -117,7 +157,8 @@ class PolicyState:
 class Finding:
     policy_id: int
     name: str
-    rule: str          # latest_failed | no_recent_run | never_ran | dangling_open_run | opaque_reason
+    rule: str          # latest_failed | repeated_zero_yield | no_recent_run | never_ran
+                       # | dangling_open_run | opaque_reason
     detail: str
 
     @property
@@ -168,6 +209,22 @@ def _is_opaque(detail: str) -> bool:
     return any(m.lower() in low for m in OPAQUE_MARKERS)
 
 
+def _zero_yield_shape(run: PolicyRun) -> str:
+    """零产出的两种成因，按 `reconciler.classify_yield` 的分支逐字对齐。
+
+    这两句必须分开写：`attempted is None` = pod 在第一次上报前就结束了（"—它压根没跑
+    到抓数那一步"），`attempted == 0` = 跑了、上游一行都没给（"供数中断"）。前者去查
+    pod 为什么早退，后者去查上游为什么空返回——写成同一句会让人查错方向。
+    """
+    planned = run.plan_cells
+    plan_txt = f"计划 {planned} 格" if planned is not None else "计划格数未记录"
+    if run.rows_attempted is None or run.rows_new is None:
+        return f"{plan_txt}，但连一次 flush 都没上报（pod 在首次上报前就结束了）"
+    if run.rows_attempted == 0:
+        return f"{plan_txt}，抓取 0 行（上游没有给数据 = 供数中断的形态）"
+    return f"{plan_txt}，抓了 {run.rows_attempted} 行却没落地新行"
+
+
 def judge(states: Iterable[PolicyState], *, now: datetime,
           executor_ceiling_seconds: int = DEFAULT_EXECUTOR_CEILING_SECONDS,
           fire_grace_seconds: int = FIRE_GRACE_SECONDS,
@@ -182,6 +239,19 @@ def judge(states: Iterable[PolicyState], *, now: datetime,
         label = f"p{st.policy_id} {st.name}"
         terminal = [r for r in st.runs if r.status in TERMINAL_STATUSES]
         latest = terminal[0] if terminal else None
+
+        # R0 未知状态：最新一跳的状态不在认识的集合里 ⇒ 判不出。
+        # 放在所有判据之前，因为它的存在让「最近一次终态」这个说法本身失效——我们不
+        # 知道那一跳算不算终态、算成功还是失败。**不许落到绿路**：那正是这道闸在
+        # 2026-11-15 之前对 zero_yield 犯的错（不认识的状态静默读成上一次成功）。
+        newest_any = st.runs[0] if st.runs else None
+        if newest_any is not None and newest_any.status not in KNOWN_STATUSES:
+            undetermined.append(
+                f"{label}: 最新一跳状态 {newest_any.status!r} 不在认识的状态集里"
+                f"（{_as_utc(newest_any.started_at):%Y-%m-%d %H:%M}Z）——判不出它是成功、"
+                f"失败还是不产出；先给它一个语义再判"
+            )
+            continue
 
         # R3 先判：悬着的 open run 是"下次也不再跑"的成因，先说它。
         # 同一处问题只记一次——悬着的行已经解释了"为什么没有终态行"，
@@ -227,6 +297,27 @@ def judge(states: Iterable[PolicyState], *, now: datetime,
                     "最近一次失败没有留下可判原因（detail 只有「pod 已回收/无终态可抓」这类）"
                     "——重跑救不了它，要先补留痕（让执行体自己把失败原因写进 detail）",
                 ))
+        elif latest.status == ZERO_YIELD_STATUS:
+            # R1b 零产出：`zero_yield` 是「跑了，但一行新数据都没有」。与 `latest_failed`
+            # 分开，因为处置不同——这里没有报错、没有异常堆栈、job 是成功退出的，翻日志
+            # 只会看到一次正常结束；要看的是上游到底给没给数据。
+            streak = 0
+            for r in terminal:
+                if r.status != ZERO_YIELD_STATUS:
+                    break
+                streak += 1
+            shape = _zero_yield_shape(latest)
+            if streak >= ZERO_YIELD_STREAK_LIMIT:
+                findings.append(Finding(
+                    st.policy_id, st.name, "repeated_zero_yield",
+                    f"最近 {streak} 次终态全是零产出（最近一次 "
+                    f"{_as_utc(latest.started_at):%Y-%m-%d %H:%M}Z）：{shape}"
+                    f"——连续 {ZERO_YIELD_STREAK_LIMIT} 次以上就不是「恰好没有新数据」，"
+                    f"去看上游是否还在给数据（这条没有报错，job 每次都成功退出）",
+                ))
+            else:
+                facts.append(f"{label}: 最近一次终态 zero_yield（{shape}）"
+                             f"——未连续 {ZERO_YIELD_STREAK_LIMIT} 次，只报事实")
         elif latest.status in NON_YIELD_OK:
             facts.append(f"{label}: 最近一次终态 {latest.status}（合法不产出，不计命中）")
         else:
@@ -289,8 +380,10 @@ def load_states(db_url: str, only: str | None = None) -> list[PolicyState]:
 
             ids = [int(p[0]) for p in policies]
             runs = conn.execute(text(
-                "select policy_id, status, started_at, finished_at, coalesce(detail, '') "
+                "select policy_id, status, started_at, finished_at, coalesce(detail, ''), "
+                "       plan_cells, rows_attempted, rows_new "
                 "from (select policy_id, status, started_at, finished_at, detail, "
+                "             plan_cells, rows_attempted, rows_new, "
                 "             row_number() over (partition by policy_id order by started_at desc) rn "
                 "        from policy_runs where policy_id = any(:ids)) t "
                 "where rn <= 50 order by policy_id, started_at desc"
@@ -305,6 +398,9 @@ def load_states(db_url: str, only: str | None = None) -> list[PolicyState]:
             started_at=r[2],
             finished_at=r[3],
             detail=str(r[4] or ""),
+            plan_cells=r[5],
+            rows_attempted=r[6],
+            rows_new=r[7],
         ))
     return [
         PolicyState(
@@ -319,12 +415,13 @@ def load_states(db_url: str, only: str | None = None) -> list[PolicyState]:
 # ---------------------------------------------------------------- self-test
 
 def _self_test() -> int:
-    """六条分支各证一次，外加一条绿路——省掉绿路，「全都判红」与「判据写反」同形。"""
+    """九条分支各证一次，外加两条绿路——省掉绿路，「全都判红」与「判据写反」同形。"""
     now = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
 
-    def run(status, hours_ago, detail=""):
+    def run(status, hours_ago, detail="", *, cells=None, att=None, new=None):
         return PolicyRun(status=status,
-                         started_at=now - timedelta(hours=hours_ago), detail=detail)
+                         started_at=now - timedelta(hours=hours_ago), detail=detail,
+                         plan_cells=cells, rows_attempted=att, rows_new=new)
 
     states = [
         # R1 + R4：最近一次失败，且理由读不出（11-10..11-12 的形态）。
@@ -344,6 +441,25 @@ def _self_test() -> int:
         PolicyState(5, "healthy", "0 6 * * *", "UTC", [run("success", 5)]),
         # 只报事实：no_op 不是失败
         PolicyState(6, "noop", "0 6 1 * *", "UTC", [run("no_op", 5, "next period not finished")]),
+        # R1b：三次连续零产出、计划了格子却抓 0 行 —— 2026-11-08..11-10 policy 2 的形态。
+        # 此前这一串在这道闸里完全不可见（latest 跳过 zero_yield 取到上一次 success）。
+        PolicyState(7, "outage", "0 6 * * *", "UTC", [
+            run("zero_yield", 5, cells=630, att=0, new=0),
+            run("zero_yield", 29, cells=630, att=0, new=0),
+            run("zero_yield", 53, cells=630, att=0, new=0),
+            run("success", 77, cells=630, att=630, new=630),
+        ]),
+        # 单次零产出只报事实（周末/长假形态）：周末连着两天也不该红，故取 2 次向下证
+        PolicyState(8, "weekend", "0 6 * * *", "UTC", [
+            run("zero_yield", 5, cells=2, att=0, new=0),
+            run("zero_yield", 29, cells=2, att=0, new=0),
+            run("success", 53, cells=2, att=2, new=2),
+        ]),
+        # R0：最新一跳的状态不在认识集里（`aborted` 就是这种：仓里只有 wave 侧语义）
+        PolicyState(9, "unknown-status", "0 6 * * *", "UTC", [
+            run("aborted", 5),
+            run("success", 29),
+        ]),
     ]
     undetermined: list[str] = []
     findings, facts = judge(states, now=now, undetermined=undetermined)
@@ -353,6 +469,7 @@ def _self_test() -> int:
         (2, "dangling_open_run"),
         (3, "no_recent_run"),
         (4, "never_ran"),
+        (7, "repeated_zero_yield"),
     }
     ok = got == expected
     for pid, rule in sorted(expected):
@@ -360,10 +477,20 @@ def _self_test() -> int:
         print(f"  {mark} p{pid} 期望命中 {rule}")
     for pid, rule in sorted(got - expected):
         print(f"  ✗ p{pid} 不该命中却命中 {rule}")
-    green = not any(f.policy_id == 5 for f in findings)
-    print(f"  {'✓' if green else '✗'} p5 healthy 无命中（绿路）")
+    green = not any(f.policy_id in (5, 8) for f in findings)
+    print(f"  {'✓' if green else '✗'} p5 healthy / p8 两次零产出 无命中（绿路）")
     noop_fact = any("no_op" in f for f in facts)
     print(f"  {'✓' if noop_fact else '✗'} p6 no_op 只报事实")
+    zy_fact = any("p8 weekend" in f and "zero_yield" in f for f in facts)
+    print(f"  {'✓' if zy_fact else '✗'} p8 单/两次零产出虽不命中，但必须出现在「只报事实」里")
+    # 零产出的两种成因要分开点名：查 pod 早退 vs 查上游空返回
+    shape = _zero_yield_shape(PolicyRun("zero_yield", now, plan_cells=630, rows_attempted=0, rows_new=0))
+    shape_died = _zero_yield_shape(PolicyRun("zero_yield", now, plan_cells=630))
+    split_ok = "上游没有给数据" in shape and "首次上报前就结束" in shape_died
+    print(f"  {'✓' if split_ok else '✗'} 零产出的两种成因各自点名（抓 0 行 ≠ pod 早退）")
+    # 未知状态必须判不出，而不是静默当成"上一次成功"
+    und_ok = any("p9 unknown-status" in u for u in undetermined)
+    print(f"  {'✓' if und_ok else '✗'} p9 未知状态 aborted 进 undetermined（{len(undetermined)} 条）")
 
     # 时区是判据的一部分：同一条 cron 按 UTC / Asia/Shanghai 解出相距 8 小时的触发时刻
     fire_utc, _ = _prev_fire("17 18 * * 1-5", "UTC", now)
@@ -375,12 +502,13 @@ def _self_test() -> int:
 
     # 解析不出要进 undetermined（退 2），不许静默当作"没排期"
     bad: list[str] = []
-    judge([PolicyState(7, "bad-cron", "not a cron", "UTC", [run("success", 1)])],
+    judge([PolicyState(10, "bad-cron", "not a cron", "UTC", [run("success", 1)])],
           now=now, undetermined=bad)
     bad_ok = len(bad) == 1
     print(f"  {'✓' if bad_ok else '✗'} 坏 cron 进 undetermined（{len(bad)} 条）")
 
-    return 0 if (ok and green and noop_fact and tz_ok and bad_ok) else 1
+    return 0 if (ok and green and noop_fact and zy_fact and split_ok and und_ok
+                 and tz_ok and bad_ok) else 1
 
 
 # ---------------------------------------------------------------- main
@@ -407,14 +535,19 @@ def _print_human(findings: list[Finding], facts: list[str],
 
 
 def _inject(states: list[PolicyState], *, assume_failed: str | None,
-            assume_missed_slot: str | None, now: datetime) -> list[str]:
+            assume_missed_slot: str | None, now: datetime,
+            assume_zero_yield: str | None = None) -> list[str]:
     """红证：在**真实取到的**状态上按名字注入，走同一套判据（不改库、不改文件）。
 
-    这两条存在的理由：`--self-test` 证的是纯函数的分支，而「报告路径能红」要靠真数据——
+    这三条存在的理由：`--self-test` 证的是纯函数的分支，而「报告路径能红」要靠真数据——
     省掉它，「全都判红」与「判据写反」在输出上同形。
+
+    `--assume-zero-yield` 注入的是**连续 3 次**，不是 1 次：判据本身按连续次数计，
+    只注一次什么也不会发生（那正是它该有的行为），而那样做红证会「失败得像成功」。
     """
     notes: list[str] = []
-    for target, kind in ((assume_failed, "failed"), (assume_missed_slot, "missed")):
+    for target, kind in ((assume_failed, "failed"), (assume_missed_slot, "missed"),
+                         (assume_zero_yield, "zero-yield")):
         if not target:
             continue
         # `p2659` 与 `2659` 都认（人会说 p2659，库里是 int）
@@ -430,6 +563,17 @@ def _inject(states: list[PolicyState], *, assume_failed: str | None,
                     status="failed", started_at=now - timedelta(hours=1),
                     detail="INJECTED (assume-failed): 红证用，库里的行未被改动",
                 ))
+            elif kind == "zero-yield":
+                need = ZERO_YIELD_STREAK_LIMIT
+                injected = [
+                    PolicyRun(
+                        status=ZERO_YIELD_STATUS, started_at=now - timedelta(hours=1 + 24 * i),
+                        detail="INJECTED (assume-zero-yield): 红证用，库里的行未被改动",
+                        plan_cells=630, rows_attempted=0, rows_new=0,
+                    )
+                    for i in range(need)
+                ]
+                st.runs = injected + st.runs
             else:
                 # 把"最近一次应触发之后"的行全部摘掉 ⇒ 该轮没有记录
                 prev, _ = _prev_fire(st.cron_expr or "0 6 * * *", st.timezone_name, now)
@@ -448,8 +592,10 @@ def main(argv: list[str] | None = None) -> int:
                     help="红证：把该策略最近一次运行当作 failed（只改内存）")
     ap.add_argument("--assume-missed-slot", metavar="ID_OR_NAME",
                     help="红证：摘掉该策略最近一轮的运行记录（只改内存）")
+    ap.add_argument("--assume-zero-yield", metavar="ID_OR_NAME",
+                    help=f"红证：给该策略注入连续 {ZERO_YIELD_STREAK_LIMIT} 次零产出（只改内存）")
     ap.add_argument("--json", action="store_true")
-    ap.add_argument("--self-test", action="store_true", help="六条分支自证")
+    ap.add_argument("--self-test", action="store_true", help="九条分支自证")
     args = ap.parse_args(argv)
 
     if args.self_test:
@@ -469,7 +615,8 @@ def main(argv: list[str] | None = None) -> int:
                else DEFAULT_EXECUTOR_CEILING_SECONDS)
     now = datetime.now(timezone.utc)
     injection = _inject(states, assume_failed=args.assume_failed,
-                        assume_missed_slot=args.assume_missed_slot, now=now)
+                        assume_missed_slot=args.assume_missed_slot, now=now,
+                        assume_zero_yield=args.assume_zero_yield)
     undetermined: list[str] = []
     findings, facts = judge(states, now=now,
                             executor_ceiling_seconds=ceiling,
