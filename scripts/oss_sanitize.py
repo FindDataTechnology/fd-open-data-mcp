@@ -31,7 +31,15 @@ from pathlib import Path
 EXCLUDED_DIRS = {".git", ".venv", "venv", "__pycache__", "node_modules",
                  ".pytest_cache", "build", "dist", ".mypy_cache"}
 # The gate's own fixtures contain planted fake secrets — exclude them.
-EXCLUDED_FILES = {"tests/test_oss_sanitize.py"}
+# The scanner source is excluded for a structural reason, not a policy one: a
+# scrubber's rulebook must *contain* the strings it looks for, so scanning it
+# always yields matches for the pattern definitions themselves and for the
+# docstring that names the tailnet range (measured 2026-11-14: 3 self-matches,
+# which kept `Build Check` red on every commit and buried the 72 real findings
+# underneath). Excluding the file changes nothing about what ships: the rulebook
+# is public by design, and the strings it contains are the detector, not the
+# secret.
+EXCLUDED_FILES = {"tests/test_oss_sanitize.py", "scripts/oss_sanitize.py"}
 # Deploy / private assets: presence anywhere is a violation.
 FORBIDDEN_PATH_PATTERNS = [
     r"(^|/)deploy/", r"(^|/)secrets/", r"(^|/)k8s/",
