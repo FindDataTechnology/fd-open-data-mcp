@@ -81,8 +81,10 @@ spec:
             - name: FD_SCRIPTS_DIR
               value: /opt/fd-scripts/
             - name: SCRAW_K8S_IMAGE
-              value: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-5539dc5
-            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-5539dc5
+              value: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-eb366d0
+            - name: FD_RETENTION_GATE
+              value: warn
+            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-2f2ccd2
             imagePullPolicy: IfNotPresent
             name: reconciler
             resources:

@@ -127,6 +127,90 @@ def _is_rate_limited(exc: BaseException) -> bool:
     return any(m in text for m in RATE_LIMIT_MARKERS)
 
 
+# ── source fallback (2026-11-15) ───────────────────────────────────────────────
+# eastmoney's push2his began refusing datacenter IPs around 2026-11-09 and every
+# A-share series on the shard stops that Friday. The platform adapter already
+# fails over eastmoney → tencent; this script called akshare's eastmoney-only
+# entrypoint (``stock_zh_a_hist``) directly, so it had no second leg and the whole
+# universe starved for four sessions.
+#
+# Measured 2026-11-15 from cheap9 — the cluster this Job runs in, so this is not
+# "works from a laptop": tencent (``stock_zh_a_hist_tx``) and sina
+# (``stock_zh_a_daily``) both answer in ~0.1s and agree with each other to the
+# cent (600085 2026-11-13 close 23.78 on both). tencent's volume divided by 100
+# equals the stored 成交量(手) exactly on all four overlapping days
+# (11942400→119424, 10096100→100961, 10849300→108493, 7380800→73808).
+#
+# Two things must not drift when a fallback serves a day:
+#   * columns — the write path is keyed on eastmoney's 日期/开盘/收盘/最高/最低/
+#     成交量, so every provider's frame is normalized onto those names;
+#   * volume unit — eastmoney reports 手, tencent/sina report 股. Writing 股 into
+#     a concept whose stored history is 手 would inflate that series 100x with no
+#     error anywhere in the pipeline.
+PROVIDER_ORDER = ("eastmoney", "tencent", "sina")
+# Consecutive limiter refusals from one provider before it is skipped for the rest
+# of the run: a permanent IP block should cost one request per symbol, not three,
+# and must never be reported as "this symbol had no data".
+PROVIDER_BREAKER_AFTER = 3
+SHARES_PER_LOT = 100
+
+_PROVIDER_FNS: dict | None = None      # lazy: --selfcheck must not need akshare
+_PROVIDER_STATE: dict = {}             # reset per run by _reset_provider_state()
+
+
+def _reset_provider_state() -> None:
+    _PROVIDER_STATE.clear()
+    _PROVIDER_STATE.update({"served": {}, "fails": {}, "open": set(), "switched": 0})
+
+
+def _provider_fn(name: str):
+    global _PROVIDER_FNS
+    if _PROVIDER_FNS is None:
+        import akshare as ak
+        _PROVIDER_FNS = {"eastmoney": ak.stock_zh_a_hist,
+                         "tencent": ak.stock_zh_a_hist_tx,
+                         "sina": ak.stock_zh_a_daily}
+    return _PROVIDER_FNS[name]
+
+
+def _provider_symbol(name: str, code: str) -> str:
+    """eastmoney wants the bare code; tencent/sina want the exchange prefix."""
+    c = code.strip().lower()
+    if c[:2] in ("sh", "sz", "bj"):
+        base, prefix = c[2:], c[:2]
+    else:
+        base, _, suffix = c.partition(".")
+        base = base.split(".")[0]
+        prefix = suffix if suffix in ("sh", "sz", "bj") else ""
+    if name == "eastmoney":
+        return base
+    if prefix:
+        return prefix + base
+    if base.startswith(("6", "9")):
+        return "sh" + base
+    if base.startswith(("8", "4")):
+        return "bj" + base
+    return "sz" + base
+
+
+_PROVIDER_COLS = {"date": "日期", "open": "开盘", "close": "收盘",
+                  "high": "最高", "low": "最低", "volume": "成交量"}
+
+
+def _normalize_frame(df, provider: str):
+    """Provider frame → eastmoney's schema, with 成交量 converted from 股 to 手."""
+    if provider == "eastmoney":
+        return df
+    missing = [c for c in _PROVIDER_COLS if c not in df.columns]
+    if missing:
+        raise RuntimeError(f"{provider} frame missing {missing}: {list(df.columns)[:8]}")
+    out = df.rename(columns=_PROVIDER_COLS).copy()
+    out["成交量"] = out["成交量"].astype(float) / SHARES_PER_LOT
+    out["日期"] = out["日期"].map(
+        lambda v: v.isoformat() if hasattr(v, "isoformat") else str(v)[:10])
+    return out
+
+
 # Dense, full-history blue chips used only as a trading-calendar probe (the
 # same basket the paper-trading astock provider uses). Their rows are
 # index-reachable; a market-wide max(date) is not.
@@ -525,38 +609,63 @@ def run_symbols(codes, ingest, *, streak: int = 0,
 
 
 def fetch_frame(code: str, adjust: str, start: str, end: str, failed: list[str]):
-    """Fetch one symbol's daily bars.
+    """Fetch one symbol's daily bars, falling over across providers.
 
-    Raises :class:`RateLimited` when the limiter is what refused us — the caller
-    must stop the run rather than treat it as "this symbol had no data".
+    Raises :class:`RateLimited` only when *every* provider refused because of the
+    limiter — the caller must then stop the run rather than treat it as "this
+    symbol had no data". One provider being blocked (eastmoney, since 2026-11-09)
+    is not a reason to stop: the next one answers, and the breaker stops asking
+    the blocked one after ``PROVIDER_BREAKER_AFTER`` consecutive refusals.
     """
-    import akshare as ak
-    last: Exception | None = None
-    for attempt in range(1, RETRIES + 1):
-        try:
-            df = _fetch_with_alarm(
-                ak.stock_zh_a_hist, symbol=code, period="daily",
-                start_date=start.replace("-", ""), end_date=end.replace("-", ""),
-                adjust=adjust)
-            if df is None or len(df) == 0:
-                return None
-            return df
-        except Exception as e:  # noqa: BLE001 — explicit failure, retried
-            last = e
-            limiter = _is_rate_limited(e)
-            log.warning("%s %s fetch attempt %d/%d FAILED%s: %s", code, adjust,
-                        attempt, RETRIES, " (rate limited)" if limiter else "", e)
-            if attempt == RETRIES:
-                break
-            # Backing off between attempts is the whole point: three immediate
-            # retries are indistinguishable from three times the load.
-            backoff = RATE_LIMIT_BACKOFF_S if limiter else 2 ** attempt
-            log.warning("waiting %.0fs before retry %d/%d", backoff, attempt + 1, RETRIES)
-            time.sleep(backoff)
-    if last is not None and _is_rate_limited(last):
-        raise RateLimited(f"{code}: {last}") from last
-    if last is not None:
-        failed.append(f"{code}:{adjust}:{type(last).__name__}")
+    limiter_seen: list[str] = []
+    last_error: Exception | None = None
+    for name in PROVIDER_ORDER:
+        if name in _PROVIDER_STATE["open"]:
+            continue
+        for attempt in range(1, RETRIES + 1):
+            try:
+                kw = {"symbol": _provider_symbol(name, code),
+                      "start_date": start.replace("-", ""),
+                      "end_date": end.replace("-", ""),
+                      "adjust": adjust}
+                if name == "eastmoney":
+                    kw["period"] = "daily"
+                df = _fetch_with_alarm(_provider_fn(name), **kw)
+                if df is None or len(df) == 0:
+                    log.warning("%s %s via %s returned no rows", code, adjust, name)
+                    break                      # empty is an answer: try the next leg
+                frame = _normalize_frame(df, name)
+                _PROVIDER_STATE["served"][name] = _PROVIDER_STATE["served"].get(name, 0) + 1
+                _PROVIDER_STATE["fails"][name] = 0
+                if name != PROVIDER_ORDER[0]:
+                    _PROVIDER_STATE["switched"] += 1
+                    log.info("%s %s served by fallback provider %s", code, adjust, name)
+                return frame
+            except Exception as e:  # noqa: BLE001 — explicit failure, retried/failed over
+                last_error = e
+                if _is_rate_limited(e):
+                    limiter_seen.append(name)
+                    n = _PROVIDER_STATE["fails"].get(name, 0) + 1
+                    _PROVIDER_STATE["fails"][name] = n
+                    if n >= PROVIDER_BREAKER_AFTER and name not in _PROVIDER_STATE["open"]:
+                        _PROVIDER_STATE["open"].add(name)
+                        log.warning("provider %s refused %d times in a row — skipping it "
+                                    "for the rest of this run (fallback continues)",
+                                    name, n)
+                    # No sleep: the next provider may answer right now. The sleep
+                    # existed because there was no other leg to try.
+                    break
+                log.warning("%s %s via %s attempt %d/%d FAILED: %s", code, adjust,
+                            name, attempt, RETRIES, e)
+                if attempt == RETRIES:
+                    break
+                backoff = 2 ** attempt
+                log.warning("waiting %.0fs before retry %d/%d", backoff, attempt + 1, RETRIES)
+                time.sleep(backoff)
+    if limiter_seen:
+        raise RateLimited(f"{code}: every provider refused ({', '.join(limiter_seen)})")
+    if last_error is not None:
+        failed.append(f"{code}:{adjust}:{type(last_error).__name__}")
     return None
 
 
@@ -585,7 +694,26 @@ def ingest_symbol(engine, code: str, entity_id: int, units: dict[int, str],
             log.warning("%s no usable overlap for hfq calibration — qfq fallback", code)
             return ingest_symbol(engine, code, entity_id, units, None,
                                  start, end, now, existing, dry, stats, failed)
-        const = statistics.median(ratios)
+        med = statistics.median(ratios)
+        # Anchor on the LAST stored day, not the window median (2026-11-15).
+        # Each past run calibrated with its own constant, so the stored series is
+        # piecewise-scaled rather than one clean multiple of any provider's hfq;
+        # only the most recent anchor makes the seam continuous. Measured on
+        # 600085, 2026-11-04..11-09: stored(东财)/tencent-qfq close drifts
+        # 0.9889→0.9893 (+0.04% per day, 0.26% across the window), and a
+        # window-median constant lands a ~1% phantom gap on the first new day.
+        const, basis = med, "window median"
+        last_ratio = next((v / hfq[d] for d, v in reversed(anchor_rows)
+                           if d in hfq and hfq[d] and hfq[d] > 0), None)
+        if last_ratio and med > 0 and abs(last_ratio / med - 1.0) <= 0.02:
+            const, basis = last_ratio, "last anchor day"
+        elif last_ratio:
+            log.warning("%s last-day ratio %.6f deviates %.1f%% from window median "
+                        "%.6f — anchor row looks wrong, keeping the median",
+                        code, last_ratio, abs(last_ratio / med - 1) * 100, med)
+        if basis == "last anchor day" and abs(last_ratio / med - 1) > 0.002:
+            log.info("%s calibration %.6f from last anchor %s (window median %.6f, %.2f%%)",
+                     code, const, anchor_date, med, abs(last_ratio / med - 1) * 100)
         eff_from = max(anchor_date, (datetime.date.fromisoformat(start)
                                      - datetime.timedelta(days=1)).isoformat())
         scale = const
@@ -668,13 +796,71 @@ def ingest_symbol(engine, code: str, entity_id: int, units: dict[int, str],
 
 
 def selfcheck() -> int:
+    """Offline invariants, no network and no DB.
+
+    Each line can fail and the exit code follows: a check that only prints is not
+    a check. The provider normalizer is asserted here because it is the one place
+    where a wrong answer costs nothing visible (volume off by 100x, columns
+    silently dropped) and everything downstream.
+    """
+    ok = True
+
+    def check(name: str, cond: bool, detail: str = "") -> None:
+        nonlocal ok
+        ok = ok and bool(cond)
+        print(f"selfcheck {'OK  ' if cond else 'FAIL'} {name}"
+              f"{'' if cond or not detail else ' — ' + detail}")
+
     print(f"selfcheck: concepts {CONCEPTS}")
     print(f"selfcheck: fields {FIELD_COL}")
     print(f"selfcheck: write ft = {WRITE_FT} on server {SERVER}")
     cal = CALENDAR_FILE
     print(f"selfcheck: calendar {cal} exists={cal.exists()}")
-    print("selfcheck OK")
-    return 0
+    check("calendar file present", cal.exists(), str(cal))
+    check("primary provider is eastmoney", PROVIDER_ORDER[0] == "eastmoney")
+    check("two fallback legs", len(PROVIDER_ORDER) >= 2)
+
+    for code, want in (("600085", "sh600085"), ("600085.SH", "sh600085"),
+                       ("sh600085", "sh600085"), ("000001", "sz000001"),
+                       ("300750.SZ", "sz300750"), ("830799", "bj830799")):
+        got = _provider_symbol("tencent", code)
+        check(f"symbol {code}→{want}", got == want, got)
+    check("eastmoney symbol bare", _provider_symbol("eastmoney", "600000.SH") == "600000")
+
+    try:
+        import pandas as pd
+    except Exception as e:  # noqa: BLE001
+        check("pandas importable", False, str(e)[:80])
+        pd = None
+    if pd is not None:
+        tx = pd.DataFrame([{"date": "2026-11-10", "open": 25.2, "close": 24.89,
+                            "high": 25.28, "low": 24.83, "volume": 6565500.0,
+                            "turnover": 0.0048, "amount": 1.0}])
+        n = _normalize_frame(tx, "tencent")
+        check("tx columns mapped",
+              {"日期", "开盘", "收盘", "最高", "最低", "成交量"}.issubset(n.columns),
+              str(list(n.columns)))
+        check("tx volume 股→手", abs(float(n.iloc[0]["成交量"]) - 65655.0) < 1e-6,
+              str(n.iloc[0]["成交量"]))
+        check("tx date str", str(n.iloc[0]["日期"]) == "2026-11-10", str(n.iloc[0]["日期"]))
+        check("tx close kept", abs(float(n.iloc[0]["收盘"]) - 24.89) < 1e-9)
+        sin = pd.DataFrame([{"date": "2026-11-10", "open": 25.2, "high": 25.28,
+                             "low": 24.83, "close": 24.89, "volume": 6565500.0,
+                             "amount": 1.0, "outstanding_share": 1.0, "turnover": 0.0048}])
+        m = _normalize_frame(sin, "sina")
+        check("sina volume 股→手", abs(float(m.iloc[0]["成交量"]) - 65655.0) < 1e-6,
+              str(m.iloc[0]["成交量"]))
+        em = pd.DataFrame([{"日期": "2026-11-10", "开盘": 25.2, "收盘": 24.89,
+                            "最高": 25.28, "最低": 24.83, "成交量": 65655.0}])
+        check("eastmoney frame passes through", _normalize_frame(em, "eastmoney") is em)
+        try:
+            _normalize_frame(pd.DataFrame([{"day": "2026-11-10"}]), "tencent")
+            check("bad frame refused", False, "no exception")
+        except RuntimeError:
+            check("bad frame refused", True)
+
+    print("selfcheck", "OK" if ok else "FAILED")
+    return 0 if ok else 1
 
 
 # ------------------------------------------------------------------ gap probe
@@ -1044,6 +1230,7 @@ def main() -> int:
     now = datetime.datetime.utcnow()
     failed: list[str] = []
     stats = {"rows": 0, "empty_or_failed": 0}
+    _reset_provider_state()
 
     # --slice-all N walks the code list in N sequential slices inside this one
     # process: one writer for the whole shard, with a cooldown between slices.
@@ -1095,6 +1282,14 @@ def main() -> int:
     log.info("done: %d rows%s, %d fetch failures, %d no-data symbols",
              stats["rows"], " (dry-run)" if (args.dry_run or args.verify) else "",
              len(failed), stats["empty_or_failed"])
+    # Which leg actually served the rows. Without this line a run that fell back
+    # for 5,200 symbols is indistinguishable from a normal one — and "eastmoney
+    # served 0" is the only on-record signal that the primary is still blocked.
+    served = ", ".join(f"{k}={v}" for k, v in sorted(_PROVIDER_STATE["served"].items())) or "none"
+    log.info("providers: %s (%d fallback switches)%s", served,
+             _PROVIDER_STATE["switched"],
+             "" if not _PROVIDER_STATE["open"]
+             else f"; skipped after repeated refusal: {sorted(_PROVIDER_STATE['open'])}")
     for f in failed[:20]:
         log.error("FAILED: %s", f)
     if aborted:
