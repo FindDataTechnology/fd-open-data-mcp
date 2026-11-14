@@ -166,3 +166,62 @@ def test_alias_mapping_points_at_the_base_script():
 @pytest.mark.parametrize("script", sorted(DEFAULT_MAP))
 def test_every_mapped_script_points_into_the_scripts_dir(script):
     assert DEFAULT_MAP[script].startswith("scripts/")
+
+
+# --- 别名退役判据（第六档输出）---------------------------------------------
+# 「`_v2` 什么时候能删」在原来的口径里**结构性看不见**：按策略 basename 取指纹，
+# 别名策略只量得到 `_v2.py`，镜像里那份基名脚本从来没被读到过。2026-11-15 实测
+# 就是这个形状——闸说 `✓ ok`（别名好用），但镜像档基名仍是 52336 B 旧字节，
+# 谁按「ok」去退役，生产就静默回退。下面三条把三态钉住。
+
+alias_retirement = gate.alias_retirement
+
+
+def test_alias_not_retirable_while_image_still_shadows_the_base_name():
+    """基名在镜像档且是旧字节 ⇒ 暂不可退役，并点名那一档与两个 sha。"""
+    files, repo, mapping = _facts(a_image="old", a_cm="new", a_v2="new")
+    results = resolve([{"name": "p", "script": "a_v2", "enabled": True}],
+                      files, repo, mapping)
+    [a] = alias_retirement(results, files, repo, mapping)
+    assert a["retirable"] is False
+    assert "/app/scripts" in a["detail"]
+    assert "旧字节" in a["detail"]
+
+
+def test_alias_retirable_once_the_base_name_is_current():
+    """基名那档与仓内一致（或根本没有它，落到正确的 ConfigMap）⇒ 可退役。"""
+    files, repo, mapping = _facts(a_image=None, a_cm="new", a_v2="new")
+    results = resolve([{"name": "p", "script": "a_v2", "enabled": True}],
+                      files, repo, mapping)
+    [a] = alias_retirement(results, files, repo, mapping)
+    assert a["retirable"] is True
+    assert a["detail"].startswith("退役后 effective=/opt/fd-scripts")
+
+
+def test_alias_retirement_missing_base_name_names_file_not_found():
+    """三档都没有基名 ⇒ 退役后启动即炸；这条必须说清，别只说「不可退役」。"""
+    files = {"a_v2.py": {"/opt/fd-scripts": {"bytes": 3, "sha": _sha("new")}}}
+    repo = {"scripts/a.py": _sha("new")}
+    mapping = {"a_v2": "scripts/a.py"}
+    results = resolve([{"name": "p", "script": "a_v2", "enabled": True}],
+                      files, repo, mapping)
+    [a] = alias_retirement(results, files, repo, mapping)
+    assert a["retirable"] is False
+    assert "FileNotFoundError" in a["detail"]
+
+
+def test_non_alias_policy_produces_no_retirement_entry():
+    """普通策略没有「退役」这回事——别把每一项都报成待办，那会淹掉真待办。"""
+    files, repo, mapping = _facts()
+    results = resolve([{"name": "p", "script": "a", "enabled": True}],
+                      files, repo, mapping)
+    assert alias_retirement(results, files, repo, mapping) == []
+
+
+def test_retirement_undetermined_when_repo_lacks_the_file():
+    """仓里取不到 ⇒ 判不出（None），不猜「可以退役」。"""
+    files, repo, mapping = _facts(a_image=None, a_cm="new", a_v2="new")
+    results = resolve([{"name": "p", "script": "a_v2", "enabled": True}],
+                      files, {**repo, "scripts/a.py": None}, mapping)
+    [a] = alias_retirement(results, files, {**repo, "scripts/a.py": None}, mapping)
+    assert a["retirable"] is None
