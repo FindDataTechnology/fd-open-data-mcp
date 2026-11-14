@@ -58,7 +58,7 @@ WHERE id = 2383 AND status = 'running';
 产出数保持 `NULL`——**不许写成 `success`/`zero_yield`，那会把"执行器没说话"伪装成
 "跑了但没数据"**，而 `zero_yield` 正是"抓到了没写进来"的唯一线索。
 
-### 2. 把修复合进 main（治本，已合并 `cc8607e`）
+### 2. 把修复合进 main（治本的一半，已合并 `cc8607e`；另一半「出片」见下一节）
 
 `fix(dispatch-stall-reaper)`：
 
@@ -74,9 +74,66 @@ WHERE id = 2383 AND status = 'running';
 测试：`tests/test_reconciler_stall_reaper.py` 15 条（含阈值→0、阈值→无穷两条破坏实验，
 以及一条因果证明"skipped 只在真的被挡住时出现"）；控制面回归 77 passed。
 
+## 但修复还没出片（2026-11-14 补）
+
+**上面第 2 节写「合进 main ＝ 治本」，这句话现在只对了一半：合进 main 只是治本的一半，
+另一半是出片，而它还没做。**运行中断行的那份代码里没有这个修复。
+
+判据（只认进镜像 grep，不看 git 有没有那笔）：
+
+```bash
+# 真实路径在 site-packages，/app 下只有源码树——路径猜错时"没找到"与"不存在"同形
+kubectl --context xinru -n fd-master run probe --rm -i --restart=Never \
+  --image=ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-00817fb \
+  --command -- sh -c 'grep -c policy_run_max_age_seconds \
+    /opt/venv/lib/python3.12/site-packages/fd_open_data_mcp/refresh/reconciler.py'
+```
+
+两个在跑镜像（`xinru/fd-master` 的 `crawl-reconciler` = `sha-00817fb`、
+`cheap9` = `sha-eb366d0`）实测 **0**；`stalled` 同样 **0**。而 `crawl-reconciler`
+每 15 分钟就在跑（`kubectl -n fd-master get po | grep crawl-reconciler` 能看到
+40/25/10 分钟前那几轮）——**跑的是没有自愈的那份代码**。
+
+根因在 pin：`scraw-fd-open-data-mcp/Dockerfile` 第 151 行
+
+```
+ARG FD_ODM_REF="9221ec2647b4e8ff89f0035561efdb0c996b6a33"
+```
+
+`9221ec2..origin/main` 共 **8 笔**，其中两笔带行为，**必须一起进**：
+
+| commit | 带的是什么 | 不进的后果 |
+|---|---|---|
+| `cc8607e` | reconciler 自愈（本页第 2 节） | 悬着的 `running` 行继续永久堵住派发 |
+| `2549fcb` | `astock_daily/price` 补保留契约（W/1826）并**进 seed 矩阵**（`scripts/audit_retention_contracts.py` + `tests/test_seed_never_narrows.py`） | 下次 `seed --overwrite` 把库里那条已有契约当"多余"删掉，16GB / 48M 行的家族回到**审计与淘汰都看不见**的状态 |
+
+后一条容易被漏掉，因为症状不在派发线上：它只在**下一次 seed** 现形，而且现形的形态是
+"契约少了一条"，不是报错。所以抬 pin 的验收要同时看两个数：`policy_runs` 出现
+`stalled`/`skipped`，以及保留契约行数 **103 → 104**。
+
+出片是**三处**，少一处就等于没出：
+
+1. 镜像 `FD_ODM_REF` 抬到含这两笔的 sha（重建 `scraw-fd-open-data-mcp`）；
+2. 派发器 `crawl-reconciler` 的镜像 tag 换到新片（xinru 与 cheap9 两个集群都要换）；
+3. `clusters.image` + `SCRAW_K8S_IMAGE`——**改 `fd-scripts` ConfigMap 对已派发的 Job 无效**。
+
+**为什么没有当场推**：`crawl-reconciler` 是全平台所有策略的唯一控制面，坏片的爆炸半径
+是整支舰队（不是某一条源），所以出片要单独一个窗口、一次只动一个集群、跑一轮看清
+`policy_runs` 再动第二个；这条线也有 owner。周末 A 股不开盘，硬期限落在**周一 18:17
+那次触发之前**。
+
 ## 周一（2026-11-16）该看什么
 
 `17 18 * * 1-5` 的下一次触发是周一 18:17 CST（11-14 是周六）。
+
+**第 0 步先确认片换了**，否则下面三条都会被读错：
+
+```bash
+kubectl --context xinru -n fd-master get cronjob crawl-reconciler \
+  -o jsonpath='{..image}'
+# 仍是 sha-00817fb ⇒ 修复不在运行中。「没有 stalled/skipped 行」此时只能读成
+# 「写这些行的代码还没上」，不能读成「没发生停更」。
+```
 
 ```sql
 -- 1) 那条行是否仍是终态，且 detail 里写着判据
