@@ -814,9 +814,24 @@ def selfcheck() -> int:
     print(f"selfcheck: concepts {CONCEPTS}")
     print(f"selfcheck: fields {FIELD_COL}")
     print(f"selfcheck: write ft = {WRITE_FT} on server {SERVER}")
-    cal = CALENDAR_FILE
-    print(f"selfcheck: calendar {cal} exists={cal.exists()}")
-    check("calendar file present", cal.exists(), str(cal))
+    # 日历夹具只被 --gap-probe 用（load_calendar 的唯一调用点），**日常补数不碰它**。
+    # 所以不能断言「脚本旁边一定有 data/」：reconciler 给 direct 策略挂的 ConfigMap
+    # 只有 <script>.py 一个键、落在 /src/，那种形状下 data/ 必然不存在，而它是**合法的**
+    # （policy 2659 的 script_args 实测没有 --gap-probe）。断言「存在」会让这条自检
+    # 在真正会跑它的形状里恒红，等于把人训练成忽略它。
+    # 有就验它能解析出交易日（光 exists 挡不住空文件），没有就明说跳过。
+    cal = next((p for p in CALENDAR_CANDIDATES if p.exists()), None)
+    print(f"selfcheck: calendar searched {[str(p) for p in CALENDAR_CANDIDATES]}")
+    if cal is None:
+        print("selfcheck SKIP calendar file present — 此形状下没有夹具；"
+              "只有 --gap-probe 需要它，补数路径不受影响")
+    else:
+        try:
+            n_days = len(load_calendar(str(cal), "2026-01-01", "2026-12-31"))
+        except OSError as e:  # noqa: BLE001
+            n_days = 0
+            print(f"selfcheck: calendar read failed {type(e).__name__}: {e}")
+        check("calendar parses to trading days", n_days > 0, f"{cal} → {n_days} 天")
     check("primary provider is eastmoney", PROVIDER_ORDER[0] == "eastmoney")
     check("two fallback legs", len(PROVIDER_ORDER) >= 2)
 
@@ -869,6 +884,15 @@ def selfcheck() -> int:
 # 日，探针永远绿灯。日历来自 akshare 的新浪交易日历，落成仓内夹具。
 
 CALENDAR_FILE = Path(__file__).resolve().parent / "data" / "cn_trade_cal_2026.txt"
+
+# 夹具的实际落点因运行形状而异：仓内检出时在脚本旁边；direct 策略的 Job 把脚本
+# 落在 /src/（**只挂 .py 一个键**），而夹具随 fd-scripts 落在 /opt/fd-scripts/ 下，
+# 是否带 data/ 前缀取决于那份 ConfigMap 的键名。三种都认，先到先得。
+CALENDAR_CANDIDATES = [
+    CALENDAR_FILE,
+    Path("/opt/fd-scripts/data/cn_trade_cal_2026.txt"),
+    Path("/opt/fd-scripts/cn_trade_cal_2026.txt"),
+]
 
 
 def load_calendar(path: str, start: str, end: str) -> list[str]:
@@ -1103,7 +1127,9 @@ def main() -> int:
                     help="fetch + compare with stored, write nothing")
     ap.add_argument("--gap-probe", action="store_true",
                     help="查询已存日期与交易所日历比对缺口（只读，2.2 验收）")
-    ap.add_argument("--calendar-file", default=str(CALENDAR_FILE),
+    ap.add_argument("--calendar-file",
+                    default=str(next((p for p in CALENDAR_CANDIDATES if p.exists()),
+                                     CALENDAR_FILE)),
                     help="交易日历夹具（默认仓内 data/cn_trade_cal_2026.txt）")
     ap.add_argument("--strict-symbols", action="store_true",
                     help="--gap-probe 时把任何标的级空洞也判失败（默认只硬判全市场断档）")
