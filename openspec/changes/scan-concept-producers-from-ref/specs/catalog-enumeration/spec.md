@@ -33,3 +33,20 @@ that the scan never saw the code.
 - **WHEN** a declared tree's ref does not exist (typo, un-fetched remote, wrong repo)
 - **THEN** the generator exits `2` with the offending tree named, and does not
   write a declaration file whose split says `写侧命中 0`
+
+#### Scenario: A provenance-only change does not turn the fixed-point check red
+
+- **WHEN** upstream commits advance but the scanned content is unchanged, so the
+  recorded `scope.commits` shas no longer match the current refs
+- **THEN** the fixed-point check (`--check`) still passes and prints the recorded
+  and current commits as a note, because the commit shas are provenance (they
+  participate in the record) and not part of the criterion (they must not make
+  the check red on every upstream push — a gate that is red every day is ignored)
+
+#### Scenario: Content drift still fails the check
+
+- **WHEN** a script in the scanned ref changes such that the set of concept-code
+  literals changes
+- **THEN** `--check` reports the declaration file as needing regeneration and
+  names the commit drift, so content staleness stays a red condition even though
+  provenance staleness is not
