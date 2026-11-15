@@ -539,10 +539,25 @@ def redundant_streaks(session: Session, n: int = _REDUNDANT_STREAK_N) -> list[di
     return out
 
 
+# "跑了几次"的计数里不该出现的那两个状态：`running` 还在飞（面板另有「正在运行」
+# 一栏数它），`skipped` 根本没派发——它是 3.x 的单飞跳过留痕，而**一条卡住的 open
+# run 会让 reconciler 每跳落一行**，把它数进 runs 就等于把「没派发」报成「跑了很多次」
+# （2026-11-13 那种形态会变成「今天 96 次运行」，实际 0 次）。
+NOT_A_RUN_STATUSES = ("running", "skipped")
+
+
 def fleet_yield(session: Session, hours: int = 24) -> dict:
     """Total rows_new / rows_attempted across runs in the window — the single
     number that makes a zero-acquisition DAY visible (spec: digest reports
-    fleet yield)."""
+    fleet yield).
+
+    The run COUNT excludes the two statuses that are not runs: `running`
+    (still in flight, counted on its own line) and `skipped` (3.x single-flight
+    skip record — never dispatched, yet one stuck open run makes the
+    reconciler write one every tick, so counting them would report "96 runs
+    today" for a policy that dispatched nothing). Sums are unaffected either
+    way: skip rows carry no yield counters.
+    """
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
     since_naive = since.replace(tzinfo=None)
     row = (
@@ -552,7 +567,7 @@ def fleet_yield(session: Session, hours: int = 24) -> dict:
             func.count(PolicyRun.id),
         )
         .filter(PolicyRun.started_at > since_naive,
-                PolicyRun.status != "running")
+                PolicyRun.status.notin_(NOT_A_RUN_STATUSES))
         .one()
     )
     return {"rows_attempted": int(row[0]), "rows_new": int(row[1]),
