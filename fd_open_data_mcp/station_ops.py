@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS crawl_login_stations (
 STATION_NAMESPACE = "fd-mcp"        # ns with the station-launcher Role (SA fd-panel)
 STATION_PORT = 6080                 # station websockify/noVNC port (login_station.py WS_PORT)
 STATION_DEADLINE_SECONDS = 3600     # 60 min default: row deadline, Job activeDeadline and runtime backstop
+STATION_JOB_TTL_SECONDS = 3600      # Job ttlSecondsAfterFinished (Services have no TTL — see reap_station_services)
 STATION_IMAGE_DEFAULT = "fd-industry-runner:latest"  # placeholder when STATION_IMAGE is unset
 STATION_TERMINAL = ("completed", "failed", "timeout", "reclaimed")
 STATION_OPEN = ("launching", "waiting_operator")
@@ -527,7 +528,7 @@ def build_station_manifests(
         "spec": {
             "backoffLimit": 0,
             "activeDeadlineSeconds": deadline_seconds,
-            "ttlSecondsAfterFinished": 3600,
+            "ttlSecondsAfterFinished": STATION_JOB_TTL_SECONDS,
             "template": {
                 "metadata": {"labels": labels},
                 "spec": {
@@ -930,6 +931,15 @@ def prearm_tick(session: Session, now: dt.datetime | None = None,
         logger.warning("prearm: closed %d expired login station(s) before "
                        "planning (deadline passed with no terminal report)",
                        closed)
+    # 顺手把已结束站点留在集群里的 Service 收掉（Jobs 有自己的 TTL，Services 没有）。
+    # 单列 try：清扫失败绝不许拖垮预拉起——那才是它要防的那类静默死亡。
+    try:
+        reaped = reap_station_services(session, client=client, now=now)
+        if reaped:
+            logger.info("prearm: reaped %d leftover station Service(s)",
+                        reaped)
+    except Exception:  # noqa: BLE001 - cleanup must never stop the pass
+        logger.exception("prearm: station Service reap failed (ignored)")
     launched: list[dict] = []
     for item in prearm_plan(session, now=now):
         source, alias = item["source"], item["account_alias"]
@@ -1022,3 +1032,93 @@ def reclaim_station(
         created_at=now))
     session.commit()
     return {"status": "reclaimed", "station_id": station_id, "deleted": deleted}
+
+
+# ── finished-station object reaper ───────────────────────────────────────────
+# A station owns two cluster objects and only one of them has a lifecycle that
+# ends by itself: the Job carries ``ttlSecondsAfterFinished``
+# (STATION_JOB_TTL_SECONDS), Services have no TTL field at all, and
+# ``reclaim_station`` is a manual panel click. So every station that ever ran
+# left its Service behind — measured 2026-11-15: fd-mcp held **53 station
+# Services and 54 Services total**, dated back to 2026-10-08 (one per pre-arm
+# night), while `kubectl get jobs -l station-id` was empty. The TTL half worked;
+# the Service half had no owner.
+#
+# Nothing is broken *today*: an endpoint-less ClusterIP answers nothing, and
+# `_station_upstream` checks the row status before it resolves a name. It is
+# still unbounded garbage at one object per night, which is the exact shape that
+# becomes a quota refusal months later — and a refused `client.create(service)`
+# marks the row `failed` **after** the Job was already accepted, i.e. pre-arm
+# dies with a live pod and no page to look at. That is the same silent-death
+# family this module's other fixes come from, so the sweep lives here.
+#
+# Scope is deliberately the Service only: the Job already has a TTL, and adding
+# it would double the per-station API calls to cover a case that does not occur
+# (zero station Jobs in the namespace at measurement time).
+_REAPED_STATION_IDS: set[int] = set()
+
+
+def reap_station_services(
+    session: Session,
+    client: StationK8sClient | None = None,
+    now: dt.datetime | None = None,
+    grace_seconds: int | None = None,
+    limit: int = 40,
+) -> int:
+    """Delete the Services of finished stations (bounded, idempotent).
+
+    Only terminal rows are touched, and only once they are older than the grace
+    window (default = the Job's own TTL) so the pair disappears together
+    instead of the Service vanishing while a finished Job still holds the page.
+    Callers run ``_apply_timeouts`` first, so an expired-but-unreported station
+    is already terminal by the time the sweep sees it.
+
+    Each station is visited at most once per process (``_REAPED_STATION_IDS``),
+    so steady-state cost is one list call per newly finished station; the first
+    pass after a restart pays one call per historical row, hence ``limit``.
+
+    Best-effort by design: a failed delete is logged and **not** marked reaped,
+    so the next tick retries it — a cleanup that can break the pre-arm pass it
+    rides on would be worse than the garbage it removes. Names are deleted only
+    when resolved from the ``station-id`` label *and* prefixed ``login-``, never
+    by pattern.
+    """
+    now = _as_aware(now) or _utcnow()
+    client = client or get_station_client()
+    grace = dt.timedelta(
+        seconds=STATION_JOB_TTL_SECONDS if grace_seconds is None else grace_seconds)
+    candidates: list[CrawlLoginStation] = []
+    for st in (session.query(CrawlLoginStation)
+               .filter(CrawlLoginStation.status.in_(STATION_TERMINAL))
+               .order_by(CrawlLoginStation.id).all()):
+        if st.id in _REAPED_STATION_IDS:
+            continue
+        ended = _as_aware(st.finished_at) or _as_aware(st.created_at)
+        if ended is not None and ended + grace > now:
+            continue  # inside the Job's TTL: let the pair expire together
+        candidates.append(st)
+    deleted = 0
+    for st in candidates[:limit]:
+        try:
+            names = client.list_names("Service", f"station-id={st.id}")
+        except Exception as e:  # noqa: BLE001 - listed again next tick
+            logger.warning("station %s: reap list failed: %s", st.id, e)
+            continue
+        ok = True
+        for name in names:
+            if not name.startswith("login-"):
+                logger.warning("station %s: refusing to delete %r — not a "
+                               "station Service", st.id, name)
+                continue
+            try:
+                if client.delete("Service", name):
+                    deleted += 1
+                logger.info("station %s: reaped leftover Service %s",
+                            st.id, name)
+            except Exception as e:  # noqa: BLE001 - retry next tick
+                logger.warning("station %s: delete Service %s failed: %s",
+                               st.id, name, e)
+                ok = False
+        if ok:
+            _REAPED_STATION_IDS.add(st.id)
+    return deleted

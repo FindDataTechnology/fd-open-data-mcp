@@ -727,6 +727,137 @@ def test_prearm_tick_closes_expired_station_before_planning(session, monkeypatch
         s.close()
 
 
+# ── finished-station Service reaper ─────────────────────────────────────────
+def _station_objects(client, station_id, source="rmfyalk", alias="acct001",
+                     identity_id=1):
+    """Put a station's real Job+Service manifests into the fake cluster."""
+    job, svc = station_ops.build_station_manifests(
+        station_id=station_id, source=source, account_alias=alias,
+        identity_id=identity_id, proxy_url=None)
+    client.create(job)
+    client.create(svc)
+    return job, svc
+
+
+def test_reap_removes_a_finished_stations_service(session):
+    """站 Service 没有 TTL：实测 fd-mcp 54 个 Service 里 53 个是站点残骸
+    （2026-10-08 起每晚一个），而 Jobs 全被 ttlSecondsAfterFinished 清干净了。
+    清扫器的判据是「终态行 + 已过 Job TTL 宽限」，Job 不碰（它自己有 TTL）。"""
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="completed",
+                   finished_at=NOW)
+    client = FakeStationClient()
+    _station_objects(client, sid)
+
+    deleted = station_ops.reap_station_services(
+        session, client=client, now=NOW + dt.timedelta(hours=2))
+
+    assert deleted == 1
+    assert [k for k, _ in client.deleted] == ["Service"]
+    assert client.manifests("Job")          # the Job is left to its own TTL
+
+
+def test_reap_spares_live_and_recent_stations(session):
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    live = _station(iid, "rmfyalk", "acct001", status="waiting_operator",
+                    deadline=NOW + dt.timedelta(minutes=30))
+    fresh = _station(iid, "rmfyalk", "acct002", status="completed",
+                     finished_at=NOW)
+    client = FakeStationClient()
+    _station_objects(client, live)
+    _station_objects(client, fresh, alias="acct002")
+
+    # 10 min after the finish: inside the Job's own 1h TTL, pair expires together
+    assert station_ops.reap_station_services(
+        session, client=client, now=NOW + dt.timedelta(minutes=10)) == 0
+    assert client.deleted == []
+    assert len(client.manifests("Service")) == 2
+
+
+def test_reap_is_idempotent_per_process(session):
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="timeout",
+                   finished_at=NOW)
+    client = FakeStationClient()
+    _station_objects(client, sid)
+    later = NOW + dt.timedelta(hours=2)
+
+    assert station_ops.reap_station_services(session, client=client,
+                                             now=later) == 1
+    # second tick: the station is cached as visited, no list call, no delete
+    assert station_ops.reap_station_services(session, client=client,
+                                             now=later) == 0
+    assert [k for k, _ in client.deleted] == ["Service"]
+
+
+def test_reap_retries_after_a_failed_delete_and_never_raises(session):
+    station_ops._REAPED_STATION_IDS.clear()
+
+    class BrokenOnce(FakeStationClient):
+        def __init__(self):
+            super().__init__()
+            self.failed = False
+
+        def delete(self, kind, name):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("forbidden")
+            return super().delete(kind, name)
+
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="failed",
+                   finished_at=NOW)
+    client = BrokenOnce()
+    _station_objects(client, sid)
+    later = NOW + dt.timedelta(hours=2)
+
+    assert station_ops.reap_station_services(session, client=client,
+                                             now=later) == 0
+    assert client.manifests("Service")      # still there, retried below
+    assert sid not in station_ops._REAPED_STATION_IDS
+    assert station_ops.reap_station_services(session, client=client,
+                                             now=later) == 1
+    assert client.manifests("Service") == []
+
+
+def test_reap_refuses_a_service_it_did_not_create(session):
+    """名字必须是我们自己的前缀；只按标签认会误删别人的对象。"""
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="completed",
+                   finished_at=NOW)
+    client = FakeStationClient()
+    client.create({"apiVersion": "v1", "kind": "Service",
+                   "metadata": {"name": "somebody-elses-svc",
+                                "labels": {"station-id": str(sid)}}})
+
+    assert station_ops.reap_station_services(
+        session, client=client, now=NOW + dt.timedelta(hours=2)) == 0
+    assert client.deleted == []
+
+
+def test_prearm_tick_reaps_leftover_station_services(session, monkeypatch):
+    """清扫挂在 tick 里：一次真实运行就把历史残骸收掉，且不干扰计划。"""
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    old = _station(iid, "rmfyalk", "acct001", status="completed",
+                   finished_at=NOW - dt.timedelta(days=5))
+    client = FakeStationClient()
+    _, svc = _station_objects(client, old)
+    svc_name = svc["metadata"]["name"]
+    monkeypatch.setattr(station_ops, "ensure_identity_with_egress",
+                        lambda *a, **k: {"status": "queued"})
+    monkeypatch.setattr(station_ops, "create_station",
+                        lambda *a, **k: {"status": "launched", "station_id": 2})
+
+    station_ops.prearm_tick(session, now=NOW, client=client)
+
+    assert ("Service", svc_name) in client.deleted
+
+
 def test_prearm_plan_skips_fires_beyond_the_window(session):
     # 19:00 UTC -> next fire 19:10 (10 min, inside 45); at 18:00 the same fire
     # is 70 min out, beyond the window
