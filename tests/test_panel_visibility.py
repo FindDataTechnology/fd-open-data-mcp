@@ -133,3 +133,36 @@ def test_open_panel_keeps_full_surface_without_auth(session, monkeypatch):
         for marker in NAV_ALL_TIERS + NAV_OPERATE + NAV_ADMIN:
             assert marker in html, f"ships-dark lost {marker} on {path}"
     assert "/panel/partials/fleet" in c.get("/panel").text
+
+
+def test_kpi_counts_stalled_as_failure_and_skipped_as_no_signal(session):
+    """面板可判定成功率必须把 stalled 算成失败、skipped 算成无信号。
+
+    2026-11-15 前的口径：stalled 两边都不在 ⇒ 落进 unknown 计数、被从
+    成功率分子分母里同时排掉 ⇒ 一次卡死之后面板仍然显示"健康"。
+    """
+    import datetime as dt
+
+    from fd_open_data_mcp.panel.app import kpi_snapshot
+
+    pol = CrawlPolicy(
+        name="p-kpi", enabled=True, concept_ids=[1], entity_type="fund",
+        cron_expr="0 6 * * *", timezone="UTC",
+        date_policy={"mode": "since_last"}, frequency="daily", mode="per_date",
+    )
+    session.add(pol)
+    session.commit()
+    session.refresh(pol)
+    now = dt.datetime.now(dt.timezone.utc).replace(tzinfo=None)
+    for status in ("success", "failed", "stalled", "no_op", "skipped"):
+        session.add(PolicyRun(policy_id=pol.id, status=status,
+                              started_at=now, finished_at=now))
+    session.commit()
+
+    kpi = kpi_snapshot(session)
+
+    assert kpi["failures"] == 2, "failed + stalled 都算失败"
+    assert kpi["no_signal"] == 2, "no_op + skipped 都算无信号"
+    assert kpi["unknown"] == 0, "两档都覆盖到之后不该再有 unknown"
+    # 成功率 = success / (success + failures) = 1/3
+    assert kpi["success_rate"] == 33
