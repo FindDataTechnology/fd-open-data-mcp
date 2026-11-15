@@ -91,3 +91,28 @@ akshare 侧也不全：`macro_china_gdp` / `macro_china_gdzctz` /
   - `fd-infra-deploy/tools/data/concept-routability-baseline.json`（重算，`dormant` 会因声明而变小）
 - 不改数据库 schema、不写生产库；`concept_bindings` 的写入留给各自的「补绑定」
   change（宏观那条另算，见 Why 末段）。
+
+### additive 回填够不够格当产出者（农业族那一类，2026-11-15 定）
+
+`extract_batch2.py` 那类写入是 additive 的（`INSERT … ON CONFLICT ON CONSTRAINT
+uq_sem_obs DO NOTHING`，`fetched_at = now()` 只在真的插进一行时才有），所以
+**复跑插 0 行是常态**。这一点曾被当成「它不是增量刷新 ⇒ 不该算产出者」的理由，
+实测下来方向反了：
+
+- 66 条 batch2 概念**全部**在库里有行，`source_used` 与 `_SOURCE_OF` 逐条一致；
+- 同一个抽取器 2026-11-15 实测 **9 条在 0.5 天内插过新行**（`agri.hog.price.spot`
+  ／`agri.pork.price.market`／`agri.pork.price.wholesale` 三条在
+  `2026-11-14T18:03Z` 那一轮），**57 条整齐停在 8.8 天**——那是那几个源上一次
+  发新周期的时间，不是它们停了；
+- 4 条农业概念的覆盖也补齐了：三条 `week` 粒度 27 行覆盖
+  `2026-05-04→2026-11-02` 无缺口；`agri.cereal.utilization.amis` 是 `year`
+  粒度、54 行已到 **2026**（年度序列，下一个可用周期是 2027）。
+
+结论：**够格**。判活的口径必须是「抽取器整体有没有在产」，不是「逐概念
+`fetched_at` 新不新」——后者会把年度/月度序列的正常周期判成停摆（同一个坑在
+1.2 里已经排除过：batch2 的 66 条里 57 条落在 8–60 天，而它们全是健康的）。
+
+连带一条要预告的：`agri.cereal.utilization.amis` 这类年度序列未来约一年不会有
+新行，它的声明会在 120 天后（约 2027-03-15）按 `STALE_DAYS` 自动降级为
+`dormant`。**那是预期的复核提醒，不是回归**——这条写进 evidence，免得届时被
+当成闸坏了。
