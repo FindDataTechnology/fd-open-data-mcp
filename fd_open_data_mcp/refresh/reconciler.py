@@ -928,6 +928,14 @@ def adopt_job_if_present(client, name: str, err: BaseException,
 
 
 
+# Lookup order for a policy script's source. The image copy wins over the
+# mounted ConfigMap, which is why a script present in BOTH has to be renamed to
+# take effect (2026-11-14: policy 2659 moved to ``bulk_ingest_astock_daily_v2``
+# for exactly that reason). A module constant, not an inline list, so the
+# precedence is provable in tests without touching ``/app``.
+_SCRIPT_SEARCH_DIRS: tuple[str, ...] = ("/app/scripts", "/opt/fd-scripts")
+
+
 def _read_script(script_path: str) -> str:
     """Read a script's source from disk for ConfigMap mounting.
 
@@ -949,8 +957,7 @@ def _read_script(script_path: str) -> str:
     import os
     name = os.path.basename(script_path)
     search = [
-        "/app/scripts",
-        "/opt/fd-scripts",
+        *_SCRIPT_SEARCH_DIRS,
         os.environ.get("FD_SCRIPTS_DIR", ""),
     ]
     found: list[tuple[str, str]] = []
