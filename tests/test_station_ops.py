@@ -858,6 +858,52 @@ def test_prearm_tick_reaps_leftover_station_services(session, monkeypatch):
     assert ("Service", svc_name) in client.deleted
 
 
+# ── the transport: deleting a station's Job must take its pod along ──────────
+def test_station_delete_cascades_so_the_pod_does_not_survive(monkeypatch):
+    """裸 DELETE 的默认传播是 Orphan ⇒ Job 走了、pod 变成裸 pod 永远留着。
+
+    2026-11-15 产线冒烟实测：三次 reclaim 留下三个 ownerReferences 为空的 pod，
+    还在 Running（512Mi 请求 / 2Gi 上限、各钉着一个镜像）。没有任何东西能收它们：
+    Job 没了所以没有 TTL，reaper 只管 Service，行已是终态，而 pod-gc 按设计
+    不碰裸 pod。判据只能落在**请求本身**——集群侧「看起来删干净了」正是那个形态。
+    """
+    client = station_ops.StationK8sClient(namespace="fd-mcp")
+    calls: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setattr(client, "_in_cluster", lambda: True)
+    monkeypatch.setattr(client, "_api",
+                        lambda method, path, body=None: calls.append(
+                            (method, path, body)) or {})
+
+    assert client.delete("Job", "login-rmfyalk-acct001-abc123") is True
+
+    method, path, body = calls[-1]
+    assert method == "DELETE"
+    assert path.endswith("/apis/batch/v1/namespaces/fd-mcp/jobs/"
+                         "login-rmfyalk-acct001-abc123")
+    assert body is not None, (
+        "DELETE 没带 DeleteOptions —— API 默认按 Orphan 处理，Job 的 pod 会被"
+        "摘掉 ownerReference 继续跑，且再没有东西能收它")
+    assert body.get("propagationPolicy") == "Background", (
+        f"传播策略是 {body.get('propagationPolicy')!r}，必须 Background："
+        "Foreground 会让 5 分钟的预拉起循环等 pod 真正消失")
+
+
+def test_station_delete_cascades_on_the_kubectl_transport(monkeypatch):
+    """本地/dev 走 kubectl 那半也要带级联，否则两个传输的行为不一致。"""
+    client = station_ops.StationK8sClient(namespace="fd-mcp")
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(client, "_in_cluster", lambda: False)
+    monkeypatch.setattr(client, "_kubectl",
+                        lambda *args, **kw: seen.append(args) or "")
+
+    client.delete("Job", "login-x-y-abc123")
+
+    args = seen[-1]
+    assert "delete" in args and "login-x-y-abc123" in args
+    assert any(a.startswith("--cascade") for a in args), (
+        f"kubectl delete 没带 --cascade（收到 {args}）")
+
+
 def test_prearm_plan_skips_fires_beyond_the_window(session):
     # 19:00 UTC -> next fire 19:10 (10 min, inside 45); at 18:00 the same fire
     # is 70 min out, beyond the window

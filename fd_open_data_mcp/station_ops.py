@@ -429,20 +429,44 @@ class StationK8sClient:
         return manifest
 
     def delete(self, kind: str, name: str) -> bool:
-        """DELETE the object; False when it is already gone (404)."""
+        """DELETE the object; False when it is already gone (404).
+
+        **Always cascades.** A bare ``DELETE`` carries no ``DeleteOptions``, and
+        the API's default propagation for that is ``Orphan``: the Job vanishes
+        while its pod keeps **running with its ownerReference stripped**, so
+        nothing can ever collect it — no Job left to carry a TTL, the reaper
+        only owns Services, the row is already terminal, and ``pod-gc`` refuses
+        bare pods by design. Measured 2026-11-15 while smoke-testing the station
+        release: three ``reclaim_station`` calls left three
+        ownerReference-less pods still running three minutes later.
+
+        That is the panel's own "close this station" button leaking a container
+        (512Mi request / 2Gi limit, one pinned image) on every use — the same
+        quota-and-image family that keeps taking nodes down. ``Background``
+        removes the Job first and lets the GC take its pods with it.
+
+        Services have no dependents, so the same options body is harmless there.
+        """
         import urllib.error
 
+        # Background, not Foreground: the caller is a 5-minute loop, and a
+        # Foreground delete blocks until the pod is really gone — one slow
+        # termination would stall the whole pre-arm pass behind it.
+        options = {"apiVersion": "v1", "kind": "DeleteOptions",
+                   "propagationPolicy": "Background"}
         if self._in_cluster():
             prefix, plural = self._PLURAL[kind]
             try:
                 self._api("DELETE",
-                          f"/{prefix}/namespaces/{self.namespace}/{plural}/{name}")
+                          f"/{prefix}/namespaces/{self.namespace}/{plural}/{name}",
+                          options)
                 return True
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     return False
                 raise
-        self._kubectl("delete", kind.lower(), name, "--ignore-not-found=true")
+        self._kubectl("delete", kind.lower(), name, "--ignore-not-found=true",
+                      "--cascade=background")
         return True
 
     def list_names(self, kind: str, label_selector: str) -> list[str]:
