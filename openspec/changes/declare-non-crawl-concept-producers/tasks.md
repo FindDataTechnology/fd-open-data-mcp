@@ -7,14 +7,29 @@
   验证：`len(d['producers'])` = **501**；生成器实跑 **97** 条 `bulk_etl` +
   **404** 条 `undecided`（提案初稿写 98，差 1 是因为生成器每行只取首个字面量；
   以仓内生成器为准）。**全部 `last_verified` 为空 ⇒ 判定一条不变**（501 仍是 501）。
-- [ ] 1.2 逐族复核并填 `schedule` / `last_verified` / `evidence`：先做 5 个最大的族
+- [x] 1.2 逐族复核并填 `schedule` / `last_verified` / `evidence`：先做 5 个最大的族
   （行业经营 113、农业 79、电力与碳 59、利率 29、城乡建设 29）。
   **复核判据**：脚本里真有写路径（INSERT/upsert 到 `semantic_observations`），
   不是只在注释或告警清单里出现。验证：每条 `evidence` 写出文件名 + 行号。
-  *（现状：97 条全部未复核，闸每轮逐条打 `! … 声明未复核 ⇒ 已降回停摆`，最多 20 行。）*
-- [ ] 1.3 `schedule` 必须写**实际排期**：CronJob 看 `spec.schedule`、宿主 cron 看
+  落地：**97 条全部复核**，三条互相独立的证据同时对得上——
+  ① 代码级出现 97/97（按 `#` 前缀区分，没有一条只活在注释里）；
+  ② 写入方自己的查表能解析 97/97（`_SOURCE_OF[code]` / `CONCEPT_ENTITY` /
+  `INDICATOR_MAP+YJYG+YJKB`；解析不到会在 insert 时 `KeyError`，batch2 的
+  55+11=**66** 与申报的 66 逐条相等）；③ 库内 `source_used` 与那张表逐个一致
+  **97/97**（行为侧：行确实是这份代码写的）。`evidence` 逐条点名
+  概念表行 + 共享写入行（batch2 `:808`／batch1 `:430`／pharma `:146`／stock `:146`）。
+  `SKIP_NOTES` 那 4 条 `pwr.grid.*` 按真实声明位置写（`:329-332` 的 EIA 系列码映射
+  与 `_SOURCE_OF:462-465`=eia-v2），没把「顺带提到」当声明。
+  **顺手排除一条假判据**：`fetched_at` 新鲜度不能用来判死活——batch2 的 66 条里
+  57 条落在 8–60 天，而 additive 契约本来就只在源发布新周期时插行。
+- [x] 1.3 `schedule` 必须写**实际排期**：CronJob 看 `spec.schedule`、宿主 cron 看
   crontab、都没有写 `manual`。验证：任取 5 条，`kubectl get cronjob` / `crontab -l`
   能对上；对不上就是抄错了。
+  **四条全部线上读到**（不是从清单猜）：`fd-prod/semantic-extract-batch 35 5 * * *`
+  （batch1/2，Job Complete 用时 5m16s）、`tencent/mcp/fd-pharma-observations
+  30 5 * * * Asia/Shanghai`（跑 `/src/extract_pharma.py --apply`，最近三轮全 Complete）、
+  `crawl_policies` **id 2658** `43 20 * * 1-5` UTC（enabled，脚本
+  `bulk_ingest_stock_indicators_events`，last_run 11-13T20:52Z）。
 
 ## 2. 闸读声明（四档）
 
@@ -46,10 +61,19 @@
   ⇒ 不出这几行（不编造）。顺带修掉一处会撒谎的读数：`--category` + `--baseline`
   旧口径在同一份数据上打 `已恢复 491 条`（实际 0），现在回归/命中恒按全量判、
   `--write-baseline` 与 `--category` 同用直接退 2。
-- [ ] 3.2 基线重算：声明生效后 `dormant` 会少于 501，用 `--write-baseline` 重种并在
+- [x] 3.2 基线重算：声明生效后 `dormant` 会少于 501，用 `--write-baseline` 重种并在
   提交信息里逐条说明 delta（哪一族因哪份声明而退出）。验证：重种后 `--baseline`
   实跑 `新增 0 / 已恢复 N`，`N` 与提交信息里的条目数一致。
-  *（被 1.2 挡住：现在没有一条声明是复核过的，重种等于把 501 抄一遍。）*
+  落地：**501 → 404**；重种前实跑 `已恢复 97 条`，重种后 `新增 0 / 已恢复 0
+  （快照内共 404 条）`，EXIT=0。差集逐条核过（少了 97、多了 0）。
+  退出的 97 条按族：城乡建设 29、能源 11、价格指数 8、未分类 6、货币与社融 5、
+  农业 4、电力与碳 4、灾害 3、快递物流 3、营运能力 3、盈利能力 3、工业 2、
+  偿债能力 2、成长能力 2、利率 2、业绩快报 2、业绩预告 2、汽车 1、其他 1、
+  每股指标 1、价格 1、科研 1、交通 1。
+  **顺带修掉一个自伤**：重种之后生成器的人口只取 `baseline.dormant`，
+  那 97 条已不在其中 ⇒ 再生成一次会把复核**整条删掉**（实测输出
+  `写侧命中 0`）。现在人口 = 快照 ∪ 已复核条目（未复核且不在快照里的照旧丢），
+  生成器自证 7 → 9 条、红证可复现。
 
 ## 4. 两个具体族的处置（不在本 change 内改库，只出判据与待办）
 
@@ -61,3 +85,5 @@
 - [ ] 4.2 **农业族 79 条**（`extract_batch2.py` 那类 additive 回填）：写清「复跑插 0 行」
   意味着**它不是增量刷新**，要判它是否够格当 `bulk_etl` 产出者。
   验证：结论落进 `evidence`，并在提案的 Impact 里点名。
+  *（1.2 的复核已给出事实基础：这 4 条 `agri.*` 的 `source_used` 与 `_SOURCE_OF`
+  逐个一致、`fetched_at` 8–60 天，属「源没发新周期」而非「停了」；够不够格仍待裁决。）*
