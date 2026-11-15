@@ -112,7 +112,12 @@ RETRIES = 3
 # 000609, 000610 each burned 3 attempts inside one second. Across 5,203 symbols
 # that is the exact pattern that turns a 5-minute ban into a long one — and it is
 # why the daily run kept failing at ~13 minutes with no usable evidence.
-RATE_LIMIT_BACKOFF_S = 300          # one acknowledged window, not a retry storm
+# 2026-11-09 eastmoney 被封之后 `fetch_frame` 改成多 provider 故障转移：一条腿被限流
+# 就**立刻换下一条**，不再原地等 5 分钟（原地等待的前提是「没有别的腿可用」，而这个
+# 前提已经不存在了）。全被拒时当场抛 `RateLimited`，由 `run_symbols` 数连续次数、
+# 到 `RATE_LIMIT_STREAK_ABORT` 就停整轮。因此这里**没有**「等一个限流窗口」的常量——
+# 原来那个 `RATE_LIMIT_BACKOFF_S = 300` 在改造后成了死常量，删掉免得有人照着它把
+# sleep 加回来。
 RATE_LIMIT_STREAK_ABORT = 3         # consecutive rate-limited symbols → stop the run
 RATE_LIMIT_MARKERS = ("限流", "断开了连接", "RemoteDisconnected", "Connection aborted")
 
@@ -617,10 +622,21 @@ def fetch_frame(code: str, adjust: str, start: str, end: str, failed: list[str])
     is not a reason to stop: the next one answers, and the breaker stops asking
     the blocked one after ``PROVIDER_BREAKER_AFTER`` consecutive refusals.
     """
+    # Provider state is "reset per run" by ``_reset_provider_state()``, so an
+    # **empty** dict can only mean "no run has started yet". Reading it unguarded
+    # raised ``KeyError: 'open'`` for every caller that did not reset first —
+    # which is exactly what kept ``tests/test_astock_rate_limit_backoff.py`` red
+    # on main (2026-11-15): the gate added after this script hammered eastmoney
+    # for three days was switched off. Production was safe only because
+    # ``main()`` happens to reset before the loop; nothing enforced that order.
+    if not _PROVIDER_STATE:
+        _reset_provider_state()
     limiter_seen: list[str] = []
+    skipped_open: list[str] = []
     last_error: Exception | None = None
     for name in PROVIDER_ORDER:
         if name in _PROVIDER_STATE["open"]:
+            skipped_open.append(name)
             continue
         for attempt in range(1, RETRIES + 1):
             try:
@@ -664,6 +680,14 @@ def fetch_frame(code: str, adjust: str, start: str, end: str, failed: list[str])
                 time.sleep(backoff)
     if limiter_seen:
         raise RateLimited(f"{code}: every provider refused ({', '.join(limiter_seen)})")
+    # 三条腿**全被熔断打开**时，这条符号一次都没真正请求过——那和「全被拒」是
+    # 同一件事，必须照样抛 RateLimited：`run_symbols` 的连续计数与停轮只认这个异常，
+    # 不抛就会走下面那条 return None ⇒ 整轮 4,576 个符号一个不取、`failed` 空、
+    # 退出码 0，看上去一切正常（2026-11-15 实测该路径返回 None，是「熔断跳过」
+    # 与「连续中止」两套机制没咬合的那条缝）。
+    if skipped_open and len(skipped_open) == len(PROVIDER_ORDER):
+        raise RateLimited(
+            f"{code}: every provider breaker open ({', '.join(skipped_open)})")
     if last_error is not None:
         failed.append(f"{code}:{adjust}:{type(last_error).__name__}")
     return None
