@@ -77,11 +77,40 @@
 
 ## 4. 两个具体族的处置（不在本 change 内改库，只出判据与待办）
 
-- [ ] 4.1 **8 条宏观**（6/88/89/90/91/92/227/232）：在提案里记明它需要三件——
+- [x] 4.1 **8 条宏观**（6/88/89/90/91/92/227/232）：在提案里记明它需要三件——
   取回 `feat/datacommons-datasource` 的 `bulk_ingest_country_macro.py`、在
   `fd-ashare` 注册 3 个函数 + 补 `非制造业-指数` 列、补 `concept_bindings`。
   验证：这三件在 tasks 里各留一条「未做」并以 `blocked:` 标注外部依赖。
-  *（`blocked:` 外部仓 `fd-ashare` + 未合分支；等裁决：重新点火或 `deprecated`。）*
+  **已按验证条件记下三件（2026-11-15 复核，其中两件的口径被本次测量订正）**：
+  这 8 条码是 `PMI_NONMFG`(6) / `FAI_CUMULATIVE`(88) / `RETAIL_MONTHLY`(89) /
+  `RETAIL_YOY`(90) / `GDP_AMOUNT`(91) / `GDP_YOY`(92) / `FAI_MONTHLY`(227) /
+  `RETAIL_CUMULATIVE`(232)，声明文件里 8 条全是 `undecided`、基线里全在 `dormant`。
+
+  1. **ETL 脚本落地** —— 未做，`blocked:` 只需裁决，**不需要外部仓**。
+     `bulk_ingest_country_macro.py` 只在 `feat/datacommons-datasource`（tip
+     `e427487`，相对 gitee/main 只多 2 笔提交，但分叉点后 main 已前进 **419** 笔，
+     整分支 38 文件 / 8601 行）。**但脚本本身 320 行，`import` 只有 stdlib +
+     `sqlalchemy` + `psycopg2.extras`，不 import 本包任何模块** ⇒ 可以**只搬这一个
+     脚本**当 CronJob 跑（它自带 `--db-url`/`--dry-run`，自己 `execute_values` 上写），
+     不必合那 38 文件。这条口径与提案初稿「先把那条 ETL 合进来」不同，代价小一个量级。
+  2. **`fd-akshare` 注册 3 个函数 + `macro_china_pmi` 补 `非制造业-指数` 列** ——
+     未做，`blocked:` 外部仓**不在本工作区**。提案记的是
+     `macro_china_gdp`/`macro_china_gdzctz`/`macro_china_consumer_goods_retail`
+     未登记、`macro_china_pmi`(fn 1152) 只登记了「制造业-指数」。**本次判不出**：
+     `catalog/providers.py` 的 `_p("fd-akshare", …)` 找的是兄弟仓
+     `fd-akshare/fd_akshare/metadata/registry.db`，本工作区没有该仓、也没有那份
+     registry.db。所以这三条只能照提案记，**不许当成已核**。
+  3. **`concept_bindings`** —— 未做，`blocked:` 要先裁决「绑函数」还是「靠 ETL 养」。
+     实测：8 条的 `concept_bindings` **0** 行、`source_rankings` **0** 行；
+     数据在**分片 `shard_xinru2`**（`shard_xinru3` 为 0），末周期
+     `2026-06-01`～`2026-07-01`（PMI 到 `2026-07-01`、GDP 到 `2026-06-30`），
+     最后一次 `fetched_at` **2026-08-17**（≈90 天前、且 8 条同一时刻 ⇒ 是**一次手工
+     回填**，不是定时作业）。**踩到一个会误判的坑**：只查主库会得到「8 条一行观测都
+     没有」，进而读成「从未有数据」；真相是分片里有行——判这批必须查分片。
+     两条路互斥：绑函数＝让爬取规划去 fetch；靠 ETL＝照 batch1/batch2 那样挂 CronJob。
+     选哪条是产品裁决（与「重新点火 or `deprecated`」是同一个决定）。
+  *（本 change 到这为止：判据与待办已出齐。**剩下的是裁决**：这 8 条重新点火
+  （按第 1 条只搬脚本即可起步）还是标 `deprecated`。）*
 - [x] 4.2 **农业族 79 条**（`extract_batch2.py` 那类 additive 回填）：写清「复跑插 0 行」
   意味着**它不是增量刷新**，要判它是否够格当 `bulk_etl` 产出者。
   验证：结论落进 `evidence`，并在提案的 Impact 里点名。
