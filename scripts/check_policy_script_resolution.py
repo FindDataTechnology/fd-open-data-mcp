@@ -31,6 +31,23 @@
    坑的形状，必须点名。
 5. 停用的策略只报事实不计命中（它现在跑不了）；仓里取不到 ⇒ 判不出（退 2）。
 
+## 别名什么时候才能退役（第六档输出）
+
+`_v2` 这类别名存在的唯一理由是绕开镜像遮蔽，所以**它必然只活在 ConfigMap 一档**：
+按策略的 basename 去量，镜像档永远「没有这个文件」。于是「镜像里那份基名脚本
+更新了没有」这个退役前置条件，在这道闸原来的口径里**结构性看不见**——2026-11-15
+想退役别名时，闸给的是 `✓ ok`，它答的是「别名现在好用」，而不是「可以不用了」。
+
+所以探针额外按 **canonical basename**（`DEFAULT_MAP[script]` 的文件名）取各档指纹，
+再算一条 `alias_retirement`：
+
+* 三档都没有 canonical ⇒ 退役后启动即 FileNotFoundError（不可退役）；
+* 退役后第一个命中的那档字节 == 仓内 ⇒ **可退役**（改名后照样跑仓里那份）；
+* 否则 ⇒ **暂不可退役**，点名是哪一档的旧字节在遮蔽（通常是镜像，等出片）。
+
+这条只是**事实**、不计命中：今天别名工作正常，这个结论回答的是「下一步能不能动」。
+把它算成红会让整道闸在「等在出片」的正常状态下常红。
+
 ## 用法
 
     python scripts/check_policy_script_resolution.py                 # 探针在集群里跑
@@ -82,9 +99,14 @@ with engine.connect() as conn:
     )))
 policies = [{"name": n, "script": s, "enabled": bool(e)} for n, s, e in rows]
 
+# 除了每条策略自己的 basename，再按调用方给的 canonical 名字取指纹。
+# 别名（`_v2`）只在 ConfigMap 一档存在 ⇒ 只按策略名取，永远量不到镜像里那份
+# 基名脚本，而「它更新了没有」正是别名能不能退役的唯一前置条件。
+extra = [x.strip() for x in os.environ.get("FD_PROBE_NAMES", "").split(",") if x.strip()]
+names = sorted({os.path.basename(p["script"]) + ".py" for p in policies} | set(extra))
+
 files = {}
-for policy in policies:
-    base = os.path.basename(policy["script"]) + ".py"
+for base in names:
     for tier in TIERS:
         if not tier:
             continue
@@ -153,14 +175,59 @@ def resolve(policies: list[dict], files: dict[str, dict[str, dict]],
     return out
 
 
+def alias_retirement(results: list[dict], files: dict[str, dict[str, dict]],
+                     repo: dict[str, str | None],
+                     mapping: dict[str, str]) -> list[dict]:
+    """别名（`_v2`）现在能不能退役？——纯函数，与 `resolve` 同款可离线自证。
+
+    只看**别名的策略**（`DEFAULT_MAP[script]` 的文件名 ≠ 策略自己的 basename）。
+    判据是「退役后第一个命中的档，字节是否等于仓内」：退役＝把策略的 `script`
+    改回基名，此后解析链从镜像那档重新开始，遮蔽会不会回来完全取决于那里。
+
+    `retirable` 三态：True / False / None（仓里取不到，判不出——不猜）。
+    """
+    out: list[dict] = []
+    for r in results:
+        path = mapping.get(r["script"])
+        if not path:
+            continue
+        canonical = os.path.basename(path)
+        if canonical == r["basename"]:
+            continue                      # 不是别名
+        present = files.get(canonical) or {}
+        tier = next((t for t in TIERS if t in present), None)
+        want = repo.get(path)
+        entry = {"policy": r["policy"], "alias": r["basename"],
+                 "canonical": canonical}
+        if want is None:
+            entry.update(retirable=None,
+                         detail=f"仓里取不到 {path}，不判")
+        elif tier is None:
+            entry.update(retirable=False,
+                         detail=f"三档都没有 {canonical} ——退役别名后 _read_script "
+                                f"会抛 FileNotFoundError")
+        elif present[tier]["sha"] == want:
+            entry.update(retirable=True,
+                         detail=f"退役后 effective={tier} {present[tier]['bytes']} B，"
+                                f"与仓内一致")
+        else:
+            entry.update(retirable=False,
+                         detail=f"退役后 effective={tier} {present[tier]['bytes']} B "
+                                f"sha={present[tier]['sha'][:16]} 是旧字节"
+                                f"（≠ 仓内 {want[:16]}）——那档仍在遮蔽，先出片")
+        out.append(entry)
+    return out
+
+
 def _self_test() -> int:
-    """八条：一致／跑错档／三档全缺／仓里没有／低档惰性副本／停用只报事实／
-    别名映射到基名／档序（镜像赢）。"""
+    """十一条：一致／跑错档／三档全缺／仓里没有／低档惰性副本／停用只报事实／
+    别名映射到基名／档序（镜像赢）／别名退役三态。"""
     mapping = {"a": "scripts/a.py", "a_v2": "scripts/a.py", "b": "scripts/b.py",
-               "c": "scripts/c.py", "d": "scripts/d.py"}
+               "b_v2": "scripts/b.py", "c": "scripts/c.py", "d": "scripts/d.py",
+               "e_v2": "scripts/e.py"}
     sha = lambda s: hashlib.sha256(s.encode()).hexdigest()  # noqa: E731
     repo = {"scripts/a.py": sha("new"), "scripts/b.py": sha("b"),
-            "scripts/c.py": sha("c")}
+            "scripts/c.py": sha("c"), "scripts/e.py": sha("e")}
     files = {
         "a.py": {"/app/scripts": {"bytes": 3, "sha": sha("old")},
                  "/opt/fd-scripts": {"bytes": 3, "sha": sha("new")}},
@@ -168,6 +235,8 @@ def _self_test() -> int:
         "b.py": {"/app/scripts": {"bytes": 1, "sha": sha("b")},
                  "/opt/fd-scripts": {"bytes": 1, "sha": sha("b")}},
         "a_v2.py": {"/opt/fd-scripts": {"bytes": 3, "sha": sha("new")}},
+        "b_v2.py": {"/opt/fd-scripts": {"bytes": 1, "sha": sha("b")}},
+        "e_v2.py": {"/opt/fd-scripts": {"bytes": 1, "sha": sha("e")}},
         "c.py": {"/app/scripts": {"bytes": 1, "sha": sha("c")}},
         "d.py": {"/app/scripts": {"bytes": 1, "sha": sha("d")}},
     }
@@ -178,8 +247,12 @@ def _self_test() -> int:
         {"name": "p-undet", "script": "d", "enabled": True},
         {"name": "p-both-same", "script": "b", "enabled": True},
         {"name": "p-c-off", "script": "c", "enabled": False},
+        {"name": "p-alias-retirable", "script": "b_v2", "enabled": True},
+        {"name": "p-alias-blocked", "script": "e_v2", "enabled": True},
     ]
     got = {r["policy"]: r for r in resolve(policies, files, repo, mapping)}
+    ret = {a["policy"]: a for a in alias_retirement(
+        list(got.values()), files, repo, mapping)}
     ok = True
 
     def check(label, cond, extra=""):
@@ -206,6 +279,20 @@ def _self_test() -> int:
           got["p-c-off"]["verdict"] == "ok" and got["p-c-off"]["enabled"] is False)
     check("档序：镜像赢（即便 ConfigMap 更新）",
           got["p-stale-image"]["detail"].startswith("effective=/app/scripts"))
+    check("别名退役：基名仍是镜像旧字节 ⇒ 不可退役",
+          ret["p-ok-alias"]["retirable"] is False
+          and "/app/scripts" in ret["p-ok-alias"]["detail"],
+          ret["p-ok-alias"])
+    check("别名退役：退役后命中的档与仓一致 ⇒ 可退役",
+          ret["p-alias-retirable"]["retirable"] is True,
+          ret["p-alias-retirable"])
+    check("别名退役：三档都没有基名 ⇒ 不可退役且点名 FileNotFoundError",
+          ret["p-alias-blocked"]["retirable"] is False
+          and "FileNotFoundError" in ret["p-alias-blocked"]["detail"],
+          ret["p-alias-blocked"])
+    check("别名退役：非别名策略不出条目（别把正常形态报成待办）",
+          set(ret) == {"p-ok-alias", "p-alias-retirable", "p-alias-blocked"},
+          sorted(ret))
     # 探针源码必须能编译（拼错的 f-string 只有真跑才炸）
     try:
         compile(PROBE_SRC, "<probe>", "exec")
@@ -218,6 +305,9 @@ def _self_test() -> int:
 def _probe(context: str, namespace: str, image: str, configmap: str) -> dict:
     """在集群里跑一次性 pod 取事实（镜像档只有进镜像才看得见）。"""
     name = f"resprobe-{os.getpid()}"
+    # canonical basename 也要量：别名策略只看得到自己那个 `_v2` 名字，
+    # 基名脚本在各档的字节只有单独点出来才看得见（别名退役的唯一前置条件）。
+    canon = ",".join(sorted({os.path.basename(p) for p in DEFAULT_MAP.values()}))
     overrides = json.dumps({"spec": {
         "imagePullSecrets": [{"name": "fd-harbor-pull"}],
         "containers": [{
@@ -225,7 +315,8 @@ def _probe(context: str, namespace: str, image: str, configmap: str) -> dict:
             "stdinOnce": True,
             "env": [{"name": "FD_OPEN_DATA_MCP_DATABASE_URL",
                      "valueFrom": {"secretKeyRef": {"name": "fd-db-secret",
-                                                    "key": "DATABASE_URL"}}}],
+                                                    "key": "DATABASE_URL"}}},
+                    {"name": "FD_PROBE_NAMES", "value": canon}],
             "volumeMounts": [{"name": "fs", "mountPath": "/opt/fd-scripts",
                               "readOnly": True}],
         }],
@@ -313,6 +404,15 @@ def main(argv: list[str] | None = None) -> int:
         for inert in r.get("inert_lower_copy") or []:
             print(f"    ~ {inert['tier']} 里也有 {r['basename']}（{inert['bytes']} B）但"
                   f"字节不同——**改那一档不会生效**（镜像优先）")
+    for a in alias_retirement(results, facts["files"], repo_sha, DEFAULT_MAP):
+        if a["retirable"]:
+            print(f"· 别名可退役：{a['policy']} 的 {a['alias']} → {a['canonical']}"
+                  f"（{a['detail']}）")
+        elif a["retirable"] is False:
+            print(f"· 别名暂不可退役：{a['policy']} 的 {a['alias']} → {a['canonical']}"
+                  f"（{a['detail']}）")
+        else:
+            print(f"· 别名退役判不出：{a['policy']} 的 {a['alias']}（{a['detail']}）")
     if hits:
         print("\n改法：① 让 effective 就是仓里那份——镜像档陈旧就重出该镜像；"
               "② 想立刻用仓里那份又不想出片，就**换名字**（`_v2` 别名）并在 "
