@@ -125,6 +125,36 @@ def test_mirror_failed_keeps_error_head(session):
     assert row.error_head == "boom: upstream 500"
 
 
+def test_mirror_stalled_run_is_reported_as_failed(session):
+    """`stalled` 行真执行过（有 job_ref、pod 被杀）⇒ 按规格必须报到。
+
+    spec concept-platform-federation: 「真实执行过的概念线运行 SHALL 在收口时向
+    crawl_runs 报到…覆盖成功与失败；未真实执行过的行…SHALL NOT 报到」。
+    `stalled` 此前不在 `_STATUS_MAP` 里 ⇒ `.get()` 返回 None ⇒ 整行消失，而
+    「少一行」与「从没派发过」在平台面上同形（本 change 要杀的正是这种静默）。
+    落点状态留在 crawl_runs 消费者已枚举的词表内（failed），回收器的判据原文
+    （Yield unknown, NOT zero）随 detail 进 error_head。
+    """
+    p = _policy(session, source_filter=["edgar"])
+    run = _run(session, p, status="stalled", plan_json=_plan_json(("edgar",)),
+               detail="stalled: no terminal report in 18768s > 10800s; "
+                      "Yield unknown, NOT zero")
+    assert mirror_run_close(session, run) == 1
+    row = session.query(CrawlRun).one()
+    assert row.status == "failed"
+    assert "Yield unknown, NOT zero" in row.error_head
+
+
+def test_mirror_skipped_run_stays_unreported(session):
+    """`skipped`（单飞跳过留痕）没执行过 ⇒ 不报到（状态词表与 job_ref 两道都拦）。"""
+    p = _policy(session, source_filter=["edgar"])
+    skipped = _run(session, p, status="skipped",
+                   plan_json=_plan_json(("edgar",)), job_ref=None,
+                   detail="skipped: blocked by open run 2383")
+    assert mirror_run_close(session, skipped) == 0
+    assert session.query(CrawlRun).count() == 0
+
+
 def test_mirror_never_executed_rows_are_not_reported(session):
     # refusal / launch-failure / frozen rows are born closed without job_ref
     p = _policy(session)

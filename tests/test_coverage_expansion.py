@@ -613,3 +613,64 @@ def test_early_pause_stops_remaining_chunks(session, monkeypatch):
     launched = [r for r in session.query(PolicyRun).all()
                 if r.policy_id == pids[2]]
     assert not launched  # the remaining chunk was never launched
+
+
+# ── stalled 必须算「白烧」（unblock-silent-dispatch-stalls）────────────────────
+# 2026-11-13 引入的 `stalled`（执行体从未报到、行过龄上限后被回收器关掉）当时
+# 没进任何一处的 bad 词表。于是一波里**每条都卡死**时：
+#   · 早停判据 `len(bad) == len(terminal)` 恒为 0 == N ⇒ 永不触发；
+#   · `frac_bad = len(bad) / len(runs)` 恒为 0 ⇒ 系统性暂停也永不触发。
+# 结果正是早停判据要防的那件事：整波在同一个死端点上反复重启，每次烧一个 3 小时
+# pod。下面两条各钉一处，都对修复前代码为红。
+
+
+def test_early_pause_counts_stalled_as_burned(session, monkeypatch):
+    """早停（planned/running 阶段）：两条终态全是 stalled 也必须暂停。"""
+    _seed(session)
+    notified = []
+    monkeypatch.setattr(expander, "_notify_pause",
+                        lambda w, e: notified.append((w.id, e)))
+    pids = []
+    for i in range(3):
+        p = CrawlPolicy(name=f"covexp-stall-p{i + 1}", enabled=False,
+                        concept_ids=[1], entity_type="stock",
+                        date_policy={"mode": "trailing", "days": 90},
+                        frequency="daily", mode="per_date",
+                        cron_expr="0 0 31 2 *", timezone="UTC")
+        session.add(p)
+        session.flush()
+        pids.append(p.id)
+    w = CoverageWave(entity_type="stock", frequency_bucket="daily",
+                     coverage_state="never", concept_ids=[1],
+                     date_policy={"mode": "trailing", "days": 90},
+                     status="running", policy_ids=pids,
+                     concepts_before=0)
+    session.add(w)
+    session.flush()
+    for pid in pids[:2]:
+        # 回收器关出来的行：产出未知（不是 0），detail 带判据
+        session.add(PolicyRun(
+            policy_id=pid, status="stalled", rows_new=None,
+            job_ref=f"cheap9/crawl-policy-{pid}-x",
+            started_at=dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=4),
+            detail="stalled: no terminal report in 18768s > 10800s; "
+                   "Yield unknown, NOT zero"))
+    session.commit()
+
+    expander.expand_once(session, launcher=_FakeLauncher())
+    wrow = session.get(CoverageWave, w.id)
+    assert wrow.status == "paused", wrow.detail
+    assert notified
+    assert not [r for r in session.query(PolicyRun).all() if r.policy_id == pids[2]]
+
+
+def test_verifying_gate_counts_stalled_as_bad(session):
+    """verifying 阶段：一整波都 stalled 时至零产出 ⇒ 必须暂停（不是判成功）。"""
+    _seed(session)
+    launcher = _FakeLauncher()
+    wave = _run_wave_to_verifying(session, launcher, close_as="stalled",
+                                  rows_new=0)
+    assert wave is not None
+    result = expander.expand_once(session, launcher=launcher)["waves"][0]
+    assert result["status"] == "paused", result
+
