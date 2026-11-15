@@ -62,6 +62,13 @@ MAX_PAUSED_GROUPS = int(os.environ.get("COVERAGE_MAX_PAUSED_GROUPS", "3"))
 # of 40k cells becomes ~5 pods on different clusters instead of one.
 TARGET_CELLS = int(os.environ.get("COVERAGE_TARGET_CELLS", "8000"))
 PAUSE_FAILURE_FRACTION = float(os.environ.get("COVERAGE_PAUSE_FRACTION", "0.3"))
+# 终态里"这一波白烧了"的那几个状态，两处判据共用一份（原先两处各写一遍，
+# 于是新状态只补一处——2026-11-13 的 `stalled` 就没进任何一处）。
+# `stalled` 必须在内：它是"pod 跑到 activeDeadlineSeconds 被杀、执行体从未报到"，
+# 一波里每条都这样时必须早停，否则整波在同一个死端点上反复重启（这正是早停
+# 判据存在的理由，见下方注释里的 12-chunk 实历）。缺了它，`len(bad) ==
+# len(terminal)` 在"全部卡死"时恒为假 ⇒ 判据永不触发。
+BAD_RUN_STATUSES = ("failed", "zero_yield", "refused", "aborted", "stalled")
 # Pre-size to 90% of the guardrail: the reconciler re-estimates at launch, and
 # a wave policy the reconciler would refuse is a planning bug, not a runtime
 # condition — this margin absorbs small drift (entity identifiers added
@@ -347,8 +354,7 @@ def _advance_wave(session: Session, wave: CoverageWave,
         # endpoints — pause now instead of after every chunk drains
         # (found live: 12-chunk waves relaunched for hours at 99% errors).
         terminal = [r for r in runs if r.status != "running"]
-        bad = [r for r in terminal
-               if r.status in ("failed", "zero_yield", "refused", "aborted")]
+        bad = [r for r in terminal if r.status in BAD_RUN_STATUSES]
         if len(terminal) >= 2 and len(bad) == len(terminal):
             obs_rows = (session.query(func.count())
                         .filter(SemanticObservation.concept_id.in_(
@@ -405,8 +411,7 @@ def _advance_wave(session: Session, wave: CoverageWave,
         runs = _wave_runs(session, wave)
         if any(r.status == "running" for r in runs):
             return {"wave": wave.id, "status": "running"}
-        bad = [r for r in runs if r.status in
-               ("failed", "zero_yield", "refused")]
+        bad = [r for r in runs if r.status in BAD_RUN_STATUSES]
         rows_new = sum(r.rows_new or 0 for r in runs)
         frac_bad = len(bad) / len(runs) if runs else 1.0
         # Yield evidence is TWO-sourced (defense in depth): the run counters
