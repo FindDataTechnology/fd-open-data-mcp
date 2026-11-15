@@ -71,6 +71,28 @@ def upgrade() -> None:
     bind = op.get_bind()
     if bind.dialect.name != "postgresql":
         return  # sqlite tests build via create_all (chain convention)
+    # ── 先放宽 alembic 自己的版本列，否则这个 revision 根本盖不上章 ─────────────
+    # `alembic_version.version_num` 是 alembic 建表时的 `varchar(32)`，而本 revision
+    # 的 id 是 **33 个字符**（`0024_federated_runner_pin_c33bf67`，chain 里第一个
+    # 超过 32 的；0023 之前最长 31）。alembic 是在跑完迁移体之后才执行
+    # `UPDATE alembic_version SET version_num='0024_…'`，那一句撞
+    # `StringDataRightTruncation: value too long for type character varying(32)`
+    # ⇒ **整个 upgrade 回滚**，空库永远到不了 head，而镜像的启动闸要求库 >= head。
+    #
+    # 两个方向都想过，只有这个方向对：
+    # ① 把 id 改短（`0024_fed_runner_pin_c33bf67`）能让这一次过去，缺陷类别原样
+    #    留着——下一个人写第 33 个字符时同样死，而症状是「空库迁移失败 / pod 起不
+    #    来」，没人会联想到命名长度；
+    # ② 在这里把上界抬到 64，并让测试钉住这个上界（`tests/test_migration_chain.py`
+    #    对每个 revision id 断言 ≤64）。这一条同时修好「已停在 0023 的库」与「全新
+    #    空库」——两边的 alembic_version 都是 varchar(32)。
+    #
+    # 必须排在迁移体最前面：章是迁移体跑完才盖的，ALTER 放在这里才来得及。
+    # 对已经是 64 的库幂等（PG 只做一次极小的重写）。
+    bind.exec_driver_sql(
+        "ALTER TABLE alembic_version "
+        "ALTER COLUMN version_num TYPE varchar(64)"
+    )
     for source in _DRIFTED:
         bind.exec_driver_sql(
             "UPDATE crawl_sources SET runner_image = %s, updated_at = now() "
