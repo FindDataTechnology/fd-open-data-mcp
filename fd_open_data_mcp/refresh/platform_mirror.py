@@ -32,12 +32,26 @@ logger = logging.getLogger(__name__)
 # policy_runs terminal statuses -> crawl_runs statuses. no_op / redundant /
 # zero_yield all ran to completion: they report as success (rows carry the
 # signal; the zero-yield alarm stays on the concept line's own KPI face).
+#
+# `stalled` (2026-11-13 回收器) **IS** mirrored: the row really executed — it
+# has a job_ref and a pod killed at activeDeadlineSeconds — so the spec
+# ("真实执行过的…SHALL 报到，覆盖成功与失败") puts it on the failure side.
+# Omitting it made an executed run vanish from the platform-facing table,
+# where a missing row is indistinguishable from "never dispatched". detail
+# already carries the reaper's criterion ("Yield unknown, NOT zero"), so it
+# rides along as error_head; the mapped value stays inside the vocabulary
+# crawl_runs consumers already enumerate (a *new* value there would recreate
+# the same closed-set bug one surface down).
+#
+# `skipped` (single-flight skip record) is deliberately absent: nothing
+# executed. The `job_ref` guard below drops it anyway.
 _STATUS_MAP = {
     "success": "success",
     "redundant": "success",
     "zero_yield": "success",
     "no_op": "success",
     "failed": "failed",
+    "stalled": "failed",
     "cancelled": "cancelled",
 }
 
