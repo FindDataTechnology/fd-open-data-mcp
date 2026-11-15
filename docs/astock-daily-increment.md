@@ -46,16 +46,25 @@ print(json.dumps(d))" | kubectl --context <cluster> apply -f -
 这样能读到 `containerStatuses[0].state.terminated.exitCode` 与完整堆栈——
 本次就是靠它拿到 `psycopg2 … could not connect to server "shard_xinru3"`。
 
-## 限流行为（2026-11-12 起）
+## 限流行为（2026-11-15 订正：多 provider 故障转移语义）
+
+**2026-11-09 eastmoney 被封后 `fetch_frame` 改成多 provider 故障转移
+（`PROVIDER_ORDER = ("eastmoney","tencent","sina")`），本表据此重写。**
+单 provider 时代的 `RATE_LIMIT_BACKOFF_S=300`（限流原地等一个窗口）已删——
+「没有别的腿可用」的前提不成立了，等 5 分钟只会让整轮崩在 13 分钟处，
+正是 2026-11-12 连挂三天的形态。
 
 | 常量 | 值 | 含义 |
 |---|---|---|
-| `RATE_LIMIT_BACKOFF_S` | 300 | 限流时重试前**必等**这么久（akshare 自述的一个窗口） |
+| `PROVIDER_ORDER` | eastmoney→tencent→sina | 限流**零等待**立刻换下一条腿；全被拒才抛 `RateLimited` |
+| `PROVIDER_BREAKER_AFTER` | 3 | 同一 provider 连续 3 次限流 → 本轮熔断（跳过该腿） |
 | `RATE_LIMIT_STREAK_ABORT` | 3 | 连续 3 个符号被限流 → **中止本轮**，退出码 3 |
 | `RATE_LIMIT_MARKERS` | `限流 / 断开了连接 / RemoteDisconnected / Connection aborted` | 判定标志 |
 
-- 普通错误走 `2^n` 短退避，**不**套用 5 分钟档。
+- 普通错误走 `2^n` 短退避（每条腿各自一轮），**不**套用 5 分钟档。
 - 限流**不**记进 `failed`（它不是"该符号没数据"，记进去会伪装成数据缺口）。
+- **三条腿全被熔断打开时照样抛 `RateLimited`**（2026-11-15 补：原先静默
+  `return None`，整轮一个不取、退出码 0，看上去一切正常）。
 - 中止时退出码 **3**（不是 0）：静默成功会让没抓到的尾巴被当成 current。
   已写入的行照常通过 `_report_yield` 上报。
 - 计数**跨分片传递**：冷却 sleep 不解除封禁。
@@ -64,11 +73,11 @@ print(json.dumps(d))" | kubectl --context <cluster> apply -f -
 
 ```
 000002 hfq fetch attempt 1/3 FAILED (rate limited): … 当前 IP 被临时限流 …
-waiting 300s before retry 2/3
+（无 waiting——立刻换下一条 provider）
 … 第 3 个符号仍被拒 → aborting run: the upstream keeps refusing this IP
 ```
 
-单测：`tests/test_astock_rate_limit_backoff.py`（5 条，注入退化实测 5/5 变红）。
+单测：`tests/test_astock_rate_limit_backoff.py`（6 条，注入退化实测 6/6 变红）。
 
 ## 上线一个 direct 脚本要动**三处**（否则改了不生效）
 
