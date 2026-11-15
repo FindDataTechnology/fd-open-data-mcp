@@ -151,3 +151,65 @@ sources:
       provider 只认 stock/index 实体且源钉死 ``astock_daily``。
       **不含场外基金**（如 007355，subtype=open）：那类只有净值、没有交易所价格，
       按净值估值是另一条口径（无买卖价、T+1 确认），不在本声明内。
+  # ---------------------------------------------------------------- 通道 B（DAAS 本地 sqlite）
+  # 研究取价走的真实读面：DAAS（fd-daas-mcp）的本地 sqlite，逐表
+  # `scraw_<6位>_daily` + 口径台账 `scraw_configs`。**id 必须与读路径实发的
+  # source_id 逐字一致**（fd-daas-mcp alerts-mcp/series_ref.py：
+  # `daas_akshare_{klass}_{adjust}`）——registry 是唯一入口，未登记即拒。
+  #
+  # access.kind=daas_local_sqlite：文件只在 fd-daas-mcp 的 pod 里
+  # （local-path PVC，钉 cheap-5），本服务挂不到——这是**可达边界的声明**，
+  # 不是缺陷。口径闸的探针试开文件、开不到就如实记"判不出"
+  # （checked.daas_local_watermark_unreachable），绝不编造水位。
+  #
+  # 锚点＝scraw_configs.created_at（种下时刻；append-only 刷新不改记录），
+  # 实测 14 张表两档：个股 2026-10-17、指数 2026-11-06（2026-11-15 逐表读出）。
+  # 换锚点＝换口径＝换 source_id，不是原地改写。
+  #
+  # 新鲜度不在这里判——供给面两轴（组内漂移 + 组对今天）归 DAAS 侧的
+  # selfcheck_price_freshness + CronJob daas-astock-refresh（工作日 18:30 CST）。
+  daas_akshare_stock_qfq:
+    instrument_types: [stock]
+    markets: [XSHG, XSHE]
+    adjustment: qfq
+    adjustment_anchor: "2026-10-17"
+    factor_source: null
+    frequency: daily
+    license_state: legacy
+    preferred_for: []   # 家族首选源仍是 astock_daily；本源随研究路声明（D7 不受影响）
+    access:
+      kind: daas_local_sqlite
+      sqlite_path: /app/fd-daas-mcp/data/daas.db
+    watermark:
+      entity_type: stock
+      concept_codes: [price.close]
+      reference_basket: ["600036", "600519", "601318"]
+      lookback_days: 400
+    notes: >-
+      通道 B 个股档（12 张表，qfq，sina 乘法口径）。append-only：INSERT OR IGNORE
+      只追加、scraw_configs 不改；--replace 重播＝历史被重写＝锚点移动，须换 source_id。
+      刷新调度器 CronJob daas-astock-refresh（sha-b734bde 镜像，akshare==1.19.1 钉版），
+      接缝守卫在写库前拦复权分叉与量纲换路。
+
+  daas_akshare_index_none:
+    instrument_types: [index]
+    markets: [XSHG, XSHE]
+    adjustment: none   # 指数不复权；与 index-seed 的 not_applicable 是两个登记身份
+    adjustment_anchor: null
+    factor_source: null
+    frequency: daily
+    license_state: legacy
+    preferred_for: []   # price.index.daily 首选源仍是 index-seed
+    access:
+      kind: daas_local_sqlite
+      sqlite_path: /app/fd-daas-mcp/data/daas.db
+    watermark:
+      entity_type: index
+      concept_codes: [price.close]
+      reference_basket: ["000300", "000905"]
+      lookback_days: 400
+    notes: >-
+      通道 B 指数档（000300/000905 两张表，adjust=none）。上游路由 index_zh_a_hist
+      （东财 push2his）从笔记本与集群均不可达 ⇒ 水位冻在 2026-11-06 是真结论；
+      换 sina stock_zh_index_daily 须同笔改 scraw_configs.source 与三处代码映射，
+      不单方面动手。

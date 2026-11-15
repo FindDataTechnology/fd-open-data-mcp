@@ -128,9 +128,14 @@ def _same_anchor_registry(tmp_path, base_yaml):
     "空比对不等于通过"与"全绿"，前提必须是**可比**，所以这里把 akshare 的锚对齐。
     """
     import re
-    # 声明是 **顶层键**（`akshare:` 不是 `source_id: akshare`），只改它的 adjustment_anchor
+    # 声明是 **顶层键**（`akshare:` 不是 `source_id: akshare`），只改它的 adjustment_anchor。
+    # 2026-11-15 起登记表还有通道 B（daas_akshare_stock_qfq，锚 2026-10-17）——
+    # 同为 qfq、异锚照样不可比，所以它也要对齐，否则"全绿"用例会被一条
+    # **正确的** ANCHOR_MISMATCH 挡住（那是闸在工作，不是用例要验的东西）。
     text = re.sub(r"(\n  akshare:[\s\S]*?\n    adjustment_anchor: )per_fetch",
                   r'\1"2026-07-10"', base_yaml, count=1)
+    text = re.sub(r'(\n  daas_akshare_stock_qfq:[\s\S]*?\n    adjustment_anchor: )"2026-10-17"',
+                  r'\1"2026-07-10"', text, count=1)
     out = tmp_path / "declarations-same-anchor.yaml"
     out.write_text(text)
     return out
@@ -296,3 +301,115 @@ def test_anchor_mismatch_is_reported_not_compared(store):
     assert "CROSS_SOURCE_ANCHOR_MISMATCH" in out
     assert "per_fetch" in out          # 点名两侧锚点，别只说"不可比"
     assert "CALIBER_DIVERGENCE" not in out
+
+
+# ------------------------------------------------------ 通道 B（daas_local_sqlite）
+#
+# 2026-11-15 登记：DAAS 本地 sqlite 是研究路的真实读面。三条只有测试才验得出的：
+# ① 可达时水位=篮内各表 max(date) 的最小值（下界，方向安全）；
+# ② 开不到时必须**判不出**——水位留 None、不编日期，且在 checked 里留痕
+#    （"判不出"静默等于"判据不存在"）；
+# ③ 声明层：缺 sqlite_path 的 daas_local_sqlite 在 load_registry 就拒绝。
+
+def _make_daas_sqlite(tmp_path: Path, dates: dict[str, str]) -> Path:
+    """造一个最小 scraw 库：每 code 一张 scraw_<code>_daily，单列 date。"""
+    import sqlite3
+
+    p = tmp_path / "daas.db"
+    con = sqlite3.connect(p)
+    for code, d in dates.items():
+        con.execute(f'create table "scraw_{code}_daily" ("date" text, "Close" real)')
+        con.execute(f'insert into "scraw_{code}_daily" values (?, 36.0)', (d,))
+    con.commit()
+    con.close()
+    return p
+
+
+def _daas_registry(tmp_path: Path, sqlite_path: Path | str | None):
+    """注册表：stock 家族首选 astock_daily，研究路指向通道 B（形状照生产声明）。"""
+    from fd_open_data_mcp.price_sources.declarations import (
+        AccessSpec, SourceDeclaration, SourceRegistry, WatermarkProbe,
+    )
+
+    def decl(sid, *, etype, adjustment, anchor, preferred, access):
+        return SourceDeclaration(
+            source_id=sid,
+            instrument_types=(etype,),
+            markets=("XSHG",),
+            adjustment=adjustment,
+            frequency="daily",
+            license_state="legacy",
+            watermark_probe=WatermarkProbe(
+                entity_type=etype, concept_codes=("price.close",),
+                reference_basket=("600036", "600519") if etype == "stock" else ("000300",),
+            ),
+            access=access,
+            adjustment_anchor=anchor,
+            preferred_for=preferred,
+        )
+
+    access = AccessSpec(
+        kind="daas_local_sqlite",
+        sqlite_path=str(sqlite_path) if sqlite_path else None,
+    )
+    srcs = {
+        "astock_daily": decl("astock_daily", etype="stock", adjustment="qfq",
+                             anchor="2026-07-10", preferred=("price.stock.daily",),
+                             access=AccessSpec(kind="federated_view", dsn_env="ASTOCK_DSN")),
+        "daas_akshare_stock_qfq": decl("daas_akshare_stock_qfq", etype="stock",
+                                       adjustment="qfq", anchor="2026-10-17",
+                                       preferred=(), access=access),
+        "index-seed": decl("index-seed", etype="index", adjustment="not_applicable",
+                           anchor=None, preferred=("price.index.daily",),
+                           access=AccessSpec(kind="federated_view", dsn_env="ASTOCK_DSN")),
+    }
+    owner = {f: sid for sid, d in srcs.items() for f in d.preferred_for}
+    return SourceRegistry(schema_version="1", sources=srcs,
+                          price_families=("price.stock.daily", "price.index.daily"),
+                          _family_owner=owner)
+
+
+def test_daas_sqlite_watermark_is_min_of_basket_maxes(tmp_path, monkeypatch):
+    """篮内两表各取 max(date)，水位取其中**更旧**的那个（下界方向）。"""
+    import datetime as dt
+
+    from scripts.price_caliber_gate import _shard_watermark
+
+    p = _make_daas_sqlite(tmp_path, {"600036": "2026-11-13", "600519": "2026-11-12"})
+    reg = _daas_registry(tmp_path, p)
+    as_of, method = _shard_watermark(reg.get("daas_akshare_stock_qfq"), dt.date.today())
+    assert (as_of, method) == ("2026-11-12", "daas_sqlite_max_date")
+
+
+def test_daas_sqlite_unreachable_reports_not_fabricates(tmp_path, monkeypatch):
+    """文件开不到：水位 None（不编日期），且 checked 里留下"判不出"的留痕。"""
+    import datetime as dt
+
+    from scripts.price_caliber_gate import _shard_watermark, judge_three_paths
+
+    # 本体库派生与这条无关（sqlite 文件可达性才是被测对象），桩成空映射。
+    import fd_open_data_mcp.price_sources.watermark as _wm
+    monkeypatch.setattr(_wm, "derive_watermarks", lambda *a, **k: {})
+
+    reg = _daas_registry(tmp_path, tmp_path / "missing.db")
+    as_of, method = _shard_watermark(reg.get("daas_akshare_stock_qfq"), dt.date.today())
+    assert as_of is None and method is None
+
+    out, checked = judge_three_paths(
+        reg, None, {"research": "daas_akshare_stock_qfq"}, dt.date.today()
+    )
+    assert not any(v.code == "WATERMARK_UNAVAILABLE" for v in out), out
+    rows = checked.get("daas_local_watermark_unreachable")
+    assert rows and rows[0]["source_id"] == "daas_akshare_stock_qfq"
+    assert rows[0]["paths"] == ["research"]
+
+
+def test_daas_access_requires_sqlite_path(tmp_path):
+    """缺 sqlite_path 的 daas_local_sqlite 必须在登记时被拒——静默缺路径会让
+    探针永远判不出而没人知道为什么。"""
+    import pytest
+
+    from fd_open_data_mcp.price_sources.declarations import AccessSpec, DeclarationError
+
+    with pytest.raises(DeclarationError):
+        AccessSpec.from_dict("x", {"kind": "daas_local_sqlite"})
