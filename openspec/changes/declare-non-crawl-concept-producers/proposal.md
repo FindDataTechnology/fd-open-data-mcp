@@ -15,13 +15,21 @@ crawl 都不会再取它的新值**；而库里的旧行照常被读出来，新
 
 | 分档 | 数量 | 含义 |
 |---|---|---|
-| 写侧脚本里有该概念码 | **98** | `extract_*` / `bulk_ingest_*` / `seed_*` / `sync_*` / `update_*` 类脚本正文里出现，多半是批量 ETL 的产出者 |
-| 只被闸/测试/夹具/清单引用 | **102** | 概念被某处**声明**过，但这批脚本里找不到写它的地方 |
-| 两棵脚本树里连字面量都没有 | **301** | 仓内找不到任何产出者痕迹 |
+| 写侧脚本里有该概念码 | **97** | `extract_*` / `bulk_ingest_*` / `seed_*` / `sync_*` / `update_*` 类脚本正文里出现，多半是批量 ETL 的产出者 |
+| 只被闸/测试/夹具/清单引用 | **97** | 概念被某处**声明**过，但这批脚本里找不到写它的地方 |
+| 扫过的树里连字面量都没有 | **307** | 仓内找不到任何产出者痕迹 |
 
-（口径：扫描 `fd-industry-data/scripts` + `fd-open-data-mcp/scripts` 共 200 个
-`.py`，只做**字面量出现**判定——所以 98 是**上限**、301 是**下限**，两者都不是
-「证明了有/没有产出者」。这一点必须写在输出里，否则数字会被当成结论。）
+（口径：`fd-infra-deploy/tools/gen_concept_producers.py` 扫 2 棵写侧树
+`fd-industry-data/scripts` + `fd-open-data-mcp/scripts` 与 3 棵参考树
+`fd-infra-deploy/tools` + `fd-open-data-mcp/tests` + `fd-industry-data/tests`，
+共 **534** 个 `.py`；只做**字面量出现**判定——所以 97 是**上限**、307 是**下限**，
+两者都不是「证明了有/没有产出者」。范围与文件数落在声明文件的 `split.scope` 里，
+闸把三档与上下限**同屏**打印。）
+
+> **别把两组数混用。** 本提案初稿的 98 / 102 / 301 来自一次性 ad-hoc 扫描，
+> **扫描范围没记录**（`--refs` 那三棵参考树当时根本没定义）。落进仓里的生成器是
+> 唯一可复现的口径，**以 97 / 97 / 307 为准**；差异只两条来源：每行只取**首个**
+> 字面量（98→97）、参考树集合不同（102/301 → 97/307）。
 
 另一条被证伪的假设：`registry_entries` **不是**产出者声明面。零绑定的 630 个
 概念在注册表里有 `semantic_code` 命中，但其中 **629 个的 `source_table` 是
@@ -65,15 +73,21 @@ akshare 侧也不全：`macro_china_gdp` / `macro_china_gdzctz` /
 - **`retired` 走 `deprecated`，不走本文件**：真想退役就改 `concepts.deprecated`，
   本文件只描述「谁在产」，不承担「这个概念不要了」的语义——两件事写在一处会
   让人分不清「没有生产者」与「已决定不要」。
-- **把三层拆分写进 proposals 与闸的输出**：98 / 102 / 301 是**上限/下限**，
-  必须随数字一起打印口径，避免下一个人把 301 读成「301 个永远没人产」。
+- **把三档拆分写进 proposals 与闸的输出**：97 / 97 / 307 是**上限/下限**，
+  必须随数字一起打印口径，避免下一个人把 307 读成「307 个永远没人产」。
+  已落地：`gen_concept_producers.py` 扫出三档写进 `split` 段，闸用
+  `format_split()` 把数字与口径打成相邻两行（拆开打会被读成结论）。
+- **收窄人口不许污染回归口径**：`--category` 只收窄清单，回归与命中仍按全量判，
+  且 `--write-baseline` 与 `--category` 同时给直接拒（快照是全量口径，按一族
+  重写会把它静默砍掉）。实测过旧口径在同一份数据上打 `已恢复 491 条`。
 
 ## Impact
 
 - Affected specs: `catalog-enumeration`（概念目录与产出者声明的边界）
 - Affected code:
   - `fd-infra-deploy/tools/check_concept_routability.py`（读声明、四档、过期降级）
-  - `fd-infra-deploy/tools/data/concept-producers.json`（新增，初始覆盖 98 条写侧命中 + 其余标 `undecided`）
+  - `fd-infra-deploy/tools/data/concept-producers.json`（新增，初始覆盖 97 条写侧命中 + 其余标 `undecided`，全部 `last_verified` 空 ⇒ 判定不变）
+  - `fd-infra-deploy/tools/gen_concept_producers.py`（新增，生成骨架 + 算三档拆分，`--check` 可回归）
   - `fd-infra-deploy/tools/data/concept-routability-baseline.json`（重算，`dormant` 会因声明而变小）
 - 不改数据库 schema、不写生产库；`concept_bindings` 的写入留给各自的「补绑定」
   change（宏观那条另算，见 Why 末段）。
