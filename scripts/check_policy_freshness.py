@@ -37,6 +37,10 @@
 - **R2 `no_recent_run`** —— 最近一次运行早于该策略**自己的**排期周期 × 1.5
   （周期由 `croniter` 从 `cron_expr` 推，取未来 60 次触发的最大间隔：工作日 cron 的
   最大间隔是 3 天，不是 1 天）。**一次都没跑过**单独成 `never_ran`。
+  另有拉起宽限（`PICKUP_GRACE_SECONDS`）：cron 到点 ≠ 立即执行——direct 策略要等
+  下一轮 reconciler（每 15 分钟）才建 Job，2026-11-15 实测 06:45Z 的 tick 在 06:52Z
+  才出现 running 行 ⇒ 最近一个 fire 还在拉起窗口内时改判上一个 fire，否则 cron 靠近
+  闸运行时刻的策略会得到假红。
 - **R3 `dangling_open_run`** —— 存在 `running`/`queued` 行超过执行器上限 + 900s。
   这种行会**永久挡住单飞派发**（2026-11-13 实测：一条挂了 5.2 小时的 running 行让
   policy 2659 整天没有新行）。
@@ -90,6 +94,12 @@ OPEN_RUN_GRACE_SECONDS = 900                      # reconciler 的"一跳"余量
 #: 取 1 小时而不是"周期×系数"：调度器的一跳会晚几十秒，而按周期算要么在周末假红
 #: （工作日 cron 的 3 天间隔），要么要等两轮才报（漏掉一个整轮却还绿）。
 FIRE_GRACE_SECONDS = 3600
+#: cron 到点 ≠ 立即执行：direct 策略的 Job 由 `crawl-reconciler` 每 15 分钟一轮
+#: （`7,22,37,52 * * * *`）现建，到点后要等下一轮 reconciler 才有运行记录。
+#: 2026-11-15 实测（policy 3，cron `45 6 * * *`）：06:45Z 的 tick 在 06:52:04Z 才出现
+#: `running` 行，而 06:50Z 跑这道闸会得到一条假 `no_recent_run`。取 30 分钟＝两轮
+#: reconciler；在这个窗口内 R2 改判**上一个** fire——它的拉起窗口必定已经关闭。
+PICKUP_GRACE_SECONDS = 1800
 
 OPEN_STATUSES = {"running", "queued"}
 FAILED_STATUSES = {"failed", "stalled"}
@@ -228,6 +238,7 @@ def _zero_yield_shape(run: PolicyRun) -> str:
 def judge(states: Iterable[PolicyState], *, now: datetime,
           executor_ceiling_seconds: int = DEFAULT_EXECUTOR_CEILING_SECONDS,
           fire_grace_seconds: int = FIRE_GRACE_SECONDS,
+          pickup_grace_seconds: int = PICKUP_GRACE_SECONDS,
           undetermined: list[str] | None = None,
           ) -> tuple[list[Finding], list[str]]:
     """纯函数：返回 (命中, 只报事实的行)。cron 解析不出写进 undetermined。"""
@@ -332,6 +343,11 @@ def judge(states: Iterable[PolicyState], *, now: datetime,
         except ValueError as exc:
             undetermined.append(f"{label}: {exc}")
             continue
+        # 拉起宽限：cron 到点 ≠ 立即执行，要等下一轮 reconciler（见 PICKUP_GRACE_SECONDS）。
+        # 最近一个 fire 还在拉起窗口内时改判上一个 fire——它对应的窗口必定已经关闭。
+        if (now - prev_fire).total_seconds() < pickup_grace_seconds:
+            prev_fire, tz_label = _prev_fire(st.cron_expr, st.timezone_name,
+                                             prev_fire - timedelta(seconds=1))
         newest_started = max((_as_utc(r.started_at) for r in st.runs), default=None)
         if newest_started is None:
             findings.append(Finding(
@@ -506,6 +522,23 @@ def _self_test() -> int:
           now=now, undetermined=bad)
     bad_ok = len(bad) == 1
     print(f"  {'✓' if bad_ok else '✗'} 坏 cron 进 undetermined（{len(bad)} 条）")
+
+    # 拉起宽限两臂（2026-11-15 实况复刻）：cron `45 6 * * *`，tick 06:45Z，上一轮运行
+    # 06:52Z（= reconciler 那一轮拉起）。两臂只换「闸运行在 tick 后几分钟」：
+    #   06:50Z（< 30min 拉起窗口）⇒ 改判上一个 fire（06:45 前一天的那轮，有运行）⇒ **绿**；
+    #   08:50Z（窗口已关）⇒ 06:45 那轮确实没有运行 ⇒ **红**。
+    # 少了绿臂，「把 R2 整个删掉」也能全绿；少了红臂，「宽限 24h」也全绿。
+    gate_run = PolicyRun("success", datetime(2026, 3, 14, 6, 52, tzinfo=timezone.utc))
+    f_open, _ = judge([PolicyState(11, "pickup-window", "45 6 * * *", "UTC", [gate_run])],
+                      now=datetime(2026, 3, 15, 6, 50, tzinfo=timezone.utc),
+                      undetermined=[])
+    f_closed, _ = judge([PolicyState(12, "pickup-expired", "45 6 * * *", "UTC", [gate_run])],
+                        now=datetime(2026, 3, 15, 8, 50, tzinfo=timezone.utc),
+                        undetermined=[])
+    open_ok = not any(f.policy_id == 11 for f in f_open)
+    closed_ok = any(f.policy_id == 12 and f.rule == "no_recent_run" for f in f_closed)
+    print(f"  {'✓' if open_ok else '✗'} tick 后 5 分钟跑闸 ⇒ 不报 no_recent_run（拉起宽限内改判上一个 fire）")
+    print(f"  {'✓' if closed_ok else '✗'} tick 后 2h5m 跑闸 ⇒ 照报 no_recent_run（宽限不吞真漏跑）")
 
     return 0 if (ok and green and noop_fact and zy_fact and split_ok and und_ok
                  and tz_ok and bad_ok) else 1
