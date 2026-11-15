@@ -58,6 +58,17 @@ def _classify(run: PolicyRun) -> str | None:
     terminal non-success set — it IS the outage signal this watcher was blind
     to. ``no_op`` (empty plan) and ``redundant`` (fetched, nothing new) are
     recorded but non-alerting; the digest surfaces redundant STREAKS instead.
+
+    unblock-silent-dispatch-stalls: ``stalled`` is what the reconciler writes
+    when the executor never reported a terminal state and the row passed its
+    age ceiling (2026-11-13 实历：policy 2659 的 Job 被 activeDeadlineSeconds 杀掉、
+    行留在 running 上 3.6h，单飞随后挡住当天所有派发)。**它是最该报警的形态**——
+    派发没发生、数据没来，而此前这一档既不算成功也不算失败，扫描的取数 SQL 连
+    这一行都不会捞出来。
+
+    刻意不为它单开一段消息：它的 ``detail`` 首行本来就以 ``stalled`` 开头
+    （人工止血写 ``stalled (manual repair …)``，回收器写判据行），渲染进失败那一栏
+    已经自解释；多开一段只改消息契约、不增信息。
     """
     if run.status == "failed":
         if (run.detail or "").lower().startswith("refused:"):
@@ -65,12 +76,14 @@ def _classify(run: PolicyRun) -> str | None:
         return "failed"
     if run.status == "zero_yield":
         return "zero_yield"
+    if run.status == "stalled":
+        return "stalled"
     # abandoned (surface-abandoned-cells-on-run-row) is deliberately NOT an alert
     # class: it is designed behaviour for (concept, entity) pairs no candidate
     # endpoint can serve, and it would page on every round for the same entities
     # forever — a permanently red alarm is one nobody reads. It is still recorded
-    # (the run row carries rows_abandoned) and the digest can surface it; this
-    # branch exists so the status is a named case rather than falling through
+    # (the run row carries rows_abandoned) and the gate names it with its counts;
+    # this branch exists so the status is a named case rather than falling through
     # silently as "unknown".
     if run.status == "abandoned":
         return None
@@ -84,10 +97,19 @@ def _classify(run: PolicyRun) -> str | None:
 # ``no_op``（空计划，本函数明确判为"不可告警"）也算进了失败分母——线上 24h
 # 实测 failed 3 / no_op 3 / success 5，面板报 45.5%，而真正可判定的失败率是
 # 3/8。同一个"什么算失败"必须只有一处定义，否则两处各自漂移。
-ALERT_STATUSES = ("failed", "zero_yield")
+#
+# 2026-11-15：``stalled`` 补进来。它此前既不在这里、也不在 NO_SIGNAL 里，于是
+# ① 面板的可判定成功率把它从分子分母里都排掉（只落进 unknown 计数），
+# ② 本函数上方的取数 SQL 用 ``status.in_(ALERT_STATUSES)`` 过滤，**那一行根本不会
+# 被捞出来** ⇒ 回收器把悬行关成 stalled 之后，告警面上与"卡死没人知道"完全同形。
+ALERT_STATUSES = ("failed", "zero_yield", "stalled")
 
 #: 记录但不告警、也不该计入成功率的终态（"这一轮没有信号"）。
-NO_SIGNAL_STATUSES = ("no_op", "redundant")
+#:
+#: ``skipped`` 属于这一档：它是单飞跳过留下的**记录**，不是运行。算成失败会让
+#: 同一次停摆记两次（挡住它的那条 open run 自己也会告警），连续被挡还会把失败率
+#: 撑成 100%；它要说的是"这一跳没发生"，不是"这一跳失败了"。
+NO_SIGNAL_STATUSES = ("no_op", "redundant", "skipped")
 
 #: 兼容旧名（仓内/仓外仍可能有引用）。
 _ALERT_STATUSES = ALERT_STATUSES
@@ -257,6 +279,9 @@ def scan_once(session: Session, now: dt.datetime | None = None) -> dict:
         elif event == "refused":
             new_refused.append(rec)
         else:
+            # failed 与 stalled 同栏渲染：两者的处置都是"派发没成"，而 detail
+            # 首行已经写着是 stalled（回收器判据）还是失败原因。事件名仍分开，
+            # 因为去重键是 (run_id, event)。
             new_failed.append(rec)
 
     new_stale: list[dict] = []

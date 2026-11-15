@@ -56,20 +56,43 @@ def format_digest(snap: dict, tz: ZoneInfo, coverage: dict | None = None) -> tup
     title = f"📊 SCRAW DAILY · {gen}"
 
     # --- WHAT HAPPENED ---
+    # 分桶必须与 len(runs) 对得上。`snapshot.recent_runs()` 不过滤状态，所以任何
+    # 没被点名的终态都会"计入总数、落不进任何桶"：2026-11-15 之前 `stalled`
+    # （回收器关掉的悬行——派发没成、产出未知，最该被看见的那一档）就是这样从
+    # 日报里消失的，读数看上去只是"各项之和比总数少几条"。同理 `skipped`
+    # （单飞跳过留痕）也从未出现。现在两者都显式入桶，剩下的一切按状态名念出来，
+    # 不静默丢弃；新增状态只会让最后那段变长，不会让数字对不上。
     runs = snap.get("recent_runs", [])
-    n_succ = sum(1 for r in runs if r["status"] == "success")
-    n_fail = sum(1 for r in runs if r["status"] == "failed")
-    n_zero = sum(1 for r in runs if r["status"] == "zero_yield")
-    n_redun = sum(1 for r in runs if r["status"] == "redundant")
-    n_noop = sum(1 for r in runs if r["status"] == "no_op")
+    _BUCKETS = (
+        ("success", "✅"),
+        ("failed", "❌"),
+        ("stalled", "⏳"),
+        ("zero_yield", "0️⃣"),
+        # abandoned（surface-abandoned-cells-on-run-row）：这一轮有格被**放弃**——请求
+        # 没有发出去，不是上游没给。不单列就落进下面那个 `❓ 未归类` 桶：数字仍对得上，
+        # 但读的人只看到「❓ 3 (abandoned)」，而这是覆盖率问题的固定形态、几乎每天都有。
+        ("abandoned", "🚧"),
+        ("redundant", "♻️"),
+        ("no_op", "⏭️"),
+        ("skipped", "⤼"),
+    )
+    counts = {status: 0 for status, _ in _BUCKETS}
+    for r in runs:
+        st = r.get("status")
+        if st in counts:
+            counts[st] += 1
+    tally = " ".join(f"{counts[status]} {icon}" for status, icon in _BUCKETS)
+    unaccounted = len(runs) - sum(counts.values())
+    if unaccounted:
+        names = sorted({str(r.get("status")) for r in runs if r.get("status") not in counts})
+        tally += f" ❓ {unaccounted} ({', '.join(names)})"
     n_stale = snap.get("summary", {}).get("stale_run_count", 0)
     src_rows = snap.get("per_source_outcome", [])
     circuits = {c["source"]: c for c in snap.get("circuit_state", [])}
     fy = snap.get("fleet_yield", {})
 
     lines: list[str] = []
-    lines.append(f"YESTERDAY — {len(runs)} runs: {n_succ} ✅ {n_fail} ❌ "
-                 f"{n_zero} 0️⃣ {n_redun} ♻️ {n_noop} ⏭️   STALE: {n_stale}")
+    lines.append(f"YESTERDAY — {len(runs)} runs: {tally}   STALE: {n_stale}")
     # fleet yield: the single number that makes a zero-acquisition day visible
     lines.append(f"  ACQUIRED {fy.get('rows_new', 0)} new rows "
                  f"(of {fy.get('rows_attempted', 0)} attempted, {fy.get('runs', 0)} runs)")

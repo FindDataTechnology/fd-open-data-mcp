@@ -72,6 +72,23 @@ def list_entities(
         session.close()
 
 
+def count_entities(entity_type: str) -> int:
+    """Total rows of one entity type (cheap COUNT; never materialises the rows).
+
+    Exists so the tool face can say "returned N of M" instead of truncating
+    silently (harden-fleet-tool-face-and-queue 3.2).
+    """
+    db = dbmod.get_database()
+    session = db.get_session()
+    try:
+        return int(session.execute(
+            text("SELECT COUNT(*) FROM entities WHERE entity_type = :entity_type"),
+            {"entity_type": entity_type},
+        ).scalar() or 0)
+    finally:
+        session.close()
+
+
 def get_entity(
     entity_type: str,
     code: str

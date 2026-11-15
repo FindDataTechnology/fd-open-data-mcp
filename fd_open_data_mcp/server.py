@@ -663,12 +663,50 @@ def add_entity_identifier(entity_type: str, entity_id: int, source: str, identif
 
 
 # ─── Entity graph ────────────────────────────────────────────────────────────
+#: 单次 `list_entities` 的行数上限（harden-fleet-tool-face-and-queue 3.2）。
+#: 与 `hotel_series` 的 60 点是同一条压缩风暴链的两半：一次
+#: `list_entities(limit=100)` 实测把 100 条 × 六字段（含 metadata JSONB）塞进
+#: 单条 tool/result，叠加技能清单后小窗口模型三四步就进 `context pressure`。
+#: 默认给 50 行且**不带** metadata（要挑实体不需要它），翻页用 offset/limit，
+#: 需要全字段时显式 `include_metadata=True`。
+LIST_ENTITIES_MAX_ROWS = 50
+
+
 @mcp.tool(annotations=annotations_for("list_entities"))
-def list_entities(entity_type: str, limit: int = 100, offset: int = 0) -> list[dict]:
-    """List entities of a specific type."""
+def list_entities(entity_type: str, limit: int = LIST_ENTITIES_MAX_ROWS,
+                  offset: int = 0, include_metadata: bool = False) -> dict:
+    """List entities of one type (read-only, payload-capped by default).
+
+    Args:
+        entity_type: country / city / company / stock / etf / bond / index / future / crypto
+        limit: rows to return; defaults to a small page, raise it only when you
+            really need many rows at once
+        offset: rows to skip — combine with `limit` to page through the whole type
+        include_metadata: include each row's metadata JSON. Omitted by default:
+            it is the bulk of the payload and is rarely needed to pick an entity.
+    """
+    from fd_open_data_mcp.entity_graph_tools import count_entities
     from fd_open_data_mcp.entity_graph_tools import list_entities as _list
 
-    return _list(entity_type, limit, offset)
+    cap = max(1, int(limit or LIST_ENTITIES_MAX_ROWS))
+    rows = _list(entity_type, cap, offset)
+    if not include_metadata:
+        rows = [{k: v for k, v in row.items() if k != "metadata"} for row in rows]
+    total = count_entities(entity_type)
+    out: dict = {"entity_type": entity_type, "count": len(rows),
+                 "total_count": total, "offset": offset, "rows": rows}
+    if offset + len(rows) < total:
+        out["truncated"] = {
+            "returned": len(rows),
+            "total": total,
+            "how_to_get_more": f"用 offset={offset + len(rows)} 取下一页，"
+                               "或显式提高 limit",
+        }
+        out["notes"] = [
+            f"已按体积上限只返回 {len(rows)} 行（共 {total} 行）；"
+            "翻页用 offset/limit，metadata 字段需显式传 include_metadata=True",
+        ]
+    return out
 
 
 @mcp.tool(annotations=annotations_for("get_entity"))
