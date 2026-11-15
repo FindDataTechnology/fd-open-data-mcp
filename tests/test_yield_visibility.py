@@ -152,6 +152,25 @@ def test_fleet_yield_sums_rows_new_in_window(session):
     assert fy["rows_new"] == 40 and fy["rows_attempted"] == 160 and fy["runs"] == 2
 
 
+def test_fleet_yield_does_not_count_skip_records_as_runs(session):
+    """`skipped` 是「没派发」的留痕，不是运行次数（unblock-silent-dispatch-stalls 3.3）。
+
+    一条卡住的 open run 会让 reconciler **每跳**落一行 skipped（15 分钟一跳 ⇒
+    一天 96 行），旧判据 `status != "running"` 把它们全数进 runs ⇒ 日报会写
+    「今天 96 次运行」，而实际一次都没派出去。`stalled` 仍计数（它真跑过）。
+    """
+    pol = _mk_policy(session, "y3")
+    _mk_run(session, pol, "success", finished=dt.datetime.now(dt.timezone.utc),
+            rows_attempted=100, rows_new=40)
+    for _ in range(3):
+        _mk_run(session, pol, "skipped")
+    _mk_run(session, pol, "stalled")
+    _mk_run(session, pol, "running")
+    fy = snapshot.fleet_yield(session, hours=24)
+    assert fy["runs"] == 2, fy          # success + stalled；skipped/running 不算
+    assert fy["rows_new"] == 40 and fy["rows_attempted"] == 100
+
+
 # --- 4.1: frozen recurring policy refused, backfill path open -------------------
 
 def test_frozen_window_refusal_detail():
