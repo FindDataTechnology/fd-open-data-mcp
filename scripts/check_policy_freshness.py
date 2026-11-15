@@ -127,6 +127,23 @@ TERMINAL_STATUSES = {"success", *FAILED_STATUSES, *NON_YIELD_OK, "cancelled",
 #: 「判不出」，不变成绿也不变成红。
 KNOWN_STATUSES = OPEN_STATUSES | TERMINAL_STATUSES
 
+# ─── R5 慢下来（成功，但比自己的历史慢几倍）────────────────────────────────
+# 为什么需要它：R0–R4 判的全是**状态**，没有一条判**耗时**。于是「运行成功、但每格
+# 耗时涨了 3–8 倍」这个窗口完全没人看——2026-11-15 实测 policy 1（fund-pilot-series，
+# 每天 06:37Z）：11-05..11-09 稳定 4.5s/计划格，11-11 起 13.5 → 6.8 → 18 → 15s，
+# 11-15 撞上 3h 执行器上限被杀。中间那三天全是 `success`，**一条判据都没报**，
+# 直到被杀才由 R1 说出来，而那时已经丢了三天数据。
+# 判据是**自指的**（对这条策略自己最近若干轮的中位数），所以不吃「绝对耗时」这种
+# 与被抓数据量强相关的口径；计划格数变了也不影响（`plan_cells` 在分母里）。
+#: 至少要有这么多轮可用历史才判——否则「中位数」只是上一轮本身，噪声会被当趋势。
+SLOW_MIN_HISTORY = 5
+#: 最多看最近这么多轮（更早的形态与当前不是同一回事）。
+SLOW_HISTORY_MAX = 10
+#: 慢到历史中位数的几倍才开口。取 3：p1 那三天实测 2.2–4.0 倍，2 倍会被日常波动打中。
+SLOW_FACTOR = 3.0
+#: 还要**绝对**多花这么多秒/格，避免「4.5s 变 14s 只是噪声」这类小基数放大。
+SLOW_MIN_DELTA_SECONDS = 2.0
+
 #: 「读不出原因」的指纹。这些是**已知的留痕缺陷**，不是判断上游好坏的依据。
 OPAQUE_MARKERS = (
     "no terminal state",
@@ -168,7 +185,7 @@ class Finding:
     policy_id: int
     name: str
     rule: str          # latest_failed | repeated_zero_yield | no_recent_run | never_ran
-                       # | dangling_open_run | opaque_reason
+                       # | dangling_open_run | opaque_reason | slowed_down
     detail: str
 
     @property
@@ -233,6 +250,53 @@ def _zero_yield_shape(run: PolicyRun) -> str:
     if run.rows_attempted == 0:
         return f"{plan_txt}，抓取 0 行（上游没有给数据 = 供数中断的形态）"
     return f"{plan_txt}，抓了 {run.rows_attempted} 行却没落地新行"
+
+
+def _per_cell_seconds(run: PolicyRun) -> float | None:
+    """这一轮的「秒/计划格」。读不出（缺 `plan_cells`／没有终态时刻）返回 None。
+
+    为什么用 `plan_cells` 而不是 `rows_attempted`：后者是**行**，一轮几行取决于抓到了
+    多少数据、与被抓数据量强相关；而计划格数在同一策略上是稳定的，能当分母。
+    2026-11-15 就是拿 rows 当分母，把 p1 的「变慢」读成了「量暴增」（差 40 倍的方向）。
+    """
+    if not run.plan_cells or run.plan_cells <= 0:
+        return None
+    started, finished = _as_utc(run.started_at), _as_utc(run.finished_at)
+    if started is None or finished is None:
+        return None
+    seconds = (finished - started).total_seconds()
+    if seconds <= 0:
+        return None
+    return seconds / run.plan_cells
+
+
+def _slow_verdict(terminal: list[PolicyRun]) -> tuple[float, float, int] | None:
+    """(本轮秒/格, 历史中位, 历史轮数)；不足以下结论返回 None。
+
+    `terminal` 必须是**按 started_at 倒序**的终态行，第 0 条是本次判的对象。
+    历史只取 `success`/`zero_yield` 这类「跑到底」的轮次：被杀掉的轮次（failed）
+    本身耗时被上限截断，把它们混进基线会让基线虚高、进而掩盖真实的劣化。
+    """
+    current = _per_cell_seconds(terminal[0]) if terminal else None
+    if current is None:
+        return None
+    history: list[float] = []
+    for r in terminal[1:]:
+        if r.status not in {"success", ZERO_YIELD_STATUS}:
+            continue
+        per_cell = _per_cell_seconds(r)
+        if per_cell is None:
+            continue
+        history.append(per_cell)
+        if len(history) >= SLOW_HISTORY_MAX:
+            break
+    if len(history) < SLOW_MIN_HISTORY:
+        return None
+    ordered = sorted(history)
+    mid = len(ordered) // 2
+    median = (ordered[mid] if len(ordered) % 2 else
+              (ordered[mid - 1] + ordered[mid]) / 2.0)
+    return current, median, len(history)
 
 
 def judge(states: Iterable[PolicyState], *, now: datetime,
@@ -333,6 +397,26 @@ def judge(states: Iterable[PolicyState], *, now: datetime,
             facts.append(f"{label}: 最近一次终态 {latest.status}（合法不产出，不计命中）")
         else:
             facts.append(f"{label}: 最近一次终态 {latest.status}")
+
+        # R5 慢下来：**成功但比自己的历史慢**。只在最新一轮是 success 时判——
+        # 失败那档已经由 R1 说出来了（同一处问题记两次会让命中数失真，同 R3 的选择）。
+        # 它补的是 R0–R4 的结构性空白：那些判据全看**状态**，而劣化是先把耗时拉长、
+        # 再撞上限才变成失败的；等 R1 开口时数据已经丢了好几天（2026-11-15 p1 实测）。
+        if latest.status == "success":
+            verdict = _slow_verdict(terminal)
+            if verdict is not None:
+                current, median, n = verdict
+                if (median > 0 and current >= median * SLOW_FACTOR
+                        and current - median >= SLOW_MIN_DELTA_SECONDS):
+                    findings.append(Finding(
+                        st.policy_id, st.name, "slowed_down",
+                        f"这一轮每计划格 {current:.1f}s，而它自己最近 {n} 轮的中位数是 "
+                        f"{median:.1f}s（{current / median:.1f} 倍）"
+                        f"——运行**成功**、没有报错，所以状态类判据一条都不会响；"
+                        f"按这个斜率会在撞上执行器上限（{executor_ceiling_seconds / 3600:.1f}h）"
+                        f"时被杀，先看上游是不是在限流/变慢，别等它自己好",
+                    ))
+
 
         # R2 沉默：最近一次**应触发时刻**有没有产出
         if not (st.cron_expr or "").strip():
@@ -540,8 +624,66 @@ def _self_test() -> int:
     print(f"  {'✓' if open_ok else '✗'} tick 后 5 分钟跑闸 ⇒ 不报 no_recent_run（拉起宽限内改判上一个 fire）")
     print(f"  {'✓' if closed_ok else '✗'} tick 后 2h5m 跑闸 ⇒ 照报 no_recent_run（宽限不吞真漏跑）")
 
+    slow_ok = True
+
+    def schk(name: str, expect: str, actual: str) -> None:
+        nonlocal slow_ok
+        hit = expect == actual
+        print(f"  {'✓' if hit else '✗'} {name}"
+              + ("" if hit else f"（期望 {expect!r}，实际 {actual!r}）"))
+        slow_ok = slow_ok and hit
+
+    # ── R5 慢下来：成对臂。只换「这一轮花了多久」与「历史够不够」，
+    #    一个必须开口、一个必须闭嘴——少了下半路，「把 3 倍写成 1.5 倍」这种
+    #    改错也能一路绿（数字全对、就是不判）。
+    def run_t(status, hours_ago, minutes, *, cells):
+        return PolicyRun(status=status,
+                         started_at=now - timedelta(hours=hours_ago),
+                         finished_at=now - timedelta(hours=hours_ago) + timedelta(minutes=minutes),
+                         plan_cells=cells)
+
+    def _slow_state(pid, latest_minutes, *, cells=300, history=(15, 15, 15, 15, 15),
+                    hist_cells=200, latest_status="success"):
+        runs = [run_t(latest_status, 5, latest_minutes, cells=cells)]
+        for k, m in enumerate(history, start=1):
+            runs.append(run_t("success", 5 + 24 * k, m, cells=hist_cells))
+        return PolicyState(pid, f"slow-{pid}", "0 6 * * *", "UTC", runs)
+
+    def _kinds(st):
+        return {f.rule for f in judge([st], now=now)[0]}
+
+    slow = judge([_slow_state(21, 195)], now=now)[0]      # 39.0s/格 vs 历史 4.5s/格
+    slow_msg = slow[0].detail if slow else ""
+    schk("R5 成功但慢 8.7 倍 ⇒ 命中 slowed_down", "yes",
+        "yes" if [f.rule for f in slow] == ["slowed_down"] else f"命中={[f.rule for f in slow]}")
+    schk("R5 报文念出两侧的秒/格与历史轮数", "yes",
+        "yes" if ("39.0s" in slow_msg and "4.5s" in slow_msg and "最近 5 轮" in slow_msg)
+        else f"报文={slow_msg[:110]!r}")
+    # 成对臂取 **2.7 倍**（12.0s vs 4.5s）而不是「更快」那一档：更快那一档在阈值
+    # 改成 1.5 时也不会红，等于没验到阈值本身（第一版就是这么漏的）。
+    schk("R5 慢 2.7 倍 ⇒ 不命中（阈值在 3 倍，成对臂）", "no",
+        "yes" if _kinds(_slow_state(22, 60)) else "no")
+    schk("R5 历史只有 4 轮 ⇒ 不判（中位数还不成形）", "no",
+        "yes" if _kinds(_slow_state(23, 195, history=(15, 15, 15, 15))) else "no")
+    schk("R5 缺 plan_cells ⇒ 不判（判不出不是正常）", "no",
+        "yes" if {f.rule for f in judge([PolicyState(24, "slow-24", "0 6 * * *", "UTC", [
+            PolicyRun(status="success", started_at=now - timedelta(hours=5),
+                      finished_at=now - timedelta(hours=2))])], now=now)[0]} else "no")
+    schk("R5 最新一轮是 failed ⇒ 不重复记（R1 已经说过）", "no",
+        "yes" if "slowed_down" in _kinds(_slow_state(25, 195, latest_status="failed")) else "no")
+    # 被杀的轮次不许进基线：它们的历史时长本身被上限截断，混进去会把基线抬高、
+    # 反而掩盖真实劣化。这里 3 个正常历史 + 2 个 failed 历史 ⇒ 可用历史只有 3 条 ⇒ 不判。
+    two_failed = PolicyState(26, "slow-26", "0 6 * * *", "UTC", [
+        run_t("success", 5, 195, cells=300),
+        run_t("success", 29, 15, cells=200), run_t("success", 53, 15, cells=200),
+        run_t("success", 77, 15, cells=200),
+        run_t("failed", 101, 400, cells=200), run_t("failed", 125, 400, cells=200),
+    ])
+    schk("R5 被杀轮次不进基线（3 条可用历史 ⇒ 不判）", "no",
+        "yes" if _kinds(two_failed) else "no")
+
     return 0 if (ok and green and noop_fact and zy_fact and split_ok and und_ok
-                 and tz_ok and bad_ok) else 1
+                 and tz_ok and bad_ok and slow_ok) else 1
 
 
 # ---------------------------------------------------------------- main
