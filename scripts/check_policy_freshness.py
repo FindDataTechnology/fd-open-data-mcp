@@ -113,13 +113,24 @@ FAILED_STATUSES = {"failed", "stalled"}
 #: 写的是「最近一次终态 success」——生产者已经把「供数中断」记进账本了，读的人却
 #: 看不见。面板 cockpit 同期已把它算进 `failures`，这道闸是那一圈里唯一的漏档。
 ZERO_YIELD_STATUS = "zero_yield"
+#: 放弃（surface-abandoned-cells-on-run-row）：执行器这一轮**没有发出去的**请求数。
+#: 与 `zero_yield` 的分界是「抓了没有」而不是「抓到没有」——`zero_yield` 意味着请求发出
+#: 去了、上游一行都没给（去查上游）；`abandoned` 意味着这些格我们主动不抓了（去查那批
+#: (concept, entity) 是不是在任何候选端点都没有数据）。两者同时存在时各自报各自的数，
+#: 不许把一边并进另一边（合并后处置方向就只剩一个了）。
+#:
+#: **刻意不进 `NON_YIELD_OK`**：那一档的词是「合法不产出」，而放弃是**覆盖率损失**——
+#: 放进同一档，读的人只会看到「合法不产出」。也**刻意不判红**：放弃是发放预算的设计
+#: 行为，一个长尾里 40 个实体永远抓不到，逐轮判红就是一道常年红的闸（本仓结论：常年
+#: 红的闸会被无视）。折中是每轮打一条**带数字的事实行**——存在感不降级，但不改 rc。
+ABANDONED_STATUS = "abandoned"
 #: 零产出按**连续次数**判，不按单次：单次「计划了却没抓到」在周末/长假/上游迟发时
 #: 都会出现，逐次报警会得到一道每逢周末必红的闸（本仓已有结论：常年红的闸会被无视）。
 #: 取 3 而不是 2：周末连着两天是常态形态，两天永不够；真断供到第三天就红。
 ZERO_YIELD_STREAK_LIMIT = 3
 NON_YIELD_OK = {"no_op", "redundant", "skipped"}
 TERMINAL_STATUSES = {"success", *FAILED_STATUSES, *NON_YIELD_OK, "cancelled",
-                     ZERO_YIELD_STATUS}
+                     ZERO_YIELD_STATUS, ABANDONED_STATUS}
 #: 认识的全部状态。**不认识的状态出现在最新一跳 ⇒ 判不出**，不许静默走进绿路。
 #: 2026-11-15 量到 policy_runs 里另有 `aborted`（173 行，全在 08-30..09-18，只有 1 行
 #: 属于启用策略且是 09-18 的老行），仓里没有一处定义它在 run 侧的语义（`expander` 里
@@ -167,6 +178,10 @@ class PolicyRun:
     plan_cells: int | None = None
     rows_attempted: int | None = None
     rows_new: int | None = None
+    #: 有多少格**没去抓**（执行器的放弃预算用完了）。`None` 只表示「这一轮没报」，不表示
+    #: 0——列是后加的（alembic 0025），旧执行器、以及迁移还没落地时，读到的都是 None。
+    #: 判「供数中断」与「我们主动不抓」必须分开：前者去查上游，后者去查放弃预算。
+    rows_abandoned: int | None = None
 
 
 @dataclass
@@ -234,6 +249,28 @@ def _is_opaque(detail: str) -> bool:
         return True
     low = detail.lower()
     return any(m.lower() in low for m in OPAQUE_MARKERS)
+
+
+def _abandoned_note(run: PolicyRun) -> str:
+    """「这一轮放弃了多少格」（混合轮里连抓取行数一起念）；**未报**时返回空串。
+
+    `None` 与 0 必须分开：把「没报」写成「放弃了 0 格」正是这一列存在的理由
+    （见 `PolicyRun.rows_abandoned` 的注释）。同理 `0` 也不念——「放弃了 0 格」不是
+    信息，读的人只需要在真放弃过时看到数字。
+
+    混合轮（抓了一些、又放弃了一些）两个数并排念：spec 要求「两个数分开报」，只念
+    放弃数会让「这一轮其实抓了 585 行」消失，而这两件事的结论完全不同。
+    """
+    n = run.rows_abandoned
+    if not n:
+        return ""
+    bits = []
+    if run.rows_attempted:
+        bits.append(f"抓取 {run.rows_attempted} 行")
+    bits.append(f"另有 {n} 格被放弃")
+    return ("、".join(bits)
+            + "（放弃＝执行器的预算用完：这些 (concept, entity) 在候选端点上都没有数据，"
+              "请求**没有发出去**）")
 
 
 def _zero_yield_shape(run: PolicyRun) -> str:
@@ -382,21 +419,44 @@ def judge(states: Iterable[PolicyState], *, now: datetime,
                     break
                 streak += 1
             shape = _zero_yield_shape(latest)
+            note = _abandoned_note(latest)
             if streak >= ZERO_YIELD_STREAK_LIMIT:
                 findings.append(Finding(
                     st.policy_id, st.name, "repeated_zero_yield",
                     f"最近 {streak} 次终态全是零产出（最近一次 "
                     f"{_as_utc(latest.started_at):%Y-%m-%d %H:%M}Z）：{shape}"
-                    f"——连续 {ZERO_YIELD_STREAK_LIMIT} 次以上就不是「恰好没有新数据」，"
+                    + (f"；{note}" if note else "")
+                    + f"——连续 {ZERO_YIELD_STREAK_LIMIT} 次以上就不是「恰好没有新数据」，"
                     f"去看上游是否还在给数据（这条没有报错，job 每次都成功退出）",
                 ))
             else:
                 facts.append(f"{label}: 最近一次终态 zero_yield（{shape}）"
-                             f"——未连续 {ZERO_YIELD_STREAK_LIMIT} 次，只报事实")
+                             + (f"；{note}" if note else "")
+                             + f"——未连续 {ZERO_YIELD_STREAK_LIMIT} 次，只报事实")
+        elif latest.status == ABANDONED_STATUS:
+            # 全放弃：`classify_yield` 只在 attempted==0 **且** rows_abandoned>0 时给这个
+            # 状态，所以它绝不能被读成 zero_yield——「没抓到」与「没去抓」的处置相反。
+            # 只报事实、不判红：放弃是预算的设计行为（长尾里总有一批实体三端点都没数据），
+            # 逐轮判红会得到一道常年红的闸。但**必须带数字念出来**——它此前在账本里
+            # 是 success 的形状，覆盖率掉了多少没人看得见。
+            a = latest.rows_abandoned
+            planned = latest.plan_cells
+            facts.append(
+                f"{label}: 最近一次终态 abandoned（计划 {planned if planned is not None else '?'} 格，"
+                f"其中 {a} 格被放弃、其余格没有产出；抓取 0 次）"
+                f"——这些 (concept, entity) 在候选端点上都没有数据，请求没有发出去；"
+                f"不是供数中断（那档是 zero_yield），是覆盖率问题，不计命中"
+            )
         elif latest.status in NON_YIELD_OK:
-            facts.append(f"{label}: 最近一次终态 {latest.status}（合法不产出，不计命中）")
+            # 混合轮走这里（attempted>0 ⇒ 状态是 redundant/success）：按 spec「两个数分开
+            # 报」，放弃数必须跟着念，否则它被「合法不产出」这句话吞掉。
+            note = _abandoned_note(latest)
+            facts.append(f"{label}: 最近一次终态 {latest.status}"
+                         f"（合法不产出，不计命中）" + (f"；{note}" if note else ""))
         else:
-            facts.append(f"{label}: 最近一次终态 {latest.status}")
+            note = _abandoned_note(latest)
+            facts.append(f"{label}: 最近一次终态 {latest.status}"
+                         + (f"；{note}" if note else ""))
 
         # R5 慢下来：**成功但比自己的历史慢**。只在最新一轮是 success 时判——
         # 失败那档已经由 R1 说出来了（同一处问题记两次会让命中数失真，同 R3 的选择）。
@@ -457,6 +517,9 @@ def judge(states: Iterable[PolicyState], *, now: datetime,
 def load_states(db_url: str, only: str | None = None) -> list[PolicyState]:
     """读启用策略 + 最近 50 次运行。取不到就抛（调用方退 2）。"""
     from sqlalchemy import create_engine, text
+    # 局部导入：`--self-test` 是纯函数自证，本机不一定装了 sqlalchemy
+    # （2026-11-16 实测：放到模块顶层直接 ModuleNotFoundError，连自证都跑不起来）。
+    from sqlalchemy.exc import DBAPIError
 
     # 只读是**连接级**的：psycopg2 会把它变成会话默认，写语句在库侧就被拒，
     # 而不是靠"脚本里没写 insert"这种约定。
@@ -479,15 +542,30 @@ def load_states(db_url: str, only: str | None = None) -> list[PolicyState]:
                 raise RuntimeError("没有匹配的启用策略——判不出，不是全过")
 
             ids = [int(p[0]) for p in policies]
-            runs = conn.execute(text(
+            # `rows_abandoned` 是 2026-11-16 之后才有的列（alembic 0025）。闸是日频、跑在
+            # 同一个库上，而迁移由 planner 镜像的 migrate_stage 建——两者谁先到不确定。
+            # 读不到列**不能**让整道闸退 2（那会把「多了一列」变成全线失明），退回老列读，
+            # 并把 runs 的 rows_abandoned 留成 None =「这一轮没报」，不是 0。
+            base_sql = (
                 "select policy_id, status, started_at, finished_at, coalesce(detail, ''), "
-                "       plan_cells, rows_attempted, rows_new "
+                "       plan_cells, rows_attempted, rows_new{extra} "
                 "from (select policy_id, status, started_at, finished_at, detail, "
-                "             plan_cells, rows_attempted, rows_new, "
-                "             row_number() over (partition by policy_id order by started_at desc) rn "
+                "             plan_cells, rows_attempted, rows_new{extra}, "
+                "             row_number() over (partition by policy_id "
+                "                                order by started_at desc) rn "
                 "        from policy_runs where policy_id = any(:ids)) t "
-                "where rn <= 50 order by policy_id, started_at desc"
-            ), {"ids": ids}).all()
+                "where rn <= 50 order by policy_id, started_at desc")
+            has_abandoned = True
+            try:
+                runs = conn.execute(text(base_sql.format(extra=", rows_abandoned")),
+                                    {"ids": ids}).all()
+            except DBAPIError:
+                # 会话已被这条失败语句污染，先回滚再用老列重跑。
+                conn.rollback()
+                runs = conn.execute(text(base_sql.format(extra="")), {"ids": ids}).all()
+                has_abandoned = False
+                print("ℹ policy_runs 里没有 rows_abandoned 列（alembic 0025 未落地）"
+                      "——本轮放弃数一律按「未报」处理，不按 0", file=sys.stderr)
     finally:
         engine.dispose()
 
@@ -501,6 +579,7 @@ def load_states(db_url: str, only: str | None = None) -> list[PolicyState]:
             plan_cells=r[5],
             rows_attempted=r[6],
             rows_new=r[7],
+            rows_abandoned=(r[8] if has_abandoned else None),
         ))
     return [
         PolicyState(
@@ -518,10 +597,11 @@ def _self_test() -> int:
     """九条分支各证一次，外加两条绿路——省掉绿路，「全都判红」与「判据写反」同形。"""
     now = datetime(2026, 11, 14, 12, 0, tzinfo=timezone.utc)
 
-    def run(status, hours_ago, detail="", *, cells=None, att=None, new=None):
+    def run(status, hours_ago, detail="", *, cells=None, att=None, new=None, ab=None):
         return PolicyRun(status=status,
                          started_at=now - timedelta(hours=hours_ago), detail=detail,
-                         plan_cells=cells, rows_attempted=att, rows_new=new)
+                         plan_cells=cells, rows_attempted=att, rows_new=new,
+                         rows_abandoned=ab)
 
     states = [
         # R1 + R4：最近一次失败，且理由读不出（11-10..11-12 的形态）。
@@ -560,6 +640,34 @@ def _self_test() -> int:
             run("aborted", 5),
             run("success", 29),
         ]),
+        # 全放弃（surface-abandoned-cells-on-run-row）：45 格被放弃、0 次抓取。
+        # 后面紧跟两次 zero_yield **故意凑不出连续 3 次**——放弃不能悄悄累进零产出那条
+        # 连续计数（那是「上游断供」的告警，永远抓不到的长尾会把它变成常年红的闸）。
+        PolicyState(10, "all-abandoned", "0 6 * * *", "UTC", [
+            run("abandoned", 5, cells=630, att=0, new=0, ab=45),
+            run("zero_yield", 29, cells=630, att=0, new=0),
+            run("zero_yield", 53, cells=630, att=0, new=0),
+        ]),
+        # 混合轮：抓了 585 行、又放弃 45 格，一行新数据都没有 ⇒ 状态仍是 redundant。
+        # 两个数必须并排念出来，否则「抓了 585 行」被「合法不产出」吞掉。
+        PolicyState(11, "mixed", "0 6 * * *", "UTC", [
+            run("redundant", 5, cells=630, att=585, new=0, ab=45),
+        ]),
+        # 连续计数的边界：**最新是 zero_yield**，中间夹一次 abandoned，再往前两次零产出。
+        # 正确读数 = 连续 1 次（遇到 abandoned 就断）⇒ 不报；若把 abandoned 当零产出，
+        # 就成了连续 4 次 ⇒ 误报 R1b。p10 那条臂钉不到这里：latest 是 abandoned 时走的是
+        # 另一个分支，那段计数根本没执行（第一版就是这么写的，红证一跑就发现它不承重）。
+        PolicyState(13, "streak-across-abandoned", "0 6 * * *", "UTC", [
+            run("zero_yield", 5, cells=630, att=0, new=0),
+            run("abandoned", 29, cells=630, att=0, new=0, ab=12),
+            run("zero_yield", 53, cells=630, att=0, new=0),
+            run("zero_yield", 77, cells=630, att=0, new=0),
+        ]),
+        # 未报（列缺失或旧执行器）：既不许念成「放弃了 0 格」，也不许念成「供数中断」
+        # 之外的任何新东西——它就是老形态的 zero_yield。
+        PolicyState(12, "not-reported", "0 6 * * *", "UTC", [
+            run("zero_yield", 5, cells=630, att=0, new=0),
+        ]),
     ]
     undetermined: list[str] = []
     findings, facts = judge(states, now=now, undetermined=undetermined)
@@ -591,6 +699,35 @@ def _self_test() -> int:
     # 未知状态必须判不出，而不是静默当成"上一次成功"
     und_ok = any("p9 unknown-status" in u for u in undetermined)
     print(f"  {'✓' if und_ok else '✗'} p9 未知状态 aborted 进 undetermined（{len(undetermined)} 条）")
+
+    # ── 放弃（surface-abandoned-cells-on-run-row）：三路夹具，每路断言**具体词与数字**。
+    # 只断言「有事实行」会把「判据没跑、别的行顶上」读成绿。
+    ab_facts = [f for f in facts if f.startswith("p10 all-abandoned")]
+    # 断言的是**状态标签**（"终态 abandoned"），不是「这行里不出现 zero_yield 这个词」——
+    # 那一版断言被自己的措辞打败了：这行刻意对比两者（"不是供数中断（那档是 zero_yield）"），
+    # 于是「含 zero_yield」恰恰是设计。判据要钉在标签上，不能钉在整行字面上。
+    ab_ok = (bool(ab_facts)
+             and "终态 abandoned" in ab_facts[0]
+             and "45" in ab_facts[0] and "630" in ab_facts[0])
+    print(f"  {'✓' if ab_ok else '✗'} p10 全放弃念成 abandoned + 数字（45 格/计划 630）"
+          f"：{(ab_facts[0][:90] + '…') if ab_facts else '没有事实行'}")
+    # 放弃不许累进零产出的连续计数：p13 = 最新零产出 + 中间一次放弃 + 再往前两次零产出。
+    # 正确读数是连续 1 次；把放弃当零产出就是连续 4 次 ⇒ 误报（而 p10 用 latest=abandoned
+    # 钉不到这里——那条走的是另一个分支，计数根本没执行）。
+    ab_streak_ok = not any(f.policy_id == 13 for f in findings)
+    print(f"  {'✓' if ab_streak_ok else '✗'} p13 放弃不累进 zero_yield 连续计数"
+          f"（最新零产出 +1 放弃 +2 零产出 ⇒ 连续 1 次，不报 R1b）")
+    mixed = [f for f in facts if f.startswith("p11 mixed")]
+    mixed_ok = (bool(mixed) and "585" in mixed[0] and "45" in mixed[0]
+                and "被放弃" in mixed[0] and "redundant" in mixed[0])
+    print(f"  {'✓' if mixed_ok else '✗'} p11 混合轮两个数并排念（抓 585 行 + 放弃 45 格）"
+          f"：{(mixed[0][:90] + '…') if mixed else '没有事实行'}")
+    nr = [f for f in facts if f.startswith("p12 not-reported")]
+    nr_ok = (bool(nr) and "被放弃" not in nr[0] and "zero_yield" in nr[0]
+             and "放弃" not in nr[0])
+    print(f"  {'✓' if nr_ok else '✗'} p12 未报 ≠「放弃 0 格」：只按老形态说 zero_yield"
+          f"：{(nr[0][:90] + '…') if nr else '没有事实行'}")
+    ab_all_ok = ab_ok and ab_streak_ok and mixed_ok and nr_ok
 
     # 时区是判据的一部分：同一条 cron 按 UTC / Asia/Shanghai 解出相距 8 小时的触发时刻
     fire_utc, _ = _prev_fire("17 18 * * 1-5", "UTC", now)
@@ -683,7 +820,7 @@ def _self_test() -> int:
         "yes" if _kinds(two_failed) else "no")
 
     return 0 if (ok and green and noop_fact and zy_fact and split_ok and und_ok
-                 and tz_ok and bad_ok and slow_ok) else 1
+                 and ab_all_ok and tz_ok and bad_ok and slow_ok) else 1
 
 
 # ---------------------------------------------------------------- main

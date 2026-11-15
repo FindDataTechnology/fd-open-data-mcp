@@ -1639,6 +1639,17 @@ def classify_yield(run: PolicyRun) -> str:
     if run.rows_attempted is None or run.rows_new is None:
         return "zero_yield"   # pod died before the first flush reported
     if run.rows_attempted == 0:
+        # Distinguish "the executor stopped issuing fetches" from "it fetched and
+        # upstream gave nothing" (surface-abandoned-cells-on-run-row). Both leave
+        # attempted=0, but the remedies are opposite: the first says these
+        # (concept, entity) pairs have no data on any candidate endpoint (find one
+        # that does, or drop them); the second says the source is down.
+        #
+        # Only when the counter is PRESENT: an executor that predates the column
+        # leaves it NULL, and we must keep the old reading rather than inventing
+        # "everything was abandoned".
+        if getattr(run, "rows_abandoned", None):
+            return "abandoned"
         return "zero_yield"   # planned work, fetched nothing — the outage shape
     if run.rows_new == 0:
         return "redundant"    # fetched, but the window was already complete

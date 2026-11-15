@@ -36,6 +36,11 @@ _STATUS_MAP = {
     "success": "success",
     "redundant": "success",
     "zero_yield": "success",
+    # abandoned (surface-abandoned-cells-on-run-row): completed, it just never
+    # issued some fetches. Mirrored as success for the same reason as zero_yield
+    # — and an unmapped status is not a warning here: `.get()` returns None and
+    # the run is silently dropped from the platform entirely.
+    "abandoned": "success",
     "no_op": "success",
     "failed": "failed",
     "cancelled": "cancelled",

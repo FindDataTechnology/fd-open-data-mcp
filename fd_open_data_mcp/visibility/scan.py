@@ -65,6 +65,15 @@ def _classify(run: PolicyRun) -> str | None:
         return "failed"
     if run.status == "zero_yield":
         return "zero_yield"
+    # abandoned (surface-abandoned-cells-on-run-row) is deliberately NOT an alert
+    # class: it is designed behaviour for (concept, entity) pairs no candidate
+    # endpoint can serve, and it would page on every round for the same entities
+    # forever — a permanently red alarm is one nobody reads. It is still recorded
+    # (the run row carries rows_abandoned) and the digest can surface it; this
+    # branch exists so the status is a named case rather than falling through
+    # silently as "unknown".
+    if run.status == "abandoned":
+        return None
     return None
 
 

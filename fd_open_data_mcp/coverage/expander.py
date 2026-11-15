@@ -348,7 +348,7 @@ def _advance_wave(session: Session, wave: CoverageWave,
         # (found live: 12-chunk waves relaunched for hours at 99% errors).
         terminal = [r for r in runs if r.status != "running"]
         bad = [r for r in terminal
-               if r.status in ("failed", "zero_yield", "refused", "aborted")]
+               if r.status in ("failed", "zero_yield", "abandoned", "refused", "aborted")]
         if len(terminal) >= 2 and len(bad) == len(terminal):
             obs_rows = (session.query(func.count())
                         .filter(SemanticObservation.concept_id.in_(
@@ -406,7 +406,7 @@ def _advance_wave(session: Session, wave: CoverageWave,
         if any(r.status == "running" for r in runs):
             return {"wave": wave.id, "status": "running"}
         bad = [r for r in runs if r.status in
-               ("failed", "zero_yield", "refused")]
+               ("failed", "zero_yield", "abandoned", "refused")]
         rows_new = sum(r.rows_new or 0 for r in runs)
         frac_bad = len(bad) / len(runs) if runs else 1.0
         # Yield evidence is TWO-sourced (defense in depth): the run counters

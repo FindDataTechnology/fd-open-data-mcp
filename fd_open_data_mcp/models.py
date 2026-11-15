@@ -666,6 +666,14 @@ class PolicyRun(Base):
     plan_cells = Column(Integer, nullable=True)
     rows_attempted = Column(Integer, nullable=True)
     rows_new = Column(Integer, nullable=True)
+    # bound-unfetchable-crawl-cells: cells the executor stopped issuing because
+    # the (concept, entity) pair hit its per-run give-up budget. Written by the
+    # pod at close (same SCRAW_JOB_REF channel as rows_*), nullable so "absent"
+    # means "this run's executor did not report" — NOT "zero abandoned".
+    # Without it a fully abandoned run (no fetch issued at all) is
+    # indistinguishable from zero_yield ("fetched successfully, stored nothing"),
+    # and the two have opposite remedies.
+    rows_abandoned = Column(Integer, nullable=True)
     cancelled_by = Column(String(128), nullable=True)  # actor identity when status='cancelled'
 
     policy = relationship("CrawlPolicy", back_populates="runs")
