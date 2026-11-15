@@ -104,3 +104,51 @@ def test_partial_renders_flags_and_degrades(session):
     # home page polls the missed partial
     home = _client().get("/panel")
     assert "/panel/partials/missed" in home.text and "错过的运行" in home.text
+
+
+# ── 清红判据是「跑过」，不是「不是 failed」（unblock-silent-dispatch-stalls）──
+# 规格原文：「the flag clears once a run for the policy records success or the
+# policy is disabled」。旧写法 `status != "failed"` 把**任何**非 failed 都当成
+# 已覆盖 ⇒ 两张本 change 新落下的行（skipped / stalled）会各自把红旗洗掉：
+#   · `skipped`（3.x 单飞跳过留痕）——2026-11-13 那种"整跳被挡住"的情形，
+#     在有了跳过行之后反而**不会**再上榜（本 change 自己造的新盲区）；
+#   · `stalled`（回收器关的悬行）——pod 被 activeDeadline 杀掉、产出未知。
+# 两条断言对修复前代码均为红。
+
+def test_skipped_row_does_not_clear_the_flag(session):
+    """单飞跳过的留痕不算覆盖这一跳，且理由要点名被挡住。"""
+    p = _policy(session)
+    session.add(PolicyRun(
+        policy_id=p.id, status="skipped",
+        started_at=NOW - timedelta(days=1),
+        detail="skipped: blocked by open run 2383 (started 2026-06-13T22:00Z)"))
+    session.commit()
+    flags = missed_runs(session, now=NOW)
+    assert len(flags) == 1, flags
+    assert flags[0]["reason"] == "blocked by single-flight"
+
+
+def test_stalled_row_does_not_clear_the_flag(session):
+    """卡死行（结局未知）不算覆盖，理由要说出"没有终态报告"。"""
+    p = _policy(session)
+    session.add(PolicyRun(
+        policy_id=p.id, status="stalled",
+        started_at=NOW - timedelta(days=1),
+        detail="stalled: no terminal report in 18768s > 10800s; "
+               "Yield unknown, NOT zero"))
+    session.commit()
+    flags = missed_runs(session, now=NOW)
+    assert len(flags) == 1, flags
+    assert flags[0]["reason"] == "stalled without a terminal report"
+
+
+def test_zero_yield_and_no_op_still_clear_the_flag(session):
+    """成对臂：真正跑完的零产出/空计划仍算覆盖 —— 别把「没数据」当「没运行」。"""
+    p = _policy(session)
+    for status in ("zero_yield", "no_op", "redundant"):
+        session.query(PolicyRun).delete()
+        session.add(PolicyRun(policy_id=p.id, status=status,
+                              started_at=NOW - timedelta(hours=1)))
+        session.commit()
+        assert missed_runs(session, now=NOW) == [], status
+
