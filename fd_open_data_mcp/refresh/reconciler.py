@@ -92,6 +92,24 @@ FAILURE_DETAIL_MAX_CHARS = 2000
 DEFAULT_JOB_ACTIVE_DEADLINE_SECONDS = 10800
 JOB_ACTIVE_DEADLINE_ENV = "SCRAW_JOB_ACTIVE_DEADLINE_SECONDS"
 
+# ─── deleting a Job must take its pod with it ────────────────────────────────
+# A bare ``DELETE`` carries no ``DeleteOptions``, and the API's default
+# propagation for that is ``Orphan``: the Job disappears and the pod keeps
+# running with its ownerReference stripped, so nothing can ever collect it — no
+# ttlSecondsAfterFinished (the Job is gone), no reaper, and ``pod-gc`` refuses
+# bare pods by design. Measured on the sibling station path 2026-11-15: three
+# ``reclaim_station`` calls left three ownerReference-less pods still running.
+#
+# For a crawl this is the heavier version of that: ``cancel_run`` deletes a Job
+# whose crawler is still **working**, so Orphan leaves a runaway crawler
+# holding its CPU/memory limits until someone notices by hand.
+#
+# ``Background`` (not Foreground): cancel is a UI action and must return now;
+# Foreground blocks until the pod is actually gone, and containers get their
+# graceful period first.
+_CASCADE = {"apiVersion": "v1", "kind": "DeleteOptions",
+            "propagationPolicy": "Background"}
+
 
 def _active_deadline_seconds() -> int:
     """The Job runtime ceiling, from ``SCRAW_JOB_ACTIVE_DEADLINE_SECONDS``.
@@ -670,14 +688,15 @@ class K8sJobLauncher:
         if self._in_cluster():
             try:
                 self._k8s_api(
-                    "DELETE", f"/apis/batch/v1/namespaces/{self.namespace}/jobs/{job_ref}")
+                    "DELETE", f"/apis/batch/v1/namespaces/{self.namespace}/jobs/{job_ref}",
+                    _CASCADE)
                 return True
             except urllib.error.HTTPError as e:
                 if e.code == 404:  # job already gone (finished / TTL-collected)
                     return False
                 raise
         self._kubectl("delete", "job", job_ref, "-n", self.namespace,
-                      "--ignore-not-found=true")
+                      "--ignore-not-found=true", "--cascade=background")
         return True
 
 
@@ -819,7 +838,8 @@ class ClusterK8sClient:
         """DELETE the Job; False when it is already gone (404)."""
         ns = self.cluster.namespace
         try:
-            self._api("DELETE", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}")
+            self._api("DELETE", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}",
+                      _CASCADE)
             return True
         except urllib.error.HTTPError as e:
             if e.code == 404:

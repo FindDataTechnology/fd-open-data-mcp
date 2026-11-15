@@ -712,6 +712,63 @@ def test_kubectl_poll_reads_json_not_positional_jsonpath(monkeypatch):
     assert launcher.poll("crawl-policy-1-x") == "unknown"
 
 
+def test_cancel_job_delete_cascades_so_the_crawler_pod_dies(monkeypatch):
+    """取消一次爬取要真的杀掉那个 pod。
+
+    `cancel_run` 删的是一个**还在跑**的 Job。裸 DELETE 不带 DeleteOptions 时
+    API 按 `propagationPolicy: Orphan` 处理：Job 消失，pod 被摘掉 ownerReference
+    继续跑 —— 那不是「取消」，是「换了个没人管的方式继续烧 CPU」。
+    2026-11-15 在登同一条链的登录站上实测过这个形态（三个 reclaim 留下三个
+    无 owner 的 pod），这里是同一行的另一半。
+
+    判据落在**请求本身**：集群侧「Job 已经没了」在改动前后一模一样。
+    """
+    from fd_open_data_mcp.refresh.reconciler import K8sJobLauncher
+
+    launcher = K8sJobLauncher()
+    calls: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    monkeypatch.setattr(
+        K8sJobLauncher, "_k8s_api",
+        lambda self, m, p, b=None: calls.append((m, p, b)) or {})
+
+    assert launcher.delete("crawl-policy-1-abc") is True
+    method, path, body = calls[-1]
+    assert method == "DELETE" and path.endswith("/jobs/crawl-policy-1-abc")
+    assert body is not None, (
+        "DELETE 没带 DeleteOptions —— API 默认 Orphan，爬虫 pod 会一直跑下去")
+    assert body.get("propagationPolicy") == "Background", (
+        f"传播策略是 {body.get('propagationPolicy')!r}，必须是 Background："
+        "Foreground 会让面板的取消请求阻塞到 pod 真正退出")
+
+    # kubectl 那半（本地/dev）也要级联，两个传输不许行为不一致
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: False)
+    monkeypatch.setattr(K8sJobLauncher, "_kubectl",
+                        lambda self, *a, **kw: seen.append(a) or "")
+    launcher.delete("crawl-policy-1-abc")
+    assert any(x.startswith("--cascade") for x in seen[-1]), (
+        f"kubectl delete 没带 --cascade（收到 {seen[-1]}）")
+
+
+def test_multicluster_cancel_job_delete_cascades(monkeypatch):
+    """多集群那条路（ClusterK8sClient.delete_job）同样要级联。"""
+    from types import SimpleNamespace
+
+    from fd_open_data_mcp.refresh.reconciler import ClusterK8sClient
+
+    client = ClusterK8sClient(SimpleNamespace(
+        name="cheap", api_server="https://x:6443", namespace="scraw"))
+    calls: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setattr(ClusterK8sClient, "_api",
+                        lambda self, m, p, b=None: calls.append((m, p, b)) or {})
+
+    assert client.delete_job("crawl-policy-1-abc") is True
+    method, path, body = calls[-1]
+    assert method == "DELETE" and path.endswith("/jobs/crawl-policy-1-abc")
+    assert body and body.get("propagationPolicy") == "Background"
+
+
 def test_direct_job_command_carries_no_dsn(monkeypatch):
     """The DSN must never ride on the command line (stop-passing-dsn-on-argv).
 
