@@ -399,11 +399,21 @@ def next_runs(session: Session, now: dt.datetime | None = None) -> list[dict]:
     return out
 
 
+# 状态里"这一跳确实跑过"的那些——漏跑榜只在没有任何一条覆盖它时才亮。
+# 刻意枚举**覆盖**这一侧而不是"不覆盖"那一侧：任何不在表里的状态（含今后新增
+# 的）都按"没覆盖"处理，于是榜会亮出来让人看，而不是被一个没人认识的状态静默
+# 洗绿（fail-closed：假红看得见，假绿看不见）。
+# `failed` / `stalled` / `skipped` 一律不在内：一个没成、一个结局未知、一个根本
+# 没派出去——三者都没有覆盖这次预期运行。
+COVERING_RUN_STATUSES = ("running", "success", "zero_yield", "redundant",
+                         "no_op", "cancelled")
+
+
 def missed_runs(
     session: Session, now: dt.datetime | None = None, grace_min: int | None = None,
 ) -> list[dict]:
     """Enabled policies whose oldest uncovered fire passed more than a grace
-    interval ago without a run recording a (non-failed) outcome
+    interval ago without a run COVERING it (see ``COVERING_RUN_STATUSES``)
     (panel-ops-console).
 
     Uses the same cron/timezone base (``last_run_at``/``created_at``, policy
@@ -412,9 +422,11 @@ def missed_runs(
     could have covered; using the latest fire instead would let every new fire
     reset the clock and a nightly policy would never flag. Default grace =
     max(2× schedule interval, 30 min) from that fire's cadence. Reasons are
-    heuristic labels: an open run started before the fire → "blocked by
-    single-flight"; a failed run with a "refused:" detail → "plan refused";
-    any other failed run → "launch failed"; otherwise "never launched".
+    heuristic labels taken from the LATEST attempt: ``stalled`` → "stalled
+    without a terminal report"; ``skipped`` → "blocked by single-flight"; a
+    "refused:" detail → "plan refused"; any other failure → "launch failed";
+    an open run started before the fire → "blocked by single-flight";
+    otherwise "never launched".
     Display-only — no automatic re-launch.
     """
     now = now or dt.datetime.now(dt.timezone.utc)
@@ -441,15 +453,25 @@ def missed_runs(
                                   PolicyRun.started_at >= fire_naive)
                           .order_by(PolicyRun.started_at.desc())
                           .all())
-            # the flag clears once a run records a (non-failed) outcome; a
-            # refused/failed attempt keeps the flag up with its reason
-            if any(r.status != "failed" for r in runs_after):
+            # 清红的判据是"这一跳确实跑过"，不是"不是 failed"。
+            # `skipped` 是 3.x 新落的行、`stalled` 是回收器新落的行，两者都
+            # **没有覆盖**这一跳；旧写法 `status != "failed"` 会把它们当成
+            # 已覆盖 ⇒ 2026-11-13 那种"18:17 那跳被单飞跳过"的情形会被这张
+            # 榜静默洗绿，而这正是这张榜存在的理由（本 change 若不清算，
+            # 等于用新行把唯一的探测器关掉）。
+            if any(r.status in COVERING_RUN_STATUSES for r in runs_after):
                 continue
             reason = "never launched"
             if runs_after:
-                refused = any((r.detail or "").startswith("refused:")
-                              for r in runs_after)
-                reason = "plan refused" if refused else "launch failed"
+                latest = runs_after[0]  # started_at desc：最近一次尝试
+                if latest.status == "stalled":
+                    reason = "stalled without a terminal report"
+                elif latest.status == "skipped":
+                    reason = "blocked by single-flight"  # 跳过行写着被谁挡住
+                elif (latest.detail or "").startswith("refused:"):
+                    reason = "plan refused"
+                else:
+                    reason = "launch failed"
             elif (session.query(PolicyRun)
                   .filter(PolicyRun.policy_id == p.id,
                           PolicyRun.started_at < fire_naive,
