@@ -599,73 +599,119 @@ def proxy_health_cmd(outcomes):
 
 @cli.command("list-sources")
 def list_sources_cmd():
-    """List all available data sources and their integration status."""
-    from pathlib import Path
-    
-    # Define all known data sources with descriptions
-    ALL_SOURCES = {
-        "akshare": ("✅ Full support", "A 股股票、基金等金融数据"),
-        "yfinance": ("✅ Full support", "Yahoo Finance 全球股票数据"),
-        "cn-report": ("✅ Full support", "中国财务报告提取 (26 个工具)"),
-        "nbs-gdp": ("✅ Full support", "国家统计局 GDP 数据"),
-        "cisa-industry": ("✅ Full support", "工信部行业统计"),
-        "amac-fund": ("✅ Full support", "基金业协会 AMAC 数据"),
-        "shfe-metal-futures": ("✅ Full support", "上海期货交易所金属期货"),
-        "agriculture": ("✅ Full support", "大连商品交易所农产品期货"),
-        "cme-agricultural-futures": ("✅ Full support", "CME 农产品期货"),
-        "chemicals": ("✅ Full support", "化工产品价格与 PMI"),
-        "electronics": ("✅ Full support", "电子信息产业协会数据"),
-        "nonferrous": ("✅ Full support", "有色金属产业数据"),
-        "flowers-kifc": ("✅ Full support", "昆明国际花卉拍卖中心"),
-        "fin_platforms": ("✅ Full support", "Wind 金融终端数据"),
-        "sac-securities": ("✅ Full support", "证券业协会交易统计"),
-        "edgar": ("✅ Full support", "SEC EDGAR - requires EDGAR_IDENTITY env var"),
-        "wbgapi": ("✅ Full support", "World Bank data API"),
-        "cn-gov": ("⚠️  Read-only registry", "China government open information"),
-        "world": ("⚠️  Read-only catalog", "CKAN + Chinese NBS Statistics"),
+    """List every known data source and whether anything can actually fetch it.
+
+    Sources are enumerated from the integration points themselves — the runner
+    table, the direct-fetch set, the adapter registry and the provider catalog —
+    so this command cannot report a source as supported when nothing serves it,
+    and it cannot omit a source that does have a dispatch path.
+
+    Status legend:
+      ✅ registered     a runner / direct fetch path / adapter can serve it
+      ⚠️  catalog only   registered in the provider catalog, but no fetch path
+      ❌ not wired       only a curated description exists; nothing can fetch it
+
+    "via" names the integration point(s) backing each row (runner / direct /
+    adapter / provider). Descriptions are curated and say what a source *is*,
+    never whether it works.
+    """
+    from fd_open_data_mcp.adapters import registered as registered_adapters
+    from fd_open_data_mcp.catalog.providers import PROVIDERS
+    from fd_open_data_mcp.fetch.instrumentation import direct_sources
+    from fd_open_data_mcp.fetch.runner import RUNNERS
+
+    # Curated: what each source *is*. Never carries a status claim — status is
+    # derived below from the integration points.
+    DESCRIPTIONS = {
+        "akshare": "A 股股票、基金等金融数据",
+        "yfinance": "Yahoo Finance 全球股票数据",
+        "cn-report": "中国财务报告提取（26 个工具，直连）",
+        "nbs": "国家统计局直连 runner",
+        "nbs-gdp": "国家统计局 GDP 数据",
+        "cisa-industry": "工信部行业统计",
+        "amac-fund": "基金业协会 AMAC 数据",
+        "shfe-metal-futures": "上海期货交易所金属期货",
+        "agriculture": "大连商品交易所农产品期货",
+        "cme-agricultural-futures": "CME 农产品期货",
+        "chemicals": "化工产品价格与 PMI",
+        "electronics": "电子信息产业协会数据",
+        "nonferrous": "有色金属产业数据",
+        "flowers-kifc": "昆明国际花卉拍卖中心",
+        "fin_platforms": "Wind 金融终端数据",
+        "sac-securities": "证券业协会交易统计",
+        "edgar": "SEC EDGAR - requires EDGAR_IDENTITY env var",
+        "wbgapi": "World Bank data API",
+        "datacommons": "Data Commons 统计库",
+        "polygon": "Polygon.io 行情 API（直连，POLYGON_API_KEY）",
+        "cn-gov": "China government open information",
+        "world": "CKAN + Chinese NBS Statistics",
     }
-    
-    # Check which adapters exist and are registered
-    adapter_dir = Path(__file__).parent / "adapters"
-    existing_adapters = set()
-    for f in adapter_dir.glob("*.py"):
-        if f.name != "__init__.py" and not f.name.startswith("_"):
-            existing_adapters.add(f.stem.replace("-", "_"))
-    
-    # Determine status for each source
+
+    runners = set(RUNNERS)
+    direct = set(direct_sources())
+    adapters = {source for source, _command in registered_adapters()}
+    providers = set(PROVIDERS)
+
+    all_sources = sorted(
+        set(DESCRIPTIONS) | runners | direct | adapters | providers
+    )
+
     results = []
-    for source, (status, description) in sorted(ALL_SOURCES.items()):
-        # Normalize adapter name (replace hyphens with underscores)
-        adapter_name = source.replace("-", "_")
-        
-        # Check if adapter exists
-        if adapter_name in existing_adapters:
-            existing = "✅ Adapter file found"
+    for source in all_sources:
+        via = []
+        if source in runners:
+            via.append("runner")
+        if source in direct:
+            via.append("direct")
+        if source in adapters:
+            via.append("adapter")
+        if source in providers:
+            via.append("provider")
+
+        # A dispatch path is what makes a source fetchable; the provider catalog
+        # alone only declares it.
+        if source in runners or source in direct or source in adapters:
+            status = "✅ registered"
+        elif source in providers:
+            status = "⚠️  catalog only"
         else:
-            existing = "❌ No adapter file"
-        
+            status = "❌ not wired"
+
         results.append({
             "source": source,
             "status": status,
-            "description": description,
-            "adapter_file": existing,
+            "via": via,
+            "description": DESCRIPTIONS.get(source, ""),
         })
-    
-    # Print formatted output
-    print("\n📊 Data Sources Available")
-    print("=" * 80)
-    print(f"{'Source':<25} {'Status':<25} {'Description'}")
-    print("-" * 80)
-    
+
+    summary = {
+        "total": len(results),
+        "registered": sum(1 for r in results if r["status"] == "✅ registered"),
+        "catalog_only": sum(1 for r in results if r["status"].startswith("⚠️")),
+        "not_wired": sum(1 for r in results if r["status"].startswith("❌")),
+    }
+
+    print("\n📊 Data Sources")
+    print("=" * 96)
+    print(f"{'Source':<25} {'Status':<18} {'Via':<24} {'Description'}")
+    print("-" * 96)
+
     for r in results:
-        print(f"{r['source']:<25} {r['status']:<25} {r['description']}")
-    
-    print("-" * 80)
-    print(f"\nTotal: {len(results)} data sources")
-    print(f"Fully integrated: {sum(1 for r in results if 'Full support' in r['status'])}")
-    
+        print(
+            f"{r['source']:<25} {r['status']:<18} "
+            f"{','.join(r['via']) or '-':<24} {r['description']}"
+        )
+
+    print("-" * 96)
+    print(
+        f"\nTotal: {summary['total']} data sources"
+        f" — registered: {summary['registered']}"
+        f" / catalog only: {summary['catalog_only']}"
+        f" / not wired: {summary['not_wired']}"
+    )
+
     # Return JSON for programmatic use
-    _echo({"sources": results})
+    _echo({"sources": results, "summary": summary})
 
 
 # ─── crawl visibility (add-crawl-visibility) ────────────────────────────────

@@ -65,6 +65,15 @@ logger = logging.getLogger(__name__)
 _DIRECT_SOURCES = frozenset({"cn-report", "polygon", "datacommons"})
 
 
+def direct_sources() -> frozenset[str]:
+    """Sources that bypass the proxy pool (read-only view of ``_DIRECT_SOURCES``).
+
+    Exposed for introspection: ``list-sources`` reports which sources have a
+    direct fetch path, and it must read the same set this module dispatches on.
+    """
+    return _DIRECT_SOURCES
+
+
 class SourceUnavailable(Exception):
     """Every proxy for a source is OPEN/saturated - caller should fail over to
     the next source in the plan's ranked_sources chain."""
