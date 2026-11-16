@@ -10,6 +10,13 @@ import contextlib
 import os
 from typing import Any, Optional
 
+# Single definition lives in ``errors``; re-exported so the long-standing
+# ``from fd_open_data_mcp.fetch.runner import FetchError`` keeps working. Two
+# separate classes used to live here and in ``errors``, and the adapters raising
+# the other one were silently invisible to ``except FetchError`` in dispatch and
+# instrumentation.
+from fd_open_data_mcp.errors import FetchError
+
 
 def _extract_http_attrs(exc: BaseException) -> tuple[Optional[int], Optional[str]]:
     """Best-effort extract ``(status_code, response_text)`` from an upstream
@@ -28,21 +35,6 @@ def _extract_http_attrs(exc: BaseException) -> tuple[Optional[int], Optional[str
     text = getattr(resp, "text", None)
     status_code = int(status) if status is not None else None
     return status_code, text
-
-
-class FetchError(Exception):
-    """Raised when an upstream call cannot be made or fails.
-
-    Carries optional ``status_code``/``response_text`` so ``ban_rules.classify``
-    can match status-based and body-based rules (HTTP 403/429/captcha). Both are
-    ``None`` for connection-level errors (no HTTP response to inspect).
-    """
-
-    def __init__(self, message: str, status_code: Optional[int] = None,
-                 response_text: Optional[str] = None) -> None:
-        super().__init__(message)
-        self.status_code = status_code
-        self.response_text = response_text
 
 
 def run_akshare(command: str, params: dict) -> Any:
@@ -296,7 +288,14 @@ RUNNERS: dict[str, Any] = {
 def run_upstream(source: str, command: str, params: dict) -> Any:
     runner = RUNNERS.get(source)
     if runner is None:
-        raise FetchError(f"no runner for source {source}")
+        # Name the miss AND the alternatives in one line: the caller is usually a
+        # plan row built from a manifest whose ``real_source`` drifted from the
+        # runner table's key (``nbs`` vs ``nbs-gdp`` was exactly that), so "what
+        # you *can* call" is the part that ends the investigation.
+        raise FetchError(
+            f"no runner for source {source}; "
+            f"available: {', '.join(sorted(RUNNERS))}"
+        )
     return runner(command, params)
 
 
