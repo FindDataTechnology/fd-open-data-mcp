@@ -491,3 +491,18 @@ def test_segment_lane_failure_does_not_kill_consolidated():
     assert "不是「该公司没有分部披露」" in out["segments"]["note"]
     # 合并头条照常交付：两条车道的可用性彼此独立
     assert out["financials"]["营业收入"][0]["value"] == 1_503_511_000
+
+def test_segments_limit_truncation_is_flagged():
+    """LIMIT 撞满时必须自报截断：缺成员与没披露是两件事，观感却完全相同。"""
+    tools = _tools(_FakeSession(
+        stocks=_STOCKS, points=[_cons(1_503_511_000)],
+        segments=[_seg("FLWS.BloomNetMember", 96_832_000)],
+    ))
+    out = tools["flower_company_financials"](ticker="FLWS", limit=1)
+    seg = out["segments"]
+    assert seg["truncated"] is True
+    assert any("truncated=true" in n for n in seg["notes"])
+
+    out2 = tools["flower_company_financials"](ticker="FLWS", limit=40)
+    assert out2["segments"]["truncated"] is False
+    assert not any("truncated=true" in n for n in out2["segments"]["notes"])

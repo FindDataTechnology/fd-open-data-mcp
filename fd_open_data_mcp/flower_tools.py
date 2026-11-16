@@ -294,14 +294,19 @@ def _fmt_point(row: dict) -> dict:
     }
 
 
-def _segment_points(session, ticker: str, limit: int = MAX_SERIES_ROWS) -> list[dict]:
+def _segment_points(session, ticker: str, limit: int = MAX_SERIES_ROWS) -> tuple[list[dict], bool]:
     """取该 ticker 的**分部**观测（实体类型 ``segment``，实体码 ``<TICKER>.<Member>``）。
+
+    返回 ``(rows, truncated)``。**必须带截断信号**：一条序列里有多个成员，
+    ``LIMIT`` 截在最中间会让「某成员某期没披露」与「被 limit 截掉了」完全同形，
+    而这两种情形在渲染层处置相反（前者标不可得、后者该调大 limit）。
+    同族于「结论性存在判断禁止接 head/limit 截断」。
 
     与 ``_points`` 分开查：分部实体是独立实体（`entity_type='segment'`），
     挂在股票实体下会与合并口径混成一条序列 —— 而两者**不可相加**。
     """
     if not ticker:
-        return []
+        return [], False
     rows = session.execute(
         text(
             """
@@ -319,7 +324,8 @@ def _segment_points(session, ticker: str, limit: int = MAX_SERIES_ROWS) -> list[
         ),
         {"prefix": f"{ticker}.%", "code": SEGMENT_CONCEPT, "lim": int(limit)},
     ).mappings().all()
-    return [dict(r) for r in rows]
+    out = [dict(r) for r in rows]
+    return out, len(out) >= int(limit)
 
 
 _SEGMENT_SHARE_FORMULA = "segment_revenue / consolidated_revenue"
@@ -392,8 +398,13 @@ def _segment_rows(segment_points: list[dict], consolidated_points: list[dict]) -
     return out
 
 
-def _segment_payload(rows: list[dict], error: Exception | None) -> dict:
-    """``segments`` 块：分部行 + 不可得原因。读失败报 error，零行报 unavailable。"""
+def _segment_payload(rows: list[dict], error: Exception | None,
+                     truncated: bool = False) -> dict:
+    """``segments`` 块：分部行 + 不可得原因 + 截断信号。
+
+    读失败报 error，零行报 unavailable，``truncated`` 为真时明说「可能缺成员/缺期」——
+    三者是三种不同的世界，不许压成同一个空列表。
+    """
     if error is not None:
         return {
             "status": "error",
@@ -406,6 +417,7 @@ def _segment_payload(rows: list[dict], error: Exception | None) -> dict:
     out: dict[str, Any] = {
         "rows": rows,
         "count": len(rows),
+        "truncated": bool(truncated),
         "members": sorted({r["member"] for r in rows}),
         "notes": [
             "分部收入与合并营收**不可相加**：分部是该轴上的分解，口径与合并不同",
@@ -414,6 +426,11 @@ def _segment_payload(rows: list[dict], error: Exception | None) -> dict:
             "占比缺失时为 null 并给出原因，不写 0、不入排名",
         ],
     }
+    if truncated:
+        out["notes"].append(
+            "本次结果被 limit 截断（truncated=true）：可能缺成员或缺期。"
+            "「没披露」与「被截掉」不能互相替代，请看 count 与 limit 再判"
+        )
     if not rows:
         out["unavailable"] = [_unavailable(
             "该实体在维度抽取车道内零分部观测",
@@ -841,11 +858,11 @@ def register_flower_tools(mcp: FastMCP) -> None:
             # 合并头条归事件面、分部归维度单元，两者的可用性彼此独立。
             seg_error: Exception | None = None
             seg_rows: list[dict] = []
+            seg_truncated = False
             try:
-                seg_rows = _segment_rows(
-                    _segment_points(s, str(meta.get("ticker") or ticker or ""), limit),
-                    points,
-                )
+                seg_points, seg_truncated = _segment_points(
+                    s, str(meta.get("ticker") or ticker or ""), limit)
+                seg_rows = _segment_rows(seg_points, points)
             except Exception as exc:  # noqa: BLE001
                 seg_error = exc
             share = meta.get("flower_revenue_share")
@@ -890,7 +907,7 @@ def register_flower_tools(mcp: FastMCP) -> None:
                 },
                 "flower_revenue_share": share,
                 "share_unavailable_reason": reason,
-                "segments": _segment_payload(seg_rows, seg_error),
+                "segments": _segment_payload(seg_rows, seg_error, seg_truncated),
                 "artifact": {
                     "verified": meta.get("verified"),
                     "lanes": meta.get("lanes"),
