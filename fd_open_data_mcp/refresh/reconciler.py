@@ -205,6 +205,48 @@ def _job_failure_summary(job_ref: str, namespace: str, pods: list[dict],
     return out
 
 
+def _job_condition_summary(job_ref: str, body: dict | None) -> str | None:
+    """Failure evidence that outlives the pod: the Job object's own conditions.
+
+    The pod is the best witness (exit code + log tail) but it is collected long
+    before the Job is (found live 2026-11-17: ``crawl-policy-8-*`` and
+    ``crawl-policy-2659-*`` both had 0 pods yet their Job objects still carried
+    ``Failed/BackoffLimitExceeded`` and ``Failed/DeadlineExceeded``). Reading only
+    the pods collapsed those two causes into the same "pod 已回收，无终态可抓"
+    string, which `crawl-run-telemetry` forbids ("该合成 SHALL NOT 因 pod 随后被
+    回收而失效" / "该 pod 被垃圾回收后，事后仍能凭该记录定位失败原因").
+
+    Returns None when the Job carries no Failed condition, so the caller keeps
+    its terse non-empty fallback instead of inventing a reason.
+    """
+    if not isinstance(body, dict):
+        return None
+    bits = []
+    for cond in (body.get("status") or {}).get("conditions") or []:
+        if not isinstance(cond, dict) or cond.get("status") != "True":
+            continue
+        ctype = cond.get("type")
+        if ctype not in ("Failed", "FailureTarget"):
+            continue
+        reason = (cond.get("reason") or "").strip()
+        message = (cond.get("message") or "").strip()
+        piece = str(ctype)
+        if reason:
+            piece += f"/{reason}"
+        if message:
+            piece += f": {message[:200]}"
+        bits.append(piece)
+    if not bits:
+        return None
+    out = f"job {job_ref} failed; Job conditions: " + " | ".join(dict.fromkeys(bits))
+    deadline = (body.get("spec") or {}).get("activeDeadlineSeconds")
+    if isinstance(deadline, int):
+        out += f"; activeDeadlineSeconds={deadline}"
+    if len(out) > FAILURE_DETAIL_MAX_CHARS:
+        out = out[:FAILURE_DETAIL_MAX_CHARS] + "…"
+    return out
+
+
 def _job_state(status: dict) -> str:
     """Map a Job's ``status`` object to running/success/failed/deadline_exceeded.
 
@@ -535,7 +577,12 @@ class K8sJobLauncher:
                              "-c", "crawler", f"--tail={lines}")
 
     def diagnose(self, job_ref: str) -> str | None:
-        """Terminal-state evidence for a failed Job's pods; None = pods gone.
+        """Terminal-state evidence for a failed Job; None = nothing readable.
+
+        Pods first (exit code + log tail), then the Job object's own conditions:
+        the pod is usually collected long before the Job, and dropping to the
+        terse "pod 已回收" note while the Job still names the cause is the defect
+        `_job_condition_summary` exists to close.
 
         Best-effort by contract — an API failure reads as 'no evidence'; the
         close path's fallback note still keeps the run's error non-empty."""
@@ -545,8 +592,30 @@ class K8sJobLauncher:
             logger.warning("failure diagnosis failed for job %s",
                            job_ref, exc_info=True)
             return None
-        return _job_failure_summary(job_ref, self.namespace, pods,
-                                    self.pod_log_tail)
+        summary = _job_failure_summary(job_ref, self.namespace, pods,
+                                       self.pod_log_tail)
+        if summary:
+            return summary
+        return _job_condition_summary(job_ref, self.job_body(job_ref))
+
+    def job_body(self, job_ref: str) -> dict | None:
+        """The Job object itself; None when unreadable (TTL-collected, 403, …).
+
+        Both transports: in-cluster talks to the API directly, out-of-cluster
+        shells out to kubectl — a fallback that only worked on one of them would
+        leave the other silently opaque again."""
+        if self._in_cluster():
+            try:
+                return self._k8s_api(
+                    "GET", f"/apis/batch/v1/namespaces/{self.namespace}/jobs/{job_ref}")
+            except Exception:  # noqa: BLE001 - evidence is best-effort
+                return None
+        try:
+            out = self._kubectl("get", "job", job_ref, "-n", self.namespace,
+                                "-o", "json")
+            return json.loads(out) if out else None
+        except Exception:  # noqa: BLE001 - evidence is best-effort
+            return None
 
     def deadline_seconds(self, job_ref: str) -> int | None:
         """spec.activeDeadlineSeconds of a launched Job (None when unreadable)."""
@@ -670,6 +739,18 @@ class ClusterK8sClient:
         return self._api_text(
             "GET", f"/api/v1/namespaces/{ns}/pods/{pod}"
                    f"/log?container=crawler&tailLines={lines}")
+
+    def job_body(self, name: str) -> dict | None:
+        """The Job object itself; None when unreadable (TTL-collected, 403, …).
+
+        The fallback witness after the pod is gone: `status.conditions` still
+        separates BackoffLimitExceeded from DeadlineExceeded (see
+        `_job_condition_summary`)."""
+        ns = self.cluster.namespace
+        try:
+            return self._api("GET", f"/apis/batch/v1/namespaces/{ns}/jobs/{name}")
+        except Exception:  # noqa: BLE001 - evidence is best-effort
+            return None
 
     def delete_job(self, name: str) -> bool:
         """DELETE the Job; False when it is already gone (404)."""
@@ -1039,8 +1120,11 @@ class MultiClusterLauncher:
             logger.warning("failure diagnosis failed for job %s",
                            job_ref, exc_info=True)
             return None
-        return _job_failure_summary(job_ref, cluster.namespace, pods,
-                                    client.pod_log_tail)
+        summary = _job_failure_summary(job_ref, cluster.namespace, pods,
+                                       client.pod_log_tail)
+        if summary:
+            return summary
+        return _job_condition_summary(job_ref, client.job_body(job_name))
 
     def delete(self, job_ref: str) -> bool:
         if "/" not in job_ref:

@@ -214,6 +214,126 @@ def test_reclaimed_pod_falls_back_to_nonempty_note(session):
     assert "pod 已回收" in run.detail
 
 
+# ─── the Job object outlives the pod (2026-11-17) ────────────────────────────
+# Live evidence these two fixtures come from: on 2026-11-17 both failed Jobs had
+# 0 pods (pod-gc had reaped them) while their own status.conditions still named
+# two DIFFERENT causes. The reconciler read only the pods, so policy_runs.detail
+# said the same "pod 已回收，无终态可抓" for both — which crawl-run-telemetry
+# forbids ("该合成 SHALL NOT 因 pod 随后被回收而失效").
+
+_BACKOFF_JOB = {
+    "spec": {"activeDeadlineSeconds": 10800},
+    "status": {"conditions": [
+        {"type": "FailureTarget", "status": "True",
+         "reason": "BackoffLimitExceeded",
+         "message": "Job has reached the specified backoff limit"},
+        {"type": "Failed", "status": "True",
+         "reason": "BackoffLimitExceeded",
+         "message": "Job has reached the specified backoff limit"},
+    ]},
+}
+_DEADLINE_JOB = {
+    "spec": {"activeDeadlineSeconds": 10800},
+    "status": {"conditions": [
+        {"type": "FailureTarget", "status": "True",
+         "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"},
+        {"type": "Failed", "status": "True",
+         "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"},
+    ]},
+}
+
+
+def test_job_conditions_survive_pod_reclamation():
+    """No pod left, but the Job still names the cause and the deadline."""
+    line = reconciler._job_condition_summary("cheap9/crawl-policy-8-x", _BACKOFF_JOB)
+    assert line and "BackoffLimitExceeded" in line
+    assert "Job has reached the specified backoff limit" in line
+    assert "activeDeadlineSeconds=10800" in line
+
+
+def test_job_conditions_keep_the_two_causes_apart():
+    """Paired arm: the defect was that both runs read as ONE opaque sentence.
+
+    Asserting the strings that differ (and that the other cause's reason is
+    absent) is what makes this arm bite — a test asserting only "non-empty"
+    passes with the old fallback still in place.
+    """
+    backoff = reconciler._job_condition_summary("cheap9/j1", _BACKOFF_JOB)
+    deadline = reconciler._job_condition_summary("cheap9/j2", _DEADLINE_JOB)
+    assert backoff and deadline and backoff != deadline
+    assert "DeadlineExceeded" in deadline
+    assert "BackoffLimitExceeded" not in deadline
+    assert "BackoffLimitExceeded" in backoff
+    assert "DeadlineExceeded" not in backoff
+
+
+def test_job_conditions_absent_keeps_the_terse_fallback():
+    """No conditions / unreadable Job -> None, so the close path still writes
+    its terse non-empty note instead of inventing a reason."""
+    assert reconciler._job_condition_summary("cheap9/x", None) is None
+    assert reconciler._job_condition_summary("cheap9/x", {}) is None
+    assert reconciler._job_condition_summary(
+        "cheap9/x", {"status": {"conditions": [
+            {"type": "Complete", "status": "True"}]}}) is None
+    # a Failed condition that never went True carries no verdict
+    assert reconciler._job_condition_summary(
+        "cheap9/x", {"status": {"conditions": [
+            {"type": "Failed", "status": "False"}]}}) is None
+
+
+def test_multi_cluster_diagnose_falls_back_to_the_job(monkeypatch):
+    """Wiring: when the cluster has no pods left, diagnose must ask the Job.
+
+    The pod-only version returned None here, and `_synthesize_failure_detail`
+    then wrote the opaque note while the Job object still held the reason.
+    """
+    class _FakeClient:
+        def __init__(self, cluster):
+            self.cluster = cluster
+
+        def pods_for_job(self, name):
+            return []
+
+        def job_body(self, name):
+            assert name == "crawl-policy-8-x"
+            return _BACKOFF_JOB
+
+        def pod_log_tail(self, pod, lines=0):
+            raise AssertionError("no pod to read")
+
+    class _FakeCluster:
+        name = "cheap9"
+        namespace = "scraw"
+
+    class _Launcher(reconciler.MultiClusterLauncher):
+        def _session(self):
+            class _Q:
+                def query(self, *a, **k):
+                    return self
+
+                def filter_by(self, **k):
+                    return self
+
+                def first(self):
+                    return _FakeCluster()
+
+            class _S:
+                def query(self, *a, **k):
+                    return _Q()
+
+                def close(self):
+                    pass
+
+            return _S()
+
+    monkeypatch.setattr(reconciler, "ClusterK8sClient", _FakeClient)
+    detail = _Launcher().diagnose("cheap9/crawl-policy-8-x")
+    assert detail and "BackoffLimitExceeded" in detail
+    assert "pod 已回收" not in detail
+
+
 def test_legacy_schedules_table_is_not_executed(session):
     cid = _register(session)
     session.add(Schedule(concept_id=cid, cron_expr="* * * * *", timezone="UTC", enabled=True))
