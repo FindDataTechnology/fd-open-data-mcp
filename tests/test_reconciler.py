@@ -890,3 +890,146 @@ def test_diagnose_that_raises_itself_is_reported_not_swallowed():
 
     detail = _synthesize_failure_detail(Raising(), "cheap/job-1")
     assert "诊断未完成" in detail and "RuntimeError" in detail
+
+
+# ─── the Job object outlives the pod (2026-11-17) ────────────────────────────
+# Live evidence these fixtures come from: on 2026-11-17 two failed jobs on
+# cheap9/scraw had 0 pods left (reaped) while their own status.conditions still
+# named two DIFFERENT causes — crawl-policy-8 BackoffLimitExceeded,
+# crawl-policy-2659 DeadlineExceeded. Reading only the pods wrote the same
+# "pod 已回收，无终态可抓" for both, which crawl-run-telemetry forbids
+# ("该合成 SHALL NOT 因 pod 随后被回收而失效").
+
+_BACKOFF_JOB = {
+    "spec": {"activeDeadlineSeconds": 10800},
+    "status": {"conditions": [
+        {"type": "FailureTarget", "status": "True",
+         "reason": "BackoffLimitExceeded",
+         "message": "Job has reached the specified backoff limit"},
+        {"type": "Failed", "status": "True",
+         "reason": "BackoffLimitExceeded",
+         "message": "Job has reached the specified backoff limit"},
+    ]},
+}
+_DEADLINE_JOB = {
+    "spec": {"activeDeadlineSeconds": 10800},
+    "status": {"conditions": [
+        {"type": "FailureTarget", "status": "True",
+         "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"},
+        {"type": "Failed", "status": "True",
+         "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"},
+    ]},
+}
+
+
+def test_job_conditions_survive_pod_reclamation():
+    """No pod left, but the Job still names the cause and the deadline."""
+    line = reconciler._job_condition_summary("cheap9/crawl-policy-8-x", _BACKOFF_JOB)
+    assert line and "BackoffLimitExceeded" in line
+    assert "Job has reached the specified backoff limit" in line
+    assert "activeDeadlineSeconds=10800" in line
+
+
+def test_job_conditions_keep_the_two_causes_apart():
+    """Paired arm: the defect was that both runs read as ONE opaque sentence.
+
+    Asserting the strings that differ (and that the other cause's reason is
+    absent) is what makes this arm bite — an arm asserting only "non-empty"
+    stays green with the old fallback still in place.
+    """
+    backoff = reconciler._job_condition_summary("cheap9/j1", _BACKOFF_JOB)
+    deadline = reconciler._job_condition_summary("cheap9/j2", _DEADLINE_JOB)
+    assert backoff and deadline and backoff != deadline
+    assert "DeadlineExceeded" in deadline
+    assert "BackoffLimitExceeded" not in deadline
+    assert "BackoffLimitExceeded" in backoff
+    assert "DeadlineExceeded" not in backoff
+
+
+def test_job_conditions_absent_keeps_the_terse_fallback():
+    """No conditions / unreadable Job -> None, so the close path still writes
+    its terse non-empty note instead of inventing a reason."""
+    assert reconciler._job_condition_summary("cheap9/x", None) is None
+    assert reconciler._job_condition_summary("cheap9/x", {}) is None
+    assert reconciler._job_condition_summary(
+        "cheap9/x", {"status": {"conditions": [
+            {"type": "Complete", "status": "True"}]}}) is None
+    # a Failed condition that never went True carries no verdict
+    assert reconciler._job_condition_summary(
+        "cheap9/x", {"status": {"conditions": [
+            {"type": "Failed", "status": "False"}]}}) is None
+
+
+def test_k8s_launcher_diagnose_asks_the_job_when_pods_are_gone(monkeypatch):
+    """In-cluster transport: pods gone -> the Job body is read, not skipped.
+
+    Both transports get their own arm because a fallback wired into only one
+    of them leaves the other deployment shape as opaque as before.
+    """
+    from fd_open_data_mcp.refresh.reconciler import K8sJobLauncher
+
+    calls: list[str] = []
+
+    def fake_api(self, method, path, body=None):
+        calls.append(path)
+        if "/pods" in path:
+            return {"items": []}
+        assert path.endswith("/jobs/crawl-policy-8-x"), path
+        return _BACKOFF_JOB
+
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api", fake_api)
+
+    detail = K8sJobLauncher(namespace="scraw").diagnose("crawl-policy-8-x")
+    assert detail and "BackoffLimitExceeded" in detail
+    assert "pod 已回收" not in detail
+    assert any("/jobs/crawl-policy-8-x" in c for c in calls)
+
+
+def test_multi_cluster_diagnose_falls_back_to_the_job(monkeypatch):
+    """Wiring: when the cluster has no pods left, diagnose must ask the Job.
+
+    The pod-only version returned None here, and `_synthesize_failure_detail`
+    then wrote the opaque note while the Job object still held the reason.
+    """
+    from types import SimpleNamespace
+
+    from fd_open_data_mcp.refresh.reconciler import MultiClusterLauncher
+
+    class _FakeClient:
+        def __init__(self, cluster):
+            self.cluster = cluster
+
+        def pods_for_job(self, name):
+            return []
+
+        def job_body(self, name):
+            assert name == "crawl-policy-8-x"
+            return _BACKOFF_JOB
+
+        def pod_log_tail(self, pod, lines=0):
+            raise AssertionError("no pod to read")
+
+    class _FakeSession:
+        def query(self, *a, **k):
+            return self
+
+        def filter_by(self, **k):
+            return self
+
+        def first(self):
+            return SimpleNamespace(name="cheap9", namespace="scraw",
+                                   id=9, runtime_hints=None)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(reconciler, "ClusterK8sClient", _FakeClient)
+    monkeypatch.setattr(MultiClusterLauncher, "_session", lambda self: _FakeSession())
+
+    detail = MultiClusterLauncher().diagnose("cheap9/crawl-policy-8-x")
+    assert detail and "BackoffLimitExceeded" in detail
+    assert "pod 已回收" not in detail
+
