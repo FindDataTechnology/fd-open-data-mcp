@@ -50,8 +50,9 @@ R_KIFA = (
 )
 R_EDINET = "该数据当前不可得：日股 EDINET API key 未申请，票符亦未上游核实"
 R_US_SEGMENT = (
-    "该数据当前不可得：美股分部收入需从 10-K instance 抽取"
-    "（company facts 已剥离维度），该通道尚未实施"
+    "该数据当前不可得：美股分部收入来自 10-K/10-Q instance 的维度事实"
+    "（company facts 剥离维度，抽不出分部）。抽取车道已实施，"
+    "此处为 null 表示该实体/该期在车道内零分部观测 —— 逐条原因见 segments 块的 unavailable"
 )
 #: 实测（2026-11-08）：`sec-edgar-facts` 的底账原先只跑过 12 家餐饮票符，
 #: 五家花卉美股从未被抓过——抽取器落地后（`flower_extractors/sec_edgar_facts.py`）
@@ -120,6 +121,11 @@ _FINANCIAL_ZH = {
 
 #: 观测行的 unit 列只写 ``currency``（不带币种）；币种按注册地补，避免跨市场混算。
 _CURRENCY_BY_REGION = {"CN": "CNY", "US": "USD", "JP": "JPY"}
+
+#: 分部收入的概念码（真源：`spiders/sec-xbrl-segment` 从申报 XBRL instance 的维度事实抽取，
+#: 经 `scripts/register_flower_segments.py` 注册；成员名逐字来自人工审校的
+#: `docs/flower-segment-caliber.yaml`，不做名称相似度匹配）。
+SEGMENT_CONCEPT = "flower.segment.revenue"
 
 MAX_SERIES_ROWS = 5000
 
@@ -286,6 +292,134 @@ def _fmt_point(row: dict) -> dict:
         "granularity": row.get("granularity"),
         "fetched_at": row["fetched_at"].isoformat() if row["fetched_at"] else None,
     }
+
+
+def _segment_points(session, ticker: str, limit: int = MAX_SERIES_ROWS) -> list[dict]:
+    """取该 ticker 的**分部**观测（实体类型 ``segment``，实体码 ``<TICKER>.<Member>``）。
+
+    与 ``_points`` 分开查：分部实体是独立实体（`entity_type='segment'`），
+    挂在股票实体下会与合并口径混成一条序列 —— 而两者**不可相加**。
+    """
+    if not ticker:
+        return []
+    rows = session.execute(
+        text(
+            """
+            SELECT e.code AS entity_code, c.code AS concept_code, c.unit AS concept_unit,
+                   o.date, o.value, o.unit, o.source_used, o.granularity, o.fetched_at
+            FROM semantic_observations o
+            JOIN concepts c ON c.id = o.concept_id
+            JOIN entities e ON e.id = o.entity_id
+            WHERE e.entity_type = 'segment'
+              AND e.code LIKE :prefix
+              AND c.code = :code
+            ORDER BY o.date DESC, e.code
+            LIMIT :lim
+            """
+        ),
+        {"prefix": f"{ticker}.%", "code": SEGMENT_CONCEPT, "lim": int(limit)},
+    ).mappings().all()
+    return [dict(r) for r in rows]
+
+
+_SEGMENT_SHARE_FORMULA = "segment_revenue / consolidated_revenue"
+
+
+def _segment_rows(segment_points: list[dict], consolidated_points: list[dict]) -> list[dict]:
+    """分部行 + **派生**占比。占比带分子/分母与公式，分母只作引用、不重复交付。
+
+    三条口径（spec flower-financial-segmentation）：
+
+    * 分部值只来自维度单元（``source_used='sec-xbrl-instance'``），合并值只在
+      ``revenue_share.denominator`` 里作为**分母引用**出现 —— 看板不得把它当分部值渲染；
+    * 占比是派生物、必须带 ``derived: true`` 与构成，否则读的人会当申报披露；
+    * 分母找不到（期间或粒度没对齐）⇒ ``revenue_share: null`` + 原因，**绝不写 0**。
+    """
+    denom_by: dict[tuple, dict] = {}
+    for p in consolidated_points:
+        if p.get("concept") == "financials.revenue":
+            denom_by[(str(p.get("date")), p.get("granularity"))] = p
+
+    out: list[dict] = []
+    for p in segment_points:
+        value = _coerce_value(p["value"])
+        row = {
+            "entity_code": p["entity_code"],
+            "member": str(p["entity_code"]).split(".", 1)[-1],
+            "date": p["date"],
+            "granularity": p.get("granularity"),
+            "value": value,
+            "unit": p["unit"] or p.get("concept_unit"),
+            "source_used": p["source_used"],
+            "as_of": p["date"],
+            "fetched_at": (p["fetched_at"].isoformat() if p.get("fetched_at") else None),
+        }
+        denom = denom_by.get((str(p.get("date")), p.get("granularity")))
+        if denom is None:
+            row["revenue_share"] = None
+            row["revenue_share_unavailable_reason"] = (
+                "同期合并营业收入不在本载荷内（期间或粒度未对齐）——"
+                "占比不可得与占比为 0 是两件事"
+            )
+        elif not denom.get("value"):
+            row["revenue_share"] = None
+            row["revenue_share_unavailable_reason"] = "分母为 0 或不可用，占比无定义"
+        else:
+            dv = float(denom["value"])
+            row["revenue_share"] = {
+                "value": round(value / dv, 6),
+                "derived": True,
+                "formula": _SEGMENT_SHARE_FORMULA,
+                "numerator": {
+                    "concept": SEGMENT_CONCEPT,
+                    "value": value,
+                    "unit": row["unit"],
+                    "source_used": row["source_used"],
+                    "date": row["date"],
+                    "granularity": row["granularity"],
+                },
+                "denominator": {
+                    "concept": denom.get("concept"),
+                    "value": dv,
+                    "unit": denom.get("unit"),
+                    "source_used": denom.get("source_used"),
+                    "date": denom.get("date"),
+                    "granularity": denom.get("granularity"),
+                },
+                "note": "派生物，非申报披露；分母口径或期间变化会改变占比",
+            }
+        out.append(row)
+    return out
+
+
+def _segment_payload(rows: list[dict], error: Exception | None) -> dict:
+    """``segments`` 块：分部行 + 不可得原因。读失败报 error，零行报 unavailable。"""
+    if error is not None:
+        return {
+            "status": "error",
+            "error": error.__class__.__name__,
+            "detail": f"分部观测读取失败：{error}",
+            "rows": [],
+            "count": 0,
+            "note": "这是读取失败，不是「该公司没有分部披露」",
+        }
+    out: dict[str, Any] = {
+        "rows": rows,
+        "count": len(rows),
+        "members": sorted({r["member"] for r in rows}),
+        "notes": [
+            "分部收入与合并营收**不可相加**：分部是该轴上的分解，口径与合并不同",
+            "占比为派生值（derived=true）：分子=分部收入、分母=同期合并营收；"
+            "不是申报披露的占比，分母口径或期间变化会改变它",
+            "占比缺失时为 null 并给出原因，不写 0、不入排名",
+        ],
+    }
+    if not rows:
+        out["unavailable"] = [_unavailable(
+            "该实体在维度抽取车道内零分部观测",
+            "可能是：未披露分部 / 成员不在人工审校口径内 / 对账未过（逐条留痕在抽取单元）",
+        )]
+    return out
 
 
 def _fin_lane_reason(lane: str) -> str | None:
@@ -702,6 +836,18 @@ def register_flower_tools(mcp: FastMCP) -> None:
             by_concept: dict[str, list[dict]] = {}
             for p in points:
                 by_concept.setdefault(p["concept"], []).append(p)
+
+            # 分部是**另一条车道**（维度抽取单元），读失败不能把合并口径一起判死：
+            # 合并头条归事件面、分部归维度单元，两者的可用性彼此独立。
+            seg_error: Exception | None = None
+            seg_rows: list[dict] = []
+            try:
+                seg_rows = _segment_rows(
+                    _segment_points(s, str(meta.get("ticker") or ticker or ""), limit),
+                    points,
+                )
+            except Exception as exc:  # noqa: BLE001
+                seg_error = exc
             share = meta.get("flower_revenue_share")
             lane = str((meta.get("lanes") or ["none"])[0])
             reason = None
@@ -744,6 +890,7 @@ def register_flower_tools(mcp: FastMCP) -> None:
                 },
                 "flower_revenue_share": share,
                 "share_unavailable_reason": reason,
+                "segments": _segment_payload(seg_rows, seg_error),
                 "artifact": {
                     "verified": meta.get("verified"),
                     "lanes": meta.get("lanes"),
@@ -752,6 +899,9 @@ def register_flower_tools(mcp: FastMCP) -> None:
                 "as_of": _today(),
                 "notes": [
                     "合并口径财务：分部口径与合并口径不可相加，分部合计通常小于合并营收",
+                    "segments 块的分部收入由维度抽取单元产出（source_used=sec-xbrl-instance，"
+                    "成员名来自人工审校口径）；其中的占比是**派生值**，带公式与分子分母，"
+                    "分母引用同期合并营收、不作为分部值重复交付",
                     "花卉占比真源为分部/主营构成披露，未披露或口径不可比的一律 null（不写 0、不入排名）",
                     "季频：财务数据期间以各点 date 为准，不是本工具的 as_of",
                 ],
