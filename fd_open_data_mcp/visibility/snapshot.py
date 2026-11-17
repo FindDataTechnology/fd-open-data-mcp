@@ -547,31 +547,65 @@ NOT_A_RUN_STATUSES = ("running", "skipped")
 
 
 def fleet_yield(session: Session, hours: int = 24) -> dict:
-    """Total rows_new / rows_attempted across runs in the window — the single
-    number that makes a zero-acquisition DAY visible (spec: digest reports
-    fleet yield).
+    """Rows landed across runs in the window, split by executor.
+
+    The single number that makes a zero-acquisition DAY visible (spec: digest
+    reports fleet yield). Read it as «rows landed», **not** «rows new»: the
+    `direct` scripts upsert with ON CONFLICT DO UPDATE and hand the same counter
+    to both columns (measured 2026-11-16: 97/97 direct runs in 30 days have
+    `rows_attempted == rows_new`; 4 of 5 scripts call `report_run_yield(n, n)`).
+    Their contribution is re-written rows, and in the measured window they were
+    99.3 % of the summed `rows_new` — so a total labelled «new rows» overstates
+    acquisition by two orders of magnitude.
+
+    `by_executor` lets a reader see the two populations apart; runs whose policy
+    row is gone land in `rows_new_unattributed` so no rows leave the accounting
+    (invariant, asserted in the tests:
+    ``sum(by_executor.values()) + rows_new_unattributed == rows_new``).
 
     The run COUNT excludes the two statuses that are not runs: `running`
     (still in flight, counted on its own line) and `skipped` (3.x single-flight
     skip record — never dispatched, yet one stuck open run makes the
     reconciler write one every tick, so counting them would report "96 runs
     today" for a policy that dispatched nothing). Sums are unaffected either
-    way: skip rows carry no yield counters.
+    way: skip rows carry no yield counters. **The split query uses the same
+    predicate** — if the total excluded `skipped` while the buckets kept them,
+    the invariant above would stop holding.
     """
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
     since_naive = since.replace(tzinfo=None)
+    in_window = (PolicyRun.started_at > since_naive,
+                 PolicyRun.status.notin_(NOT_A_RUN_STATUSES))
     row = (
         session.query(
             func.coalesce(func.sum(PolicyRun.rows_attempted), 0),
             func.coalesce(func.sum(PolicyRun.rows_new), 0),
             func.count(PolicyRun.id),
         )
-        .filter(PolicyRun.started_at > since_naive,
-                PolicyRun.status.notin_(NOT_A_RUN_STATUSES))
+        .filter(*in_window)
         .one()
     )
+    # LEFT JOIN, not INNER: a deleted policy must not make its history vanish
+    # from a number whose whole job is «did anything land».
+    by_executor: dict[str, int] = {}
+    unattributed = 0
+    for executor, total in (
+        session.query(CrawlPolicy.executor,
+                      func.coalesce(func.sum(PolicyRun.rows_new), 0))
+        .select_from(PolicyRun)
+        .outerjoin(CrawlPolicy, CrawlPolicy.id == PolicyRun.policy_id)
+        .filter(*in_window)
+        .group_by(CrawlPolicy.executor)
+        .all()
+    ):
+        if executor:
+            by_executor[str(executor)] = int(total or 0)
+        else:
+            unattributed = int(total or 0)
     return {"rows_attempted": int(row[0]), "rows_new": int(row[1]),
-            "runs": int(row[2]), "window_hours": hours}
+            "runs": int(row[2]), "window_hours": hours,
+            "by_executor": by_executor,
+            "rows_new_unattributed": unattributed}
 
 
 # --- running runs (add-panel-crawl-observability) -----------------------------

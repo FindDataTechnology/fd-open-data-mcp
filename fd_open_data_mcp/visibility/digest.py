@@ -50,6 +50,28 @@ def _tz_offset(tz: ZoneInfo) -> str:
     return f"UTC{off[:3]}:{off[3:]}" if off else "UTC"
 
 
+def _yield_line(fy: dict) -> str:
+    """Total rows landed first (a zero day must still read at a glance), then the
+    per-executor split.
+
+    The split is rendered generically instead of naming `scrapy`/`direct`: a third
+    executor appearing later must show up here rather than be silently folded into
+    the total — «rows present in the sum but invisible in the breakdown» is the
+    failure this line exists to prevent.
+    """
+    total = fy.get("rows_new", 0)
+    parts = ", ".join(
+        f"{name} {n}"
+        for name, n in sorted((fy.get("by_executor") or {}).items(),
+                              key=lambda kv: (-kv[1], kv[0]))
+    ) or "no runs with counters"
+    unattributed = fy.get("rows_new_unattributed") or 0
+    tail = f", unattributed {unattributed}" if unattributed else ""
+    return (f"  ACQUIRED {total} rows landed "
+            f"(of {fy.get('rows_attempted', 0)} attempted, {fy.get('runs', 0)} runs) — "
+            f"{parts}{tail}")
+
+
 def format_digest(snap: dict, tz: ZoneInfo, coverage: dict | None = None) -> tuple[str, str]:
     """Render the snapshot into a (title, body) WeChat message."""
     gen = snap.get("generated_at", "")[:10] or dt.datetime.now(tz).date().isoformat()
@@ -93,9 +115,11 @@ def format_digest(snap: dict, tz: ZoneInfo, coverage: dict | None = None) -> tup
 
     lines: list[str] = []
     lines.append(f"YESTERDAY — {len(runs)} runs: {tally}   STALE: {n_stale}")
-    # fleet yield: the single number that makes a zero-acquisition day visible
-    lines.append(f"  ACQUIRED {fy.get('rows_new', 0)} new rows "
-                 f"(of {fy.get('rows_attempted', 0)} attempted, {fy.get('runs', 0)} runs)")
+    # fleet yield: the single number that makes a zero-acquisition day visible.
+    # 「landed」而不是「new」：direct 脚本是全量 upsert，它们的计数是**写入行**，
+    # 实测占这个总和 99.3%（split-fleet-yield-by-executor）。两个人口必须分开念，
+    # 否则一个跑着的快照脚本会让「今天什么都没采到」看起来健康。
+    lines.append(_yield_line(fy))
     lines.append("  datasource       ok      err    circuit")
     for s in src_rows[:12]:
         circ = circuits.get(s["datasource"])
