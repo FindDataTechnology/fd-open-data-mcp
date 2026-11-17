@@ -342,9 +342,11 @@ def _segment_rows(segment_points: list[dict], consolidated_points: list[dict]) -
     * 分母找不到（期间或粒度没对齐）⇒ ``revenue_share: null`` + 原因，**绝不写 0**。
     """
     denom_by: dict[tuple, dict] = {}
+    denom_dates: dict[str, set] = {}
     for p in consolidated_points:
         if p.get("concept") == "financials.revenue":
             denom_by[(str(p.get("date")), p.get("granularity"))] = p
+            denom_dates.setdefault(str(p.get("date")), set()).add(p.get("granularity"))
 
     out: list[dict] = []
     for p in segment_points:
@@ -363,10 +365,22 @@ def _segment_rows(segment_points: list[dict], consolidated_points: list[dict]) -
         denom = denom_by.get((str(p.get("date")), p.get("granularity")))
         if denom is None:
             row["revenue_share"] = None
-            row["revenue_share_unavailable_reason"] = (
-                "同期合并营业收入不在本载荷内（期间或粒度未对齐）——"
-                "占比不可得与占比为 0 是两件事"
-            )
+            # 判词必须点名**当事的粒度值**：只写「期间或粒度未对齐」的话，读的人
+            # 无法区分「这期没披露合并数」与「两车道把同一期标成了不同 granularity」
+            # —— 后者要靠改写入侧解决，前者是覆盖缺口，处置完全相反。
+            # （同族：判词不印当事的事实值＝每轮都得不到答案）
+            same_date = denom_dates.get(str(p.get("date")))
+            if same_date:
+                row["revenue_share_unavailable_reason"] = (
+                    f"同期有合并营收但粒度不可比：分母 granularity={sorted(map(str, same_date))}、"
+                    f"分部 granularity={p.get('granularity')!r} —— "
+                    f"两者不是同一长度窗口，直接相除会得出错误占比"
+                )
+            else:
+                row["revenue_share_unavailable_reason"] = (
+                    f"该期（{p.get('date')}）没有合并营业收入观测 —— "
+                    f"占比不可得与占比为 0 是两件事"
+                )
         elif not denom.get("value"):
             row["revenue_share"] = None
             row["revenue_share_unavailable_reason"] = "分母为 0 或不可用，占比无定义"

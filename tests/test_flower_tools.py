@@ -471,7 +471,27 @@ def test_segments_granularity_mismatch_is_not_compared():
         segments=[_seg("FLWS.BloomNetMember", 96_832_000, gran="year")],
     ))
     out = tools["flower_company_financials"](ticker="FLWS")
-    assert out["segments"]["rows"][0]["revenue_share"] is None
+    row = out["segments"]["rows"][0]
+    assert row["revenue_share"] is None
+    # 判词必须点名当事的两个粒度值：只写「粒度未对齐」的话，
+    # 「这期没披露」与「两车道标成了不同粒度」读起来一模一样，而处置相反。
+    reason = row["revenue_share_unavailable_reason"]
+    assert "granularity=['quarter']" in reason
+    assert "'year'" in reason
+
+
+def test_segments_missing_denominator_says_which_period():
+    """分母根本没有时，判词要点名是哪一期，不能与「粒度不可比」共用一句话。"""
+    tools = _tools(_FakeSession(
+        stocks=_STOCKS,
+        points=[_cons(1_503_511_000, d=date(2026, 9, 27), gran="year")],
+        segments=[_seg("FLWS.BloomNetMember", 96_832_000)],
+    ))
+    out = tools["flower_company_financials"](ticker="FLWS")
+    reason = out["segments"]["rows"][0]["revenue_share_unavailable_reason"]
+    assert "2026-06-28" in reason
+    assert "没有合并营业收入观测" in reason
+    assert "粒度不可比" not in reason
 
 
 def test_segments_zero_rows_is_unavailable_not_empty_ok():
