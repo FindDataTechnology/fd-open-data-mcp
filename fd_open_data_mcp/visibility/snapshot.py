@@ -22,7 +22,7 @@ import logging
 from typing import Optional
 
 from croniter import croniter
-from sqlalchemy import and_, func
+from sqlalchemy import and_, case, func
 from sqlalchemy.orm import Session
 from zoneinfo import ZoneInfo
 
@@ -520,7 +520,18 @@ def redundant_streaks(session: Session, n: int = _REDUNDANT_STREAK_N) -> list[di
 def fleet_yield(session: Session, hours: int = 24) -> dict:
     """Total rows_new / rows_attempted across runs in the window — the single
     number that makes a zero-acquisition DAY visible (spec: digest reports
-    fleet yield)."""
+    fleet yield).
+
+    split-fleet-yield-by-executor: the total is ALSO split by the run's executor
+    via a LEFT JOIN on ``crawl_policies.executor``. Why LEFT not INNER — a run
+    whose policy row was deleted must land in ``rows_new_unattributed`` rather
+    than vanish (the spec's "run without a policy row is not silently dropped"
+    scenario). The invariant callers/tests rely on:
+        sum(by_executor.values()) + rows_new_unattributed == rows_new
+
+    ``rows_new``/``rows_attempted`` keep their original meaning and value; the
+    split is additive so no existing consumer breaks.
+    """
     since = dt.datetime.now(dt.timezone.utc) - dt.timedelta(hours=hours)
     since_naive = since.replace(tzinfo=None)
     row = (
@@ -528,13 +539,30 @@ def fleet_yield(session: Session, hours: int = 24) -> dict:
             func.coalesce(func.sum(PolicyRun.rows_attempted), 0),
             func.coalesce(func.sum(PolicyRun.rows_new), 0),
             func.count(PolicyRun.id),
+            # LEFT JOIN: NULL executor = policy row gone → unattributed bucket.
+            func.coalesce(
+                func.sum(case((CrawlPolicy.executor == "scrapy",
+                               PolicyRun.rows_new), else_=0)), 0),
+            func.coalesce(
+                func.sum(case((CrawlPolicy.executor == "direct",
+                               PolicyRun.rows_new), else_=0)), 0),
+            func.coalesce(
+                func.sum(case((CrawlPolicy.id.is_(None),
+                               PolicyRun.rows_new), else_=0)), 0),
+            func.coalesce(
+                func.sum(case((CrawlPolicy.id.is_(None),
+                               PolicyRun.rows_attempted), else_=0)), 0),
         )
+        .outerjoin(CrawlPolicy, PolicyRun.policy_id == CrawlPolicy.id)
         .filter(PolicyRun.started_at > since_naive,
                 PolicyRun.status != "running")
         .one()
     )
     return {"rows_attempted": int(row[0]), "rows_new": int(row[1]),
-            "runs": int(row[2]), "window_hours": hours}
+            "runs": int(row[2]), "window_hours": hours,
+            "by_executor": {"scrapy": int(row[3]), "direct": int(row[4])},
+            "rows_new_unattributed": int(row[5]),
+            "rows_attempted_unattributed": int(row[6])}
 
 
 # --- running runs (add-panel-crawl-observability) -----------------------------

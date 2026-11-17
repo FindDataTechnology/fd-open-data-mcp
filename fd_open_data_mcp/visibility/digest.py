@@ -70,9 +70,21 @@ def format_digest(snap: dict, tz: ZoneInfo, coverage: dict | None = None) -> tup
     lines: list[str] = []
     lines.append(f"YESTERDAY — {len(runs)} runs: {n_succ} ✅ {n_fail} ❌ "
                  f"{n_zero} 0️⃣ {n_redun} ♻️ {n_noop} ⏭️   STALE: {n_stale}")
-    # fleet yield: the single number that makes a zero-acquisition day visible
-    lines.append(f"  ACQUIRED {fy.get('rows_new', 0)} new rows "
-                 f"(of {fy.get('rows_attempted', 0)} attempted, {fy.get('runs', 0)} runs)")
+    # fleet yield: the single number that makes a zero-acquisition day visible.
+    # split-fleet-yield-by-executor: name the total as "rows landed", not "new
+    # rows" — for direct scripts rows_new counts rows WRITTEN by an upsert, so
+    # calling the mixed total "new" overstates acquisition ~143x. Print the two
+    # executor buckets alongside so the reader can see which population it is.
+    by = fy.get("by_executor") or {}
+    unattributed = fy.get("rows_new_unattributed", 0)
+    yield_line = (
+        f"  ACQUIRED {fy.get('rows_new', 0)} rows landed "
+        f"(of {fy.get('rows_attempted', 0)} attempted, {fy.get('runs', 0)} runs) "
+        f"— scrapy crawls {by.get('scrapy', 0)}, direct scripts {by.get('direct', 0)}"
+    )
+    if unattributed:
+        yield_line += f", unattributed {unattributed}"
+    lines.append(yield_line)
     lines.append("  datasource       ok      err    circuit")
     for s in src_rows[:12]:
         circ = circuits.get(s["datasource"])
