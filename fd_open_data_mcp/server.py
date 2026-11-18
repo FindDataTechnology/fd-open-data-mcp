@@ -1377,6 +1377,11 @@ def read(concept_id: int | str, entity_type: str | None = None,
         cid = concept_id if isinstance(concept_id, int) else None
         if cid is None and isinstance(concept_id, str) and concept_id.strip().isdigit():
             cid = int(concept_id.strip())
+        # Public face narrows the DATA range too, not just the tool list
+        # (openspec: public-read-surface). No-op on every other face.
+        from fd_open_data_mcp.public_face import assert_concept_visible
+
+        assert_concept_visible(s, cid if cid is not None else concept_id)
         concept = s.get(Concept, cid) if cid is not None else None
 
         if concept is not None:
@@ -1500,6 +1505,11 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
         cid = concept_id if isinstance(concept_id, int) else None
         if cid is None and isinstance(concept_id, str) and concept_id.strip().isdigit():
             cid = int(concept_id.strip())
+        # Public face narrows the DATA range too, not just the tool list
+        # (openspec: public-read-surface). No-op on every other face.
+        from fd_open_data_mcp.public_face import assert_concept_visible
+
+        assert_concept_visible(s, cid if cid is not None else concept_id)
         concept = s.get(Concept, cid) if cid is not None else None
 
         if concept is None:
@@ -2077,6 +2087,28 @@ def crossborder_merchant_status(platform: str = "tiktok_shop") -> dict:
     }
 
 
+def _apply_configured_face() -> str:
+    """Trim the registered surface to the configured face (openspec: public-read-surface).
+
+    Runs once at startup, BEFORE any transport opens. Selection happens at the
+    registration layer on purpose: a call-time check would list a tool and then
+    refuse every call, which misleads the visitor and leaks the tool name first.
+
+    Absent/blank ``FD_OPEN_DATA_FACE`` means the historical behavior — every
+    tool registered, nothing removed (byte-for-byte).
+    """
+    from fd_open_data_mcp.public_face import apply_face, resolve_face
+
+    face = resolve_face()
+    if face == "full":
+        return face
+    kept = apply_face(mcp, face)
+    logging.getLogger(__name__).info(
+        "open-data face %r active: %d tools registered", face, len(kept)
+    )
+    return face
+
+
 def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8300) -> None:
     """Run the FastMCP server.
 
@@ -2089,6 +2121,8 @@ def main(transport: str = "stdio", host: str = "127.0.0.1", port: int = 8300) ->
     When ``MCP_BEARER_TOKEN`` is set, http requests must carry the matching
     bearer token (401 otherwise); without it serving is unchanged.
     """
+    _apply_configured_face()
+
     if transport == "stdio":
         mcp.run()
         return

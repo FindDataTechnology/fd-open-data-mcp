@@ -1,0 +1,129 @@
+{
+  "schema": "mcp-tool-surface/v1",
+  "server": "open-data-public",
+  "entry_path": "/market-public",
+  "product_line": "wire",
+  "hosting": ["shared-instance"],
+  "description": "柏讯（wire 线）公开只读数据面：给对外 agent（产品介绍副驾）用的最小数据能力——浏览已核验的概念与实体、解析实体、按实体+概念读真实数据行、读四个垂类的公开读数。写面、爬取控制、策略、认证、覆盖报告一律不在本面。",
+  "face": {
+    "env": "FD_OPEN_DATA_FACE",
+    "value": "public",
+    "why": "同镜像按 face 切，与 facet-ops-mcp 的 registry|market 同构；选择在注册层发生，不在调用层。"
+  },
+  "data_scope": {
+    "concepts": "verified = true AND deprecated = false",
+    "why": "verified 是本仓既有的「已核验」标注（生产库 2631 条中 1033 verified，1607 deprecated）。新增一列会与既有语义重叠且要回填。",
+    "entities": "全部（公开名录：stock / city / industry / fund / segment / organization / person / trial）",
+    "why_entities": "实体是公开名录（股票代码、城市、行业分类）；person / trial 只返回名称与类型，不返回元数据正文。"
+  },
+  "tools": [
+    {
+      "name": "list_concepts",
+      "group": "catalog",
+      "why": "访客问「你们有哪些数据」时唯一诚实的答案来源；只列已核验且未废弃的行。"
+    },
+    {
+      "name": "list_entities",
+      "group": "catalog",
+      "why": "实体维度：让访客知道覆盖哪些股票/城市/行业，而不是听形容词。"
+    },
+    {
+      "name": "resolve_entity",
+      "group": "entity",
+      "why": "把访客说的名字（「茅台」「深圳」）解析成实体，是后续读数动作的必要入口。"
+    },
+    {
+      "name": "get_entity",
+      "group": "entity",
+      "why": "已知代码直接取实体事实，比搜索省一步且不扩大数据面。"
+    },
+    {
+      "name": "semantic_search_entities",
+      "group": "search",
+      "why": "自然语言找实体（「卖白酒的上市公司」）——公开面唯一的模糊查找入口，既有 tool-surface.json 已标 commercial。"
+    },
+    {
+      "name": "read",
+      "group": "fetch",
+      "why": "读具体数值：「副驾能真用产品」与「只会讲产品」的分界线。受 data_scope 收窄，只接受 verified 概念。"
+    },
+    {
+      "name": "read_series",
+      "group": "fetch",
+      "why": "读同一概念的时间序列，与 read 同属只读语义，同受 data_scope 收窄。"
+    },
+    {
+      "name": "data_stats",
+      "group": "coverage-read",
+      "why": "「有多少数据」的量化回答（行数/覆盖面）。它是访客最常问的问题之一，且只出聚合数、不出内部结构。"
+    },
+    {
+      "name": "restaurant_universe",
+      "group": "vertical",
+      "why": "餐饮垂类的公开名录：访客问「有餐饮数据吗」时要能拿出实体清单。"
+    },
+    {
+      "name": "restaurant_series",
+      "group": "vertical",
+      "why": "餐饮垂类的公开读数，与 universal 面同一真源。"
+    },
+    {
+      "name": "flower_universe",
+      "group": "vertical",
+      "why": "花木垂类公开名录，同上。"
+    },
+    {
+      "name": "flower_price_series",
+      "group": "vertical",
+      "why": "花木垂类公开读数，同上。"
+    },
+    {
+      "name": "hotel_universe",
+      "group": "vertical",
+      "why": "酒店垂类公开名录，同上。"
+    },
+    {
+      "name": "hotel_series",
+      "group": "vertical",
+      "why": "酒店垂类公开读数，同上。"
+    }
+  ],
+  "excluded_groups": [
+    {
+      "group": "write",
+      "why": "写面一律不进公开面：改目录 / 改本体 / 改绑定。访客没有这些东西，也没有改它的资格。",
+      "examples": ["import_catalog", "register_datasource", "register_discovered", "add_entity", "add_entity_identifier", "add_relationship", "update_entity", "update_concept", "seed_entity_identifiers", "record_concept_mapping", "import_crosswalks", "consume_concepts", "confirm_binding", "review_bindings", "update_binding", "propose_bindings"]
+    },
+    {
+      "group": "crawl-control",
+      "why": "爬取面：能触发真实抓取、重排源、改节奏。访客不该有。",
+      "examples": ["plan_crawl", "fetch", "rank_sources", "list_schedules", "run_schedule", "generate_refresh_schedules", "policy_create", "policy_update", "policy_enable", "policy_disable", "policy_delete", "policy_trigger_now", "platform_trigger", "platform_cancel_run", "platform_cancel_pending"]
+    },
+    {
+      "group": "ops-read",
+      "why": "只读但属运营面：名字与描述就是内部词汇（策略、运行史、平台源、健康、覆盖缺口），进访客可见的回答即泄漏。只读不等于可对外。",
+      "examples": ["policy_list", "policy_get", "policy_runs", "policy_estimate", "platform_sources", "platform_runs", "crawl_status", "coverage_report", "list_registry_entries"]
+    },
+    {
+      "group": "auth",
+      "why": "认证面：登录票与审计。公开面不可能有身份概念。",
+      "examples": ["auth_status", "auth_events", "auth_launch_login", "auth_request_login"]
+    },
+    {
+      "group": "scope",
+      "why": "租户面：scope 是客户隔离单位，公开面不能枚举别人的 scope。",
+      "examples": ["scope_list", "scope_stats", "scope_create", "scope_update", "scope_delete", "scope_list_bindings", "scope_bind_caller", "scope_unbind_caller"]
+    },
+    {
+      "group": "heavy-search",
+      "why": "重型/聚合检索：ai_search 与 semantic_search 系列的结果里带内部概念命名与缓存值，公开面只留 semantic_search_entities 一个窄入口。",
+      "examples": ["ai_search", "semantic_search", "semantic_search_unified", "graph_search", "re_embed_concept"]
+    },
+    {
+      "group": "vertical-financials",
+      "why": "垂类财务/事件面属于商业档位（不是公开档）：公开面只给名录与序列，不给公司财务与事件明细。",
+      "examples": ["restaurant_company_financials", "restaurant_company_events", "restaurant_sampling_notices", "flower_company_financials", "flower_planted_area", "flower_trade", "hotel_company_events", "hotel_benchmark", "hotel_kpi", "crossborder_merchant_status", "list_cnreport_rules", "list_concept_families", "list_concept_mappings", "list_bindings", "list_relationships"]
+    }
+  ],
+  "notes": "本文件是公开面的唯一真源：运行时读它决定注册哪些工具（fd_open_data_mcp/public_face.py）。声明里出现本构建未注册的工具 → 启动即失败。空 tools 数组 = 零工具，不是全量。excluded_groups 只作文档与审查用，运行时以 tools 为准。"
+}
