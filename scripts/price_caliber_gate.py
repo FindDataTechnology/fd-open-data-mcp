@@ -122,6 +122,40 @@ def _shard_watermark(decl, today: dt.date) -> "tuple[str | None, str | None]":
     access = getattr(decl, "access", None)
     dsn_env = getattr(access, "dsn_env", None) if access is not None else None
     kind = getattr(access, "kind", None) if access is not None else None
+
+    # ── 通道 B：DAAS 服务本地 sqlite（2026-11-15 登记）────────────────────
+    #
+    # 文件只在 fd-daas-mcp 的 pod 里（local-path PVC）；探针在哪台机上跑，
+    # 文件就**可能开不到**——这必须如实判不出，不许把"开不到"读成"没数据"，
+    # 也不许为了绿灯编一个日期。可达时的水位取**参照篮内各表 max(date) 的
+    # 最小值**：低估只会让陈旧更早被发现，方向是安全的。
+    if kind == "daas_local_sqlite":
+        import sqlite3
+
+        path = getattr(access, "sqlite_path", None)
+        if not path:
+            return None, None
+        try:
+            con = sqlite3.connect(f"file:{path}?mode=ro", uri=True, timeout=10)
+        except Exception:  # noqa: BLE001 - 开不到是"判不出"，不是"没数据"
+            logger.warning("daas sqlite unreachable at %s", path)
+            return None, None
+        try:
+            basket = list(getattr(decl, "watermark_probe", None).reference_basket or ())
+            latest: list[str] = []
+            for code in basket:
+                try:
+                    row = con.execute(
+                        f'select max("date") from "scraw_{code}_daily"'
+                    ).fetchone()
+                except Exception:  # 表不存在 = 篮内该标的没有表，跳过
+                    continue
+                if row and row[0]:
+                    latest.append(str(row[0])[:10])
+            return (min(latest), "daas_sqlite_max_date") if latest else (None, None)
+        finally:
+            con.close()
+
     if kind != "federated_view" or not dsn_env:
         return None, None
     dsn = os.environ.get(dsn_env, "")
@@ -241,6 +275,24 @@ def judge_three_paths(reg, session, paths: dict[str, str | None], today: dt.date
                 v["watermark_method"] = method
                 v["watermark_registry_status"] = getattr(mark, "status", None)
 
+    # 判不出要留痕：daas_local_sqlite 的水位探针开不到文件（探针不在 DAAS pod 里
+    # 跑是常态）时，三路的 watermark_status 留 None——不冒充通过，但也不能
+    # **静默**留 None。把"哪些源在本次运行里判不出、为什么"写进 checked，
+    # 读报告的人才能分清"探针不可达"与"源没数据"。
+    daas_unreachable = []
+    for sid, decl in decls.items():
+        access = getattr(decl, "access", None)
+        if getattr(access, "kind", None) != "daas_local_sqlite":
+            continue
+        paths_hit = [
+            p for p, v in resolved.items() if v.get("source_id") == sid
+        ]
+        if all(v.get("as_of") is None for v in resolved.values() if v.get("source_id") == sid):
+            daas_unreachable.append(
+                {"source_id": sid, "sqlite_path": getattr(access, "sqlite_path", None),
+                 "paths": paths_hit}
+            )
+
     ids = {v.get("source_id") for v in resolved.values() if v.get("source_id")}
     if len(ids) > 1:
         out.append(
@@ -279,7 +331,10 @@ def judge_three_paths(reg, session, paths: dict[str, str | None], today: dt.date
             )
         )
 
-    return out, {"paths": resolved}
+    checked_out: dict = {"paths": resolved}
+    if daas_unreachable:
+        checked_out["daas_local_watermark_unreachable"] = daas_unreachable
+    return out, checked_out
 
 
 # ---------------------------------------------------------------- 判据二

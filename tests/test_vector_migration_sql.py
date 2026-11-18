@@ -412,8 +412,12 @@ def test_alembic_upgrade_head_on_sqlite_is_guarded(tmp_path):
     # new migration, so assert it reached at least 0017 (and is a real
     # alembic revision, not a half-applied chain).
     assert version >= "0017_census_bigint", version
-    # 0001-0009 stay PG-guarded no-ops on sqlite; 0010 and 0012 are portable DDL
-    # (the audit table and the price pool must exist on sqlite test databases)
-    # and are the app tables the chain builds there.
+    # 0001-0009 stay PG-guarded no-ops on sqlite; 0010/0012/0020 are portable DDL
+    # (the audit table, the price pool and the retention-contract table must exist
+    # on sqlite test databases) and are the app tables the chain builds there.
+    # 0019 alters `concepts`, which only the PG baseline creates, so it must stay
+    # guarded — otherwise the chain dies before reaching head (regression fixed
+    # 2026-11-12; this assertion is what caught it).
     assert tables == {"alembic_version", "panel_action_audit",
-                     "price_pool_members", "price_empty_intervals"}
+                      "price_pool_members", "price_empty_intervals",
+                      "data_retention_contracts"}

@@ -4,7 +4,7 @@
   <a class="chip {{ 'active' if not status }}" href="/panel/runs"
      hx-get="/panel/runs" hx-include="[name='policy_id']"
      hx-target="#runs-results" hx-swap="innerHTML" hx-push-url="true">{{ t('全部') }}</a>
-  {% for s in ['running', 'success', 'failed', 'cancelled'] %}
+  {% for s in ['running', 'success', 'failed', 'stalled', 'skipped', 'cancelled'] %}
   <a class="chip {{ s }} {{ 'active' if status == s }}" href="/panel/runs?status={{ s }}"
      hx-get="/panel/runs" hx-vals='{"status": "{{ s }}"}' hx-include="[name='policy_id']"
      hx-target="#runs-results" hx-swap="innerHTML" hx-push-url="true">{{ s }}</a>

@@ -44,6 +44,9 @@ ACCESS_KINDS = (
     "fd_open_data_ontology",   # fd-open-data 本体读面（概念族 + 缓存）
     "polygon",                 # 外部行情 API
     "simulated",               # 确定性合成，测试与开发
+    "daas_local_sqlite",       # DAAS 服务本地 sqlite（scraw_<code>_daily）；
+                               # 文件只在 fd-daas-mcp 的 pod 里，消费方按声明知悉
+                               # 可达边界，水位探针试开、开不到就如实判不出。
 )
 
 #: 对外交付允许的许可状态。``seed``/``provisional`` 不在其中——它们只能内部消费。
@@ -109,6 +112,10 @@ class AccessSpec:
 
     kind: str
     dsn_env: str | None = None
+    #: ``daas_local_sqlite`` 专用：sqlite 文件在**DAAS 服务侧**的路径（pod 布局事实）。
+    #: 声明方多半开不到这个文件——这不是缺陷，是可达边界的声明；探针试开、
+    #: 开不到就如实记"判不出"，绝不编造水位。
+    sqlite_path: str | None = None
 
     @classmethod
     def from_dict(cls, source_id: str, raw: Mapping[str, Any] | None) -> "AccessSpec":
@@ -120,14 +127,24 @@ class AccessSpec:
                 f"{source_id}: access.kind={kind!r} not in {ACCESS_KINDS}"
             )
         dsn_env = raw.get("dsn_env")
+        sqlite_path = raw.get("sqlite_path")
         if kind == "federated_view" and not dsn_env:
             raise DeclarationError(
                 f"{source_id}: access.kind=federated_view requires dsn_env"
             )
-        return cls(kind=kind, dsn_env=str(dsn_env) if dsn_env else None)
+        if kind == "daas_local_sqlite" and not sqlite_path:
+            raise DeclarationError(
+                f"{source_id}: access.kind=daas_local_sqlite requires sqlite_path "
+                "(the path as seen from the DAAS service)"
+            )
+        return cls(
+            kind=kind,
+            dsn_env=str(dsn_env) if dsn_env else None,
+            sqlite_path=str(sqlite_path) if sqlite_path else None,
+        )
 
     def to_dict(self) -> dict:
-        return {"kind": self.kind, "dsn_env": self.dsn_env}
+        return {"kind": self.kind, "dsn_env": self.dsn_env, "sqlite_path": self.sqlite_path}
 
 
 @dataclass(frozen=True)

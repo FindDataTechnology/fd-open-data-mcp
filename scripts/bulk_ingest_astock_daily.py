@@ -102,6 +102,120 @@ BATCH = 2000
 FETCH_TIMEOUT_S = 90
 RETRIES = 3
 
+# ── rate limiting (2026-11-12) ─────────────────────────────────────────────────
+# akshare's eastmoney backend closes the connection when one IP hammers push2, and
+# its own error text says the first trip clears in ~5 minutes while retrying during
+# the window only extends it ("反复触发后可能需要 40 分钟以上").
+#
+# The old retry loop had NO sleep at all: 3 immediate attempts per symbol, then
+# straight on to the next symbol. Measured 2026-11-12: symbols 000525, 000608,
+# 000609, 000610 each burned 3 attempts inside one second. Across 5,203 symbols
+# that is the exact pattern that turns a 5-minute ban into a long one — and it is
+# why the daily run kept failing at ~13 minutes with no usable evidence.
+# 2026-11-09 eastmoney 被封之后 `fetch_frame` 改成多 provider 故障转移：一条腿被限流
+# 就**立刻换下一条**，不再原地等 5 分钟（原地等待的前提是「没有别的腿可用」，而这个
+# 前提已经不存在了）。全被拒时当场抛 `RateLimited`，由 `run_symbols` 数连续次数、
+# 到 `RATE_LIMIT_STREAK_ABORT` 就停整轮。因此这里**没有**「等一个限流窗口」的常量——
+# 原来那个 `RATE_LIMIT_BACKOFF_S = 300` 在改造后成了死常量，删掉免得有人照着它把
+# sleep 加回来。
+RATE_LIMIT_STREAK_ABORT = 3         # consecutive rate-limited symbols → stop the run
+RATE_LIMIT_MARKERS = ("限流", "断开了连接", "RemoteDisconnected", "Connection aborted")
+
+
+class RateLimited(RuntimeError):
+    """Upstream refused this IP. Retrying immediately only extends the ban, so the
+    run aborts instead of walking the remaining symbols at 3 calls each."""
+
+
+def _is_rate_limited(exc: BaseException) -> bool:
+    text = str(exc)
+    return any(m in text for m in RATE_LIMIT_MARKERS)
+
+
+# ── source fallback (2026-11-15) ───────────────────────────────────────────────
+# eastmoney's push2his began refusing datacenter IPs around 2026-11-09 and every
+# A-share series on the shard stops that Friday. The platform adapter already
+# fails over eastmoney → tencent; this script called akshare's eastmoney-only
+# entrypoint (``stock_zh_a_hist``) directly, so it had no second leg and the whole
+# universe starved for four sessions.
+#
+# Measured 2026-11-15 from cheap9 — the cluster this Job runs in, so this is not
+# "works from a laptop": tencent (``stock_zh_a_hist_tx``) and sina
+# (``stock_zh_a_daily``) both answer in ~0.1s and agree with each other to the
+# cent (600085 2026-11-13 close 23.78 on both). tencent's volume divided by 100
+# equals the stored 成交量(手) exactly on all four overlapping days
+# (11942400→119424, 10096100→100961, 10849300→108493, 7380800→73808).
+#
+# Two things must not drift when a fallback serves a day:
+#   * columns — the write path is keyed on eastmoney's 日期/开盘/收盘/最高/最低/
+#     成交量, so every provider's frame is normalized onto those names;
+#   * volume unit — eastmoney reports 手, tencent/sina report 股. Writing 股 into
+#     a concept whose stored history is 手 would inflate that series 100x with no
+#     error anywhere in the pipeline.
+PROVIDER_ORDER = ("eastmoney", "tencent", "sina")
+# Consecutive limiter refusals from one provider before it is skipped for the rest
+# of the run: a permanent IP block should cost one request per symbol, not three,
+# and must never be reported as "this symbol had no data".
+PROVIDER_BREAKER_AFTER = 3
+SHARES_PER_LOT = 100
+
+_PROVIDER_FNS: dict | None = None      # lazy: --selfcheck must not need akshare
+_PROVIDER_STATE: dict = {}             # reset per run by _reset_provider_state()
+
+
+def _reset_provider_state() -> None:
+    _PROVIDER_STATE.clear()
+    _PROVIDER_STATE.update({"served": {}, "fails": {}, "open": set(), "switched": 0})
+
+
+def _provider_fn(name: str):
+    global _PROVIDER_FNS
+    if _PROVIDER_FNS is None:
+        import akshare as ak
+        _PROVIDER_FNS = {"eastmoney": ak.stock_zh_a_hist,
+                         "tencent": ak.stock_zh_a_hist_tx,
+                         "sina": ak.stock_zh_a_daily}
+    return _PROVIDER_FNS[name]
+
+
+def _provider_symbol(name: str, code: str) -> str:
+    """eastmoney wants the bare code; tencent/sina want the exchange prefix."""
+    c = code.strip().lower()
+    if c[:2] in ("sh", "sz", "bj"):
+        base, prefix = c[2:], c[:2]
+    else:
+        base, _, suffix = c.partition(".")
+        base = base.split(".")[0]
+        prefix = suffix if suffix in ("sh", "sz", "bj") else ""
+    if name == "eastmoney":
+        return base
+    if prefix:
+        return prefix + base
+    if base.startswith(("6", "9")):
+        return "sh" + base
+    if base.startswith(("8", "4")):
+        return "bj" + base
+    return "sz" + base
+
+
+_PROVIDER_COLS = {"date": "日期", "open": "开盘", "close": "收盘",
+                  "high": "最高", "low": "最低", "volume": "成交量"}
+
+
+def _normalize_frame(df, provider: str):
+    """Provider frame → eastmoney's schema, with 成交量 converted from 股 to 手."""
+    if provider == "eastmoney":
+        return df
+    missing = [c for c in _PROVIDER_COLS if c not in df.columns]
+    if missing:
+        raise RuntimeError(f"{provider} frame missing {missing}: {list(df.columns)[:8]}")
+    out = df.rename(columns=_PROVIDER_COLS).copy()
+    out["成交量"] = out["成交量"].astype(float) / SHARES_PER_LOT
+    out["日期"] = out["日期"].map(
+        lambda v: v.isoformat() if hasattr(v, "isoformat") else str(v)[:10])
+    return out
+
+
 # Dense, full-history blue chips used only as a trading-calendar probe (the
 # same basket the paper-trading astock provider uses). Their rows are
 # index-reachable; a market-wide max(date) is not.
@@ -464,22 +578,118 @@ def per_symbol_start(global_start: str, sym_last: str | None, end: str,
     return own, "caught_up"
 
 
-def fetch_frame(code: str, adjust: str, start: str, end: str, failed: list[str]):
-    import akshare as ak
-    for attempt in range(1, RETRIES + 1):
+def run_symbols(codes, ingest, *, streak: int = 0,
+                streak_limit: int = RATE_LIMIT_STREAK_ABORT, on_tick=None):
+    """Walk ``codes`` calling ``ingest(code)``; stop once the limiter is three-for-three.
+
+    Returns ``(aborted, streak, processed)``. ``streak`` comes in by argument and
+    goes out by return so the count survives a slice boundary — a ban does not
+    reset just because the cooldown timer elapsed.
+
+    Kept as a module function (not inline in ``main``) so the abort rule is
+    testable without a database: this is the rule that decides whether a limiter
+    window gets extended over 5,203 symbols.
+    """
+    for i, code in enumerate(codes, 1):
         try:
-            df = _fetch_with_alarm(
-                ak.stock_zh_a_hist, symbol=code, period="daily",
-                start_date=start.replace("-", ""), end_date=end.replace("-", ""),
-                adjust=adjust)
-            if df is None or len(df) == 0:
-                return None
-            return df
-        except Exception as e:  # noqa: BLE001 — explicit failure, retried
-            log.warning("%s %s fetch attempt %d/%d FAILED: %s", code, adjust, attempt, RETRIES, e)
-            if attempt == RETRIES:
-                failed.append(f"{code}:{adjust}:{type(e).__name__}")
-                return None
+            ingest(code)
+            streak = 0
+        except RateLimited as e:
+            # One symbol tripping the limiter is a data gap; three in a row is a
+            # ban. Walking the rest would keep the window open.
+            streak += 1
+            log.error("%s rate limited (%d/%d consecutive): %s",
+                      code, streak, streak_limit, e)
+            if streak >= streak_limit:
+                remaining = len(codes) - i
+                log.error("aborting run: the upstream keeps refusing this IP. "
+                          "Retrying now would only extend the ban — the remaining "
+                          "%d symbols are left for the next scheduled run.", remaining)
+                if on_tick:
+                    on_tick(i, code)
+                return True, streak, i
+        if on_tick:
+            on_tick(i, code)
+    return False, streak, len(codes)
+
+
+def fetch_frame(code: str, adjust: str, start: str, end: str, failed: list[str]):
+    """Fetch one symbol's daily bars, falling over across providers.
+
+    Raises :class:`RateLimited` only when *every* provider refused because of the
+    limiter — the caller must then stop the run rather than treat it as "this
+    symbol had no data". One provider being blocked (eastmoney, since 2026-11-09)
+    is not a reason to stop: the next one answers, and the breaker stops asking
+    the blocked one after ``PROVIDER_BREAKER_AFTER`` consecutive refusals.
+    """
+    # Provider state is "reset per run" by ``_reset_provider_state()``, so an
+    # **empty** dict can only mean "no run has started yet". Reading it unguarded
+    # raised ``KeyError: 'open'`` for every caller that did not reset first —
+    # which is exactly what kept ``tests/test_astock_rate_limit_backoff.py`` red
+    # on main (2026-11-15): the gate added after this script hammered eastmoney
+    # for three days was switched off. Production was safe only because
+    # ``main()`` happens to reset before the loop; nothing enforced that order.
+    if not _PROVIDER_STATE:
+        _reset_provider_state()
+    limiter_seen: list[str] = []
+    skipped_open: list[str] = []
+    last_error: Exception | None = None
+    for name in PROVIDER_ORDER:
+        if name in _PROVIDER_STATE["open"]:
+            skipped_open.append(name)
+            continue
+        for attempt in range(1, RETRIES + 1):
+            try:
+                kw = {"symbol": _provider_symbol(name, code),
+                      "start_date": start.replace("-", ""),
+                      "end_date": end.replace("-", ""),
+                      "adjust": adjust}
+                if name == "eastmoney":
+                    kw["period"] = "daily"
+                df = _fetch_with_alarm(_provider_fn(name), **kw)
+                if df is None or len(df) == 0:
+                    log.warning("%s %s via %s returned no rows", code, adjust, name)
+                    break                      # empty is an answer: try the next leg
+                frame = _normalize_frame(df, name)
+                _PROVIDER_STATE["served"][name] = _PROVIDER_STATE["served"].get(name, 0) + 1
+                _PROVIDER_STATE["fails"][name] = 0
+                if name != PROVIDER_ORDER[0]:
+                    _PROVIDER_STATE["switched"] += 1
+                    log.info("%s %s served by fallback provider %s", code, adjust, name)
+                return frame
+            except Exception as e:  # noqa: BLE001 — explicit failure, retried/failed over
+                last_error = e
+                if _is_rate_limited(e):
+                    limiter_seen.append(name)
+                    n = _PROVIDER_STATE["fails"].get(name, 0) + 1
+                    _PROVIDER_STATE["fails"][name] = n
+                    if n >= PROVIDER_BREAKER_AFTER and name not in _PROVIDER_STATE["open"]:
+                        _PROVIDER_STATE["open"].add(name)
+                        log.warning("provider %s refused %d times in a row — skipping it "
+                                    "for the rest of this run (fallback continues)",
+                                    name, n)
+                    # No sleep: the next provider may answer right now. The sleep
+                    # existed because there was no other leg to try.
+                    break
+                log.warning("%s %s via %s attempt %d/%d FAILED: %s", code, adjust,
+                            name, attempt, RETRIES, e)
+                if attempt == RETRIES:
+                    break
+                backoff = 2 ** attempt
+                log.warning("waiting %.0fs before retry %d/%d", backoff, attempt + 1, RETRIES)
+                time.sleep(backoff)
+    if limiter_seen:
+        raise RateLimited(f"{code}: every provider refused ({', '.join(limiter_seen)})")
+    # 三条腿**全被熔断打开**时，这条符号一次都没真正请求过——那和「全被拒」是
+    # 同一件事，必须照样抛 RateLimited：`run_symbols` 的连续计数与停轮只认这个异常，
+    # 不抛就会走下面那条 return None ⇒ 整轮 4,576 个符号一个不取、`failed` 空、
+    # 退出码 0，看上去一切正常（2026-11-15 实测该路径返回 None，是「熔断跳过」
+    # 与「连续中止」两套机制没咬合的那条缝）。
+    if skipped_open and len(skipped_open) == len(PROVIDER_ORDER):
+        raise RateLimited(
+            f"{code}: every provider breaker open ({', '.join(skipped_open)})")
+    if last_error is not None:
+        failed.append(f"{code}:{adjust}:{type(last_error).__name__}")
     return None
 
 
@@ -508,7 +718,26 @@ def ingest_symbol(engine, code: str, entity_id: int, units: dict[int, str],
             log.warning("%s no usable overlap for hfq calibration — qfq fallback", code)
             return ingest_symbol(engine, code, entity_id, units, None,
                                  start, end, now, existing, dry, stats, failed)
-        const = statistics.median(ratios)
+        med = statistics.median(ratios)
+        # Anchor on the LAST stored day, not the window median (2026-11-15).
+        # Each past run calibrated with its own constant, so the stored series is
+        # piecewise-scaled rather than one clean multiple of any provider's hfq;
+        # only the most recent anchor makes the seam continuous. Measured on
+        # 600085, 2026-11-04..11-09: stored(东财)/tencent-qfq close drifts
+        # 0.9889→0.9893 (+0.04% per day, 0.26% across the window), and a
+        # window-median constant lands a ~1% phantom gap on the first new day.
+        const, basis = med, "window median"
+        last_ratio = next((v / hfq[d] for d, v in reversed(anchor_rows)
+                           if d in hfq and hfq[d] and hfq[d] > 0), None)
+        if last_ratio and med > 0 and abs(last_ratio / med - 1.0) <= 0.02:
+            const, basis = last_ratio, "last anchor day"
+        elif last_ratio:
+            log.warning("%s last-day ratio %.6f deviates %.1f%% from window median "
+                        "%.6f — anchor row looks wrong, keeping the median",
+                        code, last_ratio, abs(last_ratio / med - 1) * 100, med)
+        if basis == "last anchor day" and abs(last_ratio / med - 1) > 0.002:
+            log.info("%s calibration %.6f from last anchor %s (window median %.6f, %.2f%%)",
+                     code, const, anchor_date, med, abs(last_ratio / med - 1) * 100)
         eff_from = max(anchor_date, (datetime.date.fromisoformat(start)
                                      - datetime.timedelta(days=1)).isoformat())
         scale = const
@@ -591,13 +820,86 @@ def ingest_symbol(engine, code: str, entity_id: int, units: dict[int, str],
 
 
 def selfcheck() -> int:
+    """Offline invariants, no network and no DB.
+
+    Each line can fail and the exit code follows: a check that only prints is not
+    a check. The provider normalizer is asserted here because it is the one place
+    where a wrong answer costs nothing visible (volume off by 100x, columns
+    silently dropped) and everything downstream.
+    """
+    ok = True
+
+    def check(name: str, cond: bool, detail: str = "") -> None:
+        nonlocal ok
+        ok = ok and bool(cond)
+        print(f"selfcheck {'OK  ' if cond else 'FAIL'} {name}"
+              f"{'' if cond or not detail else ' — ' + detail}")
+
     print(f"selfcheck: concepts {CONCEPTS}")
     print(f"selfcheck: fields {FIELD_COL}")
     print(f"selfcheck: write ft = {WRITE_FT} on server {SERVER}")
-    cal = CALENDAR_FILE
-    print(f"selfcheck: calendar {cal} exists={cal.exists()}")
-    print("selfcheck OK")
-    return 0
+    # 日历夹具只被 --gap-probe 用（load_calendar 的唯一调用点），**日常补数不碰它**。
+    # 所以不能断言「脚本旁边一定有 data/」：reconciler 给 direct 策略挂的 ConfigMap
+    # 只有 <script>.py 一个键、落在 /src/，那种形状下 data/ 必然不存在，而它是**合法的**
+    # （policy 2659 的 script_args 实测没有 --gap-probe）。断言「存在」会让这条自检
+    # 在真正会跑它的形状里恒红，等于把人训练成忽略它。
+    # 有就验它能解析出交易日（光 exists 挡不住空文件），没有就明说跳过。
+    cal = next((p for p in CALENDAR_CANDIDATES if p.exists()), None)
+    print(f"selfcheck: calendar searched {[str(p) for p in CALENDAR_CANDIDATES]}")
+    if cal is None:
+        print("selfcheck SKIP calendar file present — 此形状下没有夹具；"
+              "只有 --gap-probe 需要它，补数路径不受影响")
+    else:
+        try:
+            n_days = len(load_calendar(str(cal), "2026-01-01", "2026-12-31"))
+        except OSError as e:  # noqa: BLE001
+            n_days = 0
+            print(f"selfcheck: calendar read failed {type(e).__name__}: {e}")
+        check("calendar parses to trading days", n_days > 0, f"{cal} → {n_days} 天")
+    check("primary provider is eastmoney", PROVIDER_ORDER[0] == "eastmoney")
+    check("two fallback legs", len(PROVIDER_ORDER) >= 2)
+
+    for code, want in (("600085", "sh600085"), ("600085.SH", "sh600085"),
+                       ("sh600085", "sh600085"), ("000001", "sz000001"),
+                       ("300750.SZ", "sz300750"), ("830799", "bj830799")):
+        got = _provider_symbol("tencent", code)
+        check(f"symbol {code}→{want}", got == want, got)
+    check("eastmoney symbol bare", _provider_symbol("eastmoney", "600000.SH") == "600000")
+
+    try:
+        import pandas as pd
+    except Exception as e:  # noqa: BLE001
+        check("pandas importable", False, str(e)[:80])
+        pd = None
+    if pd is not None:
+        tx = pd.DataFrame([{"date": "2026-11-10", "open": 25.2, "close": 24.89,
+                            "high": 25.28, "low": 24.83, "volume": 6565500.0,
+                            "turnover": 0.0048, "amount": 1.0}])
+        n = _normalize_frame(tx, "tencent")
+        check("tx columns mapped",
+              {"日期", "开盘", "收盘", "最高", "最低", "成交量"}.issubset(n.columns),
+              str(list(n.columns)))
+        check("tx volume 股→手", abs(float(n.iloc[0]["成交量"]) - 65655.0) < 1e-6,
+              str(n.iloc[0]["成交量"]))
+        check("tx date str", str(n.iloc[0]["日期"]) == "2026-11-10", str(n.iloc[0]["日期"]))
+        check("tx close kept", abs(float(n.iloc[0]["收盘"]) - 24.89) < 1e-9)
+        sin = pd.DataFrame([{"date": "2026-11-10", "open": 25.2, "high": 25.28,
+                             "low": 24.83, "close": 24.89, "volume": 6565500.0,
+                             "amount": 1.0, "outstanding_share": 1.0, "turnover": 0.0048}])
+        m = _normalize_frame(sin, "sina")
+        check("sina volume 股→手", abs(float(m.iloc[0]["成交量"]) - 65655.0) < 1e-6,
+              str(m.iloc[0]["成交量"]))
+        em = pd.DataFrame([{"日期": "2026-11-10", "开盘": 25.2, "收盘": 24.89,
+                            "最高": 25.28, "最低": 24.83, "成交量": 65655.0}])
+        check("eastmoney frame passes through", _normalize_frame(em, "eastmoney") is em)
+        try:
+            _normalize_frame(pd.DataFrame([{"day": "2026-11-10"}]), "tencent")
+            check("bad frame refused", False, "no exception")
+        except RuntimeError:
+            check("bad frame refused", True)
+
+    print("selfcheck", "OK" if ok else "FAILED")
+    return 0 if ok else 1
 
 
 # ------------------------------------------------------------------ gap probe
@@ -606,6 +908,15 @@ def selfcheck() -> int:
 # 日，探针永远绿灯。日历来自 akshare 的新浪交易日历，落成仓内夹具。
 
 CALENDAR_FILE = Path(__file__).resolve().parent / "data" / "cn_trade_cal_2026.txt"
+
+# 夹具的实际落点因运行形状而异：仓内检出时在脚本旁边；direct 策略的 Job 把脚本
+# 落在 /src/（**只挂 .py 一个键**），而夹具随 fd-scripts 落在 /opt/fd-scripts/ 下，
+# 是否带 data/ 前缀取决于那份 ConfigMap 的键名。三种都认，先到先得。
+CALENDAR_CANDIDATES = [
+    CALENDAR_FILE,
+    Path("/opt/fd-scripts/data/cn_trade_cal_2026.txt"),
+    Path("/opt/fd-scripts/cn_trade_cal_2026.txt"),
+]
 
 
 def load_calendar(path: str, start: str, end: str) -> list[str]:
@@ -840,7 +1151,9 @@ def main() -> int:
                     help="fetch + compare with stored, write nothing")
     ap.add_argument("--gap-probe", action="store_true",
                     help="查询已存日期与交易所日历比对缺口（只读，2.2 验收）")
-    ap.add_argument("--calendar-file", default=str(CALENDAR_FILE),
+    ap.add_argument("--calendar-file",
+                    default=str(next((p for p in CALENDAR_CANDIDATES if p.exists()),
+                                     CALENDAR_FILE)),
                     help="交易日历夹具（默认仓内 data/cn_trade_cal_2026.txt）")
     ap.add_argument("--strict-symbols", action="store_true",
                     help="--gap-probe 时把任何标的级空洞也判失败（默认只硬判全市场断档）")
@@ -967,6 +1280,7 @@ def main() -> int:
     now = datetime.datetime.utcnow()
     failed: list[str] = []
     stats = {"rows": 0, "empty_or_failed": 0}
+    _reset_provider_state()
 
     # --slice-all N walks the code list in N sequential slices inside this one
     # process: one writer for the whole shard, with a cooldown between slices.
@@ -984,6 +1298,8 @@ def main() -> int:
     else:
         groups = [("1/1", ordered)]
 
+    rate_limit_streak = 0            # consecutive rate-limited symbols, across slices
+    aborted = False
     for gi, (label, grp) in enumerate(groups):
         if gi:
             log.info("slice %s: cooling down %.0fs before next slice",
@@ -991,25 +1307,48 @@ def main() -> int:
             time.sleep(max(0.0, args.slice_sleep))
             now = datetime.datetime.utcnow()  # fetched_at should track real time
         rows_before = stats["rows"]
-        for i, code in enumerate(grp, 1):
+
+        def _ingest(code, _now=now):
             ingest_symbol(engine, code, code_map[code], units, anchors.get(code_map[code]),
-                          sym_starts.get(code_map[code], start), end, now, existing,
+                          sym_starts.get(code_map[code], start), end, _now, existing,
                           args.dry_run or args.verify, stats, failed)
-            if i % 50 == 0 or i == len(grp):
+
+        def _tick(i, code, _label=label, _n=len(grp)):
+            if i % 50 == 0 or i == _n:
                 log.info("slice %s [%d/%d] cumulative rows %s, failed %d",
-                         label, i, len(grp), stats["rows"], len(failed))
+                         _label, i, _n, stats["rows"], len(failed))
+
+        aborted, rate_limit_streak, _ = run_symbols(
+            grp, _ingest, streak=rate_limit_streak, on_tick=_tick)
         if len(groups) > 1:
             log.info("slice %s done: +%d rows", label, stats["rows"] - rows_before)
         # report per slice: a multi-hour 8-slice run must not lose the whole
         # ledger to a crash in the last slice, and the reconciler's snapshot
         # reads these counters as live progress.
         _report_yield(stats["rows"] - rows_before, stats["rows"] - rows_before)
+        if aborted:
+            break
 
     log.info("done: %d rows%s, %d fetch failures, %d no-data symbols",
              stats["rows"], " (dry-run)" if (args.dry_run or args.verify) else "",
              len(failed), stats["empty_or_failed"])
+    # Which leg actually served the rows. Without this line a run that fell back
+    # for 5,200 symbols is indistinguishable from a normal one — and "eastmoney
+    # served 0" is the only on-record signal that the primary is still blocked.
+    served = ", ".join(f"{k}={v}" for k, v in sorted(_PROVIDER_STATE["served"].items())) or "none"
+    log.info("providers: %s (%d fallback switches)%s", served,
+             _PROVIDER_STATE["switched"],
+             "" if not _PROVIDER_STATE["open"]
+             else f"; skipped after repeated refusal: {sorted(_PROVIDER_STATE['open'])}")
     for f in failed[:20]:
         log.error("FAILED: %s", f)
+    if aborted:
+        # Exit 3, not 0: the run stopped early by design, so the reconciler must
+        # see a failure (a silent 0 would report the untouched tail as "current").
+        log.error("exiting 3: aborted after %d consecutive rate-limited symbols; "
+                  "%d rows were still written and reported above", rate_limit_streak,
+                  stats["rows"])
+        return 3
     if stats["rows"] == 0 and len(failed) >= len(code_map) and len(code_map) > 0:
         log.error("every leg failed — exiting 1 (explicit failure, not an empty success)")
         return 1

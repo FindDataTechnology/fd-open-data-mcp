@@ -23,10 +23,19 @@ def load():
 
 
 def test_t_class_keeps_only_latest_point_per_entity():
-    """T 类：同一 (概念, 实体) 只留 date 最大的一条，其余都是 rn>1。"""
+    """T 类：同一 (概念, 实体, **粒度**) 只留 date 最大的一条，其余都是 rn>1。
+
+    粒度必须进分区键：库的唯一键是 (…, date, granularity)，月频与日频同一时点是
+    两行**合法**数据（fix-observation-time-granularity 专门为此把两者拆开）。
+    漏了粒度，淘汰就会把月频行当成"更旧的一条"搬走——而写路径的
+    `retention_bulk._t_victims` 是带 `n.granularity = o.granularity` 的，
+    两条执行路径口径必须一致，否则同一个契约在两条路上删的不是同一批行。
+    实测（2026-11-12）：库里已有 10 个概念同时存在 day/year 或 quarter/year/ytd 多粒度，
+    目前没有一个落在 T 契约上，所以这是**潜伏**缺陷——一旦某个 T 族新增第二种粒度就发作。
+    """
     sql = load()._victims_sql("T")
     assert "row_number()" in sql
-    assert "PARTITION BY o.concept_id, o.entity_type, o.entity_id" in sql
+    assert "PARTITION BY o.concept_id, o.entity_type, o.entity_id, o.granularity" in sql
     assert "rn > 1" in sql
 
 

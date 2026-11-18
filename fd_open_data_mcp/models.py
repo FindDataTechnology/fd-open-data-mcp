@@ -646,7 +646,12 @@ class PolicyRun(Base):
     # without a persistent policy row; policy runs keep a non-null policy_id.
     policy_id = Column(Integer, ForeignKey("crawl_policies.id", ondelete="CASCADE"), nullable=True, index=True)
     origin = Column(String(16), nullable=False, default="policy")  # policy / adhoc
-    status = Column(String(32), nullable=False, default="running")  # running / success / failed / refused / cancelled
+    # running | success | failed | refused | cancelled | stalled | skipped.
+    # stalled (unblock-silent-dispatch-stalls): the executor never reported a terminal
+    # state and the row passed its age ceiling — closed so single-flight stops blocking.
+    # skipped: dispatch was skipped by single-flight; a record, never a run (never _OPEN,
+    # never counted as an attempt or a yield).
+    status = Column(String(32), nullable=False, default="running")
     plan_json = Column(JSONB, nullable=True)               # the compiled CrawlPlan
     job_ref = Column(String(255), nullable=True)           # "{cluster_name}/{job}" or scrapyd jobid
     cluster_id = Column(Integer, ForeignKey("clusters.id", ondelete="SET NULL"),
@@ -661,6 +666,14 @@ class PolicyRun(Base):
     plan_cells = Column(Integer, nullable=True)
     rows_attempted = Column(Integer, nullable=True)
     rows_new = Column(Integer, nullable=True)
+    # bound-unfetchable-crawl-cells: cells the executor stopped issuing because
+    # the (concept, entity) pair hit its per-run give-up budget. Written by the
+    # pod at close (same SCRAW_JOB_REF channel as rows_*), nullable so "absent"
+    # means "this run's executor did not report" — NOT "zero abandoned".
+    # Without it a fully abandoned run (no fetch issued at all) is
+    # indistinguishable from zero_yield ("fetched successfully, stored nothing"),
+    # and the two have opposite remedies.
+    rows_abandoned = Column(Integer, nullable=True)
     cancelled_by = Column(String(128), nullable=True)  # actor identity when status='cancelled'
 
     policy = relationship("CrawlPolicy", back_populates="runs")
@@ -1481,10 +1494,15 @@ class CrawlLoginStation(Base):
     finished_at = Column(DateTime(timezone=True), nullable=True)
 
     def toDict(self) -> dict:
+        # proxy_url 是带口令的 egress URL（`http://user:pass@host:port`），序列化
+        # 出口一律脱敏：面板与日志早就走 mask_proxy_url，这个 toDict 当时只是没人调，
+        # 留着原值等于给未来某个调用方备好一条凭据泄漏路径（2026-11-14）。
+        from .station_ops import mask_proxy_url
         return {
             "id": self.id, "identity_id": self.identity_id,
             "source": self.source, "account_alias": self.account_alias,
-            "status": self.status, "proxy_url": self.proxy_url,
+            "status": self.status,
+            "proxy_url_masked": mask_proxy_url(self.proxy_url),
             "note": self.note,
             "created_at": self.created_at.isoformat() if self.created_at else None,
             "deadline_at": self.deadline_at.isoformat() if self.deadline_at else None,

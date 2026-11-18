@@ -127,11 +127,46 @@ def _load_audit_module():
     return mod
 
 
+#: 三类会被视为"收窄"的变更——seed 不得静默做这些事。
+#: 收窄 = 让更多数据被删：窗口变短、类从 W 变 T、或者原本无窗口被写上窗口。
+_CLS_RANK = {"P": 0, "F": 0, "W": 1, "T": 2}   # 数字越大越"删得多"
+
+
+def narrowing_changes(existing: dict, incoming: dict) -> list[str]:
+    """返回 seed 会造成的**收窄**变更描述（空 = 没在收窄）。
+
+    ``existing`` / ``incoming`` 形如 ``{(source, family): (cls, window_days)}``。
+
+    为什么要有这道闸（2026-11-13 实测）：`--overwrite` 会照 bootstrap 矩阵重写
+    `retention_class` 与 `retention_window_days`，而矩阵是**第二份真源**，随时会同库
+    漂移。当时矩阵里 `rating`/`return` 还写着 T/30（库里已改判 W/1826），W 窗口还是
+    730（库里已按"保留五年"抬到 1826）——跑一次 `--overwrite` 就会把两个人工决定
+    一起回滚，一次搬走 25.6 万行。这类"静默收窄"必须变成硬失败。
+    """
+    out: list[str] = []
+    for key, (new_cls, new_win) in sorted(incoming.items()):
+        old = existing.get(key)
+        if old is None:
+            continue
+        old_cls, old_win = old
+        if _CLS_RANK.get(new_cls, 9) > _CLS_RANK.get(old_cls, 9):
+            out.append(f"{key[0]}/{key[1]}: 类 {old_cls} -> {new_cls}（更严，会多删）")
+            continue
+        if new_win is None and old_win is not None:
+            out.append(f"{key[0]}/{key[1]}: 窗口 {old_win} -> 无（变成只留当期/永久?）")
+        elif new_win is not None and old_win is not None and new_win < old_win:
+            out.append(f"{key[0]}/{key[1]}: 窗口 {old_win} -> {new_win} 天（更短）")
+    return out
+
+
 def _args(argv=None):
     p = argparse.ArgumentParser(description=__doc__,
                                 formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--db-url", default=os.environ.get("FD_OPEN_DATA_MCP_DATABASE_URL"))
     p.add_argument("--apply", action="store_true", help="真的写库（默认只打印）")
+    p.add_argument("--allow-narrowing", action="store_true",
+                   help="允许 --overwrite 收窄留存（窗口变短 / W→T）。默认拒绝："
+                        "这是不可逆的数据删减方向")
     p.add_argument("--overwrite", action="store_true",
                    help="覆盖已存在的 (source, family)。默认保留库里的现有值")
     p.add_argument("--backfill-unclassified", action="store_true",
@@ -226,11 +261,25 @@ def main(argv=None) -> int:
                 print(f"已补写。表内现有 {total} 条契约。")
                 return 0
 
-            existing = {
-                (r._mapping["source"], r._mapping["family"])
-                for r in c.execute(text(
-                    "SELECT source, family FROM data_retention_contracts"))
-            }
+            existing_rows = list(c.execute(text(
+                "SELECT source, family, retention_class, retention_window_days"
+                "  FROM data_retention_contracts")))
+            existing = {(r._mapping["source"], r._mapping["family"])
+                        for r in existing_rows}
+            if a.overwrite:
+                cur = {(r._mapping["source"], r._mapping["family"]):
+                       (r._mapping["retention_class"], r._mapping["retention_window_days"])
+                       for r in existing_rows}
+                incoming = {(r[0], r[1]): (r[2], r[3]) for r in rows}
+                narrowing = narrowing_changes(cur, incoming)
+                if narrowing:
+                    print("拒绝覆盖：本次 --overwrite 会**收窄**留存（不可逆方向）：")
+                    for line in narrowing:
+                        print(f"  - {line}")
+                    print()
+                    print("矩阵是第二份真源，会与库漂移；要么先把矩阵对齐到库，")
+                    print("要么确认这是有意的收窄并加 --allow-narrowing。")
+                    return 1
             to_insert = [r for r in rows if a.overwrite or (r[0], r[1]) not in existing]
             print(f"bootstrap 契约 {len(rows)} 条；库里已有 {len(existing)} 条；"
                   f"本次{'覆盖写入' if a.overwrite else '新增'} {len(to_insert)} 条")

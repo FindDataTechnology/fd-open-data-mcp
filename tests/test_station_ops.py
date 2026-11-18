@@ -383,7 +383,10 @@ def test_create_station_job_and_service_spec(session):
         assert row.status == "waiting_operator"
         assert station_ops._as_aware(row.deadline_at) == \
             NOW + dt.timedelta(seconds=station_ops.station_deadline_seconds())
-        assert row.proxy_url == "http://user:pw@10.0.0.7:3128"
+        # 库里只存脱敏 egress（2026-11-14）：`proxy_url` 是 http://user:pass@host:port，
+        # 带真口令。显示只需要「走哪个出口」，真口令只走 Job 的 env（上面已单独断言）。
+        assert row.proxy_url == "http://••••@10.0.0.7:3128"
+        assert "user:pw@" not in row.proxy_url
     finally:
         s.close()
     # launch is evented on the identity
@@ -679,6 +682,226 @@ def test_prearm_plan_skips_when_a_station_is_already_open(session):
     finally:
         s.close()
     assert len(station_ops.prearm_plan(session, now=PREARM_NOW)) == 1
+
+
+def test_prearm_plan_ignores_a_station_whose_deadline_passed(session):
+    """2026-11-14 实历的回归：僵尸站不许永久挡住预拉起。
+
+    station #72（rmfyalk/acct001）11-10T18:28 建、19:28 过期、`finished_at`
+    一直为空（Job 被 deadline 杀掉，没来得及上报终态）。超时兜底是「读时生效」，
+    而这个 5 分钟的后台循环从不读站表 ⇒ 那一行 `waiting_operator` 让预拉起从
+    11-10 起每一轮都判「操作者正看着」，再也不开新站；panel 日志每 5 分钟一句
+    `prearm: no station needed this pass`，而源从 11-05 起零产出。
+    判据要按「有效窗口」表达：过了 deadline 的站等于已关。
+    """
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    _station(iid, "rmfyalk", "acct001", status="waiting_operator",
+             deadline=PREARM_NOW - dt.timedelta(minutes=30))
+
+    assert len(station_ops.prearm_plan(session, now=PREARM_NOW)) == 1
+
+
+def test_prearm_tick_closes_expired_station_before_planning(session, monkeypatch):
+    """兜底那一半：过期站在 tick 里要真的被收成 timeout（留痕），不只是被计划忽略。"""
+    _source("rmfyalk-case-crawl", auth_profile="rmfyalk",
+            schedule="10 3 * * *", schedule_tz="Asia/Shanghai",
+            kind="federated", runner_command=["node", "bin/rmfyalk-crawl.mjs"])
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    _station(iid, "rmfyalk", "acct001", status="waiting_operator",
+             deadline=PREARM_NOW - dt.timedelta(minutes=30))
+    monkeypatch.setattr(station_ops, "ensure_identity_with_egress",
+                        lambda *a, **k: {"status": "queued"})
+    monkeypatch.setattr(station_ops, "create_station",
+                        lambda *a, **k: {"status": "launched", "station_id": 2})
+
+    station_ops.prearm_tick(session, now=PREARM_NOW, client=object())
+
+    s = get_database().get_session()
+    try:
+        assert s.get(CrawlLoginStation, 1).status == "timeout"
+        assert s.get(CrawlLoginStation, 1).finished_at is not None
+    finally:
+        s.close()
+
+
+# ── finished-station Service reaper ─────────────────────────────────────────
+def _station_objects(client, station_id, source="rmfyalk", alias="acct001",
+                     identity_id=1):
+    """Put a station's real Job+Service manifests into the fake cluster."""
+    job, svc = station_ops.build_station_manifests(
+        station_id=station_id, source=source, account_alias=alias,
+        identity_id=identity_id, proxy_url=None)
+    client.create(job)
+    client.create(svc)
+    return job, svc
+
+
+def test_reap_removes_a_finished_stations_service(session):
+    """站 Service 没有 TTL：实测 fd-mcp 54 个 Service 里 53 个是站点残骸
+    （2026-10-08 起每晚一个），而 Jobs 全被 ttlSecondsAfterFinished 清干净了。
+    清扫器的判据是「终态行 + 已过 Job TTL 宽限」，Job 不碰（它自己有 TTL）。"""
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="completed",
+                   finished_at=NOW)
+    client = FakeStationClient()
+    _station_objects(client, sid)
+
+    deleted = station_ops.reap_station_services(
+        session, client=client, now=NOW + dt.timedelta(hours=2))
+
+    assert deleted == 1
+    assert [k for k, _ in client.deleted] == ["Service"]
+    assert client.manifests("Job")          # the Job is left to its own TTL
+
+
+def test_reap_spares_live_and_recent_stations(session):
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    live = _station(iid, "rmfyalk", "acct001", status="waiting_operator",
+                    deadline=NOW + dt.timedelta(minutes=30))
+    fresh = _station(iid, "rmfyalk", "acct002", status="completed",
+                     finished_at=NOW)
+    client = FakeStationClient()
+    _station_objects(client, live)
+    _station_objects(client, fresh, alias="acct002")
+
+    # 10 min after the finish: inside the Job's own 1h TTL, pair expires together
+    assert station_ops.reap_station_services(
+        session, client=client, now=NOW + dt.timedelta(minutes=10)) == 0
+    assert client.deleted == []
+    assert len(client.manifests("Service")) == 2
+
+
+def test_reap_is_idempotent_per_process(session):
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="timeout",
+                   finished_at=NOW)
+    client = FakeStationClient()
+    _station_objects(client, sid)
+    later = NOW + dt.timedelta(hours=2)
+
+    assert station_ops.reap_station_services(session, client=client,
+                                             now=later) == 1
+    # second tick: the station is cached as visited, no list call, no delete
+    assert station_ops.reap_station_services(session, client=client,
+                                             now=later) == 0
+    assert [k for k, _ in client.deleted] == ["Service"]
+
+
+def test_reap_retries_after_a_failed_delete_and_never_raises(session):
+    station_ops._REAPED_STATION_IDS.clear()
+
+    class BrokenOnce(FakeStationClient):
+        def __init__(self):
+            super().__init__()
+            self.failed = False
+
+        def delete(self, kind, name):
+            if not self.failed:
+                self.failed = True
+                raise RuntimeError("forbidden")
+            return super().delete(kind, name)
+
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="failed",
+                   finished_at=NOW)
+    client = BrokenOnce()
+    _station_objects(client, sid)
+    later = NOW + dt.timedelta(hours=2)
+
+    assert station_ops.reap_station_services(session, client=client,
+                                             now=later) == 0
+    assert client.manifests("Service")      # still there, retried below
+    assert sid not in station_ops._REAPED_STATION_IDS
+    assert station_ops.reap_station_services(session, client=client,
+                                             now=later) == 1
+    assert client.manifests("Service") == []
+
+
+def test_reap_refuses_a_service_it_did_not_create(session):
+    """名字必须是我们自己的前缀；只按标签认会误删别人的对象。"""
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    sid = _station(iid, "rmfyalk", "acct001", status="completed",
+                   finished_at=NOW)
+    client = FakeStationClient()
+    client.create({"apiVersion": "v1", "kind": "Service",
+                   "metadata": {"name": "somebody-elses-svc",
+                                "labels": {"station-id": str(sid)}}})
+
+    assert station_ops.reap_station_services(
+        session, client=client, now=NOW + dt.timedelta(hours=2)) == 0
+    assert client.deleted == []
+
+
+def test_prearm_tick_reaps_leftover_station_services(session, monkeypatch):
+    """清扫挂在 tick 里：一次真实运行就把历史残骸收掉，且不干扰计划。"""
+    station_ops._REAPED_STATION_IDS.clear()
+    iid = _ident("rmfyalk", "acct001", "login_required")
+    old = _station(iid, "rmfyalk", "acct001", status="completed",
+                   finished_at=NOW - dt.timedelta(days=5))
+    client = FakeStationClient()
+    _, svc = _station_objects(client, old)
+    svc_name = svc["metadata"]["name"]
+    monkeypatch.setattr(station_ops, "ensure_identity_with_egress",
+                        lambda *a, **k: {"status": "queued"})
+    monkeypatch.setattr(station_ops, "create_station",
+                        lambda *a, **k: {"status": "launched", "station_id": 2})
+
+    station_ops.prearm_tick(session, now=NOW, client=client)
+
+    assert ("Service", svc_name) in client.deleted
+
+
+# ── the transport: deleting a station's Job must take its pod along ──────────
+def test_station_delete_cascades_so_the_pod_does_not_survive(monkeypatch):
+    """裸 DELETE 的默认传播是 Orphan ⇒ Job 走了、pod 变成裸 pod 永远留着。
+
+    2026-11-15 产线冒烟实测：三次 reclaim 留下三个 ownerReferences 为空的 pod，
+    还在 Running（512Mi 请求 / 2Gi 上限、各钉着一个镜像）。没有任何东西能收它们：
+    Job 没了所以没有 TTL，reaper 只管 Service，行已是终态，而 pod-gc 按设计
+    不碰裸 pod。判据只能落在**请求本身**——集群侧「看起来删干净了」正是那个形态。
+    """
+    client = station_ops.StationK8sClient(namespace="fd-mcp")
+    calls: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setattr(client, "_in_cluster", lambda: True)
+    monkeypatch.setattr(client, "_api",
+                        lambda method, path, body=None: calls.append(
+                            (method, path, body)) or {})
+
+    assert client.delete("Job", "login-rmfyalk-acct001-abc123") is True
+
+    method, path, body = calls[-1]
+    assert method == "DELETE"
+    assert path.endswith("/apis/batch/v1/namespaces/fd-mcp/jobs/"
+                         "login-rmfyalk-acct001-abc123")
+    assert body is not None, (
+        "DELETE 没带 DeleteOptions —— API 默认按 Orphan 处理，Job 的 pod 会被"
+        "摘掉 ownerReference 继续跑，且再没有东西能收它")
+    assert body.get("propagationPolicy") == "Background", (
+        f"传播策略是 {body.get('propagationPolicy')!r}，必须 Background："
+        "Foreground 会让 5 分钟的预拉起循环等 pod 真正消失")
+
+
+def test_station_delete_cascades_on_the_kubectl_transport(monkeypatch):
+    """本地/dev 走 kubectl 那半也要带级联，否则两个传输的行为不一致。"""
+    client = station_ops.StationK8sClient(namespace="fd-mcp")
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(client, "_in_cluster", lambda: False)
+    monkeypatch.setattr(client, "_kubectl",
+                        lambda *args, **kw: seen.append(args) or "")
+
+    client.delete("Job", "login-x-y-abc123")
+
+    args = seen[-1]
+    assert "delete" in args and "login-x-y-abc123" in args
+    assert any(a.startswith("--cascade") for a in args), (
+        f"kubectl delete 没带 --cascade（收到 {args}）")
 
 
 def test_prearm_plan_skips_fires_beyond_the_window(session):

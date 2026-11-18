@@ -149,9 +149,13 @@ def launch_login_station(
                        "observation view (vnc_url is relative — open it "
                        "through the panel with your own credential; the "
                        "station is not reachable any other way)")
+    # `proxy_url` 是 `http://user:pass@host:port` 形态的**真口令**，不能原样回给
+    # MCP 调用方（调用方是 agent，凭据会进它的上下文与日志）。面板与日志都用
+    # `mask_proxy_url`，这里是唯一漏掉的一处：换键名并脱敏——调用方需要的是
+    # 「走的哪个出口」，host:port 就够（2026-11-14）。
+    out["proxy_url_masked"] = station_ops.mask_proxy_url(ensured.get("proxy_url"))
     return {**{k: ensured.get(k) for k in ("identity_id", "egress_ref",
-                                           "proxy_url", "created",
-                                           "previous_status")}, **out}
+                                           "created", "previous_status")}, **out}
 
 
 def register_auth_tools(mcp: FastMCP) -> None:

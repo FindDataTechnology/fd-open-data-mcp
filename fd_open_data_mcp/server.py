@@ -14,7 +14,7 @@ import os
 
 from fastmcp import FastMCP
 
-from fd_open_data_mcp import engines
+from fd_open_data_mcp import engines, wellknown
 from fd_open_data_mcp.annotations import annotations_for
 from fd_open_data_mcp.db import get_database
 from fd_open_data_mcp.search_cache import cached_search
@@ -34,6 +34,15 @@ mcp = FastMCP(
         "• Rank / inspect candidate sources for a concept -> rank_sources."
     ),
 )
+
+# ── 线自描述端点（converge-line-identity-and-keys 1.4）────────────────────────
+# 公开、免鉴权、零网络；原样回吐仓根 line-manifest.json。路由与豁免是两处落点：
+# 只挂路由不加豁免，配了 MCP_BEARER_TOKEN 的线仍会对匿名发现请求回 401。
+# 路径字面量只在 wellknown 里出现一次，这里引用它，不复制第二份。
+wellknown.register(mcp)
+
+#: 共享令牌门必须放行的精确路径。**不含 /mcp**——门本身没有被这条豁免削弱。
+EXEMPT_PATHS = (wellknown.WELL_KNOWN_PATH,)
 
 # Attach the crawl-policy control-plane tools (add-fund-crawl-control-center).
 from fd_open_data_mcp.policy_tools import register_policy_tools
@@ -654,12 +663,50 @@ def add_entity_identifier(entity_type: str, entity_id: int, source: str, identif
 
 
 # ─── Entity graph ────────────────────────────────────────────────────────────
+#: 单次 `list_entities` 的行数上限（harden-fleet-tool-face-and-queue 3.2）。
+#: 与 `hotel_series` 的 60 点是同一条压缩风暴链的两半：一次
+#: `list_entities(limit=100)` 实测把 100 条 × 六字段（含 metadata JSONB）塞进
+#: 单条 tool/result，叠加技能清单后小窗口模型三四步就进 `context pressure`。
+#: 默认给 50 行且**不带** metadata（要挑实体不需要它），翻页用 offset/limit，
+#: 需要全字段时显式 `include_metadata=True`。
+LIST_ENTITIES_MAX_ROWS = 50
+
+
 @mcp.tool(annotations=annotations_for("list_entities"))
-def list_entities(entity_type: str, limit: int = 100, offset: int = 0) -> list[dict]:
-    """List entities of a specific type."""
+def list_entities(entity_type: str, limit: int = LIST_ENTITIES_MAX_ROWS,
+                  offset: int = 0, include_metadata: bool = False) -> dict:
+    """List entities of one type (read-only, payload-capped by default).
+
+    Args:
+        entity_type: country / city / company / stock / etf / bond / index / future / crypto
+        limit: rows to return; defaults to a small page, raise it only when you
+            really need many rows at once
+        offset: rows to skip — combine with `limit` to page through the whole type
+        include_metadata: include each row's metadata JSON. Omitted by default:
+            it is the bulk of the payload and is rarely needed to pick an entity.
+    """
+    from fd_open_data_mcp.entity_graph_tools import count_entities
     from fd_open_data_mcp.entity_graph_tools import list_entities as _list
 
-    return _list(entity_type, limit, offset)
+    cap = max(1, int(limit or LIST_ENTITIES_MAX_ROWS))
+    rows = _list(entity_type, cap, offset)
+    if not include_metadata:
+        rows = [{k: v for k, v in row.items() if k != "metadata"} for row in rows]
+    total = count_entities(entity_type)
+    out: dict = {"entity_type": entity_type, "count": len(rows),
+                 "total_count": total, "offset": offset, "rows": rows}
+    if offset + len(rows) < total:
+        out["truncated"] = {
+            "returned": len(rows),
+            "total": total,
+            "how_to_get_more": f"用 offset={offset + len(rows)} 取下一页，"
+                               "或显式提高 limit",
+        }
+        out["notes"] = [
+            f"已按体积上限只返回 {len(rows)} 行（共 {total} 行）；"
+            "翻页用 offset/limit，metadata 字段需显式传 include_metadata=True",
+        ]
+    return out
 
 
 @mcp.tool(annotations=annotations_for("get_entity"))
@@ -1691,24 +1738,34 @@ def read_series(concept_id: int | str, entity_type: str | None = None,
             from fd_open_data_mcp.fetch.coverage import (
                 _merge_intervals,
                 coverage as _coverage,
-                expand_periods as _expand_periods,
             )
             from fd_open_data_mcp.fetch.gapfill import series_dates as _series_dates
 
             cov_entity_type = out.get("landed_entity_type") or entity_type
             if cov_entity_type and entity_id is not None:
-                _stored = _series_dates(s, cid, cov_entity_type, entity_id)
-                # 按"这条日期回答的那一期"判覆盖，而不是按字面那一天：年度行回答整年
-                # （裸年份 "2019" 在字符串序里小于 "2019-01-01"，照字面比会把整整一年
-                # 判成缺失）。日频是恒等变换，价格读面行为不变。
-                _dates = _expand_periods(
-                    _stored, getattr(concept, "frequency", None))
+                _dates = _series_dates(s, cid, cov_entity_type, entity_id)
                 _cov = _coverage(_dates, start, end)
-                in_window = [d for d in _dates if start <= d <= end]
+                # 覆盖区间必须按"这条观测代表哪段日历"折算：一条 `2019` 覆盖整年。
+                # 此前直接拿 (d, d) 去合并，按年的串在 _merge_intervals 里
+                # split("-") 就炸，整块被 except 吞成 "coverage unknown"。
+                from fd_open_data_mcp.semantic.dates import (
+                    observation_period as _obs_period,
+                )
+
+                _win = [_obs_period(start), _obs_period(end)]
+                _win_lo = _win[0][0].isoformat() if _win[0] else start
+                _win_hi = _win[1][1].isoformat() if _win[1] else end
+                _spans = []
+                for _d in _dates:
+                    _per = _obs_period(_d)
+                    if _per is None:
+                        continue
+                    _lo, _hi = _per[0].isoformat(), _per[1].isoformat()
+                    if _lo <= _win_hi and _hi >= _win_lo:      # 日历相交，而非字典序包含
+                        _spans.append((max(_lo, _win_lo), min(_hi, _win_hi)))
                 out["coverage"] = {
                     "requested": [start, end],
-                    "covered": [list(iv) for iv in _merge_intervals(
-                        (d, d) for d in in_window)],
+                    "covered": [list(iv) for iv in _merge_intervals(_spans)],
                     "missing": [list(g) for g in _cov.gaps],
                     "known_empty": [list(g) for g in _cov.known_empty],
                     "complete": _cov.complete,
@@ -1888,6 +1945,9 @@ class BearerAuthMiddleware:
         token = os.environ.get("MCP_BEARER_TOKEN", "").strip()
         if scope["type"] != "http" or not token:
             return self.asgi_app(scope, receive, send)
+        if (scope.get("path") or "") in EXEMPT_PATHS:
+            # 公开元数据（线自描述）：未持本线凭据的调用方也要能读到「这条线认哪些钥匙」。
+            return self.asgi_app(scope, receive, send)
 
         headers = dict(scope.get("headers") or [])
         provided = headers.get(b"authorization", b"")
@@ -1942,17 +2002,33 @@ def _enable_mcp_session_reaping() -> None:
         timeout = float(os.environ.get("MCP_SESSION_IDLE_TIMEOUT", "1800") or 0)
     except ValueError:
         timeout = 1800.0
-    if timeout <= 0 or getattr(
-        StreamableHTTPSessionManager.__init__, "_fd_reaping_patch", False
-    ):
+    # 幂等但**值敏感**：判据是"已经用同一个值装过"，不是"装过"。
+    # 只看布尔标记的话，第二次调用（哪怕 MCP_SESSION_IDLE_TIMEOUT 改了）会被静默忽略，
+    # 实际生效的永远是第一次装进去的那个值——配置在安装那一刻被固化。
+    # 2026-11-12 实测：先按默认装上 1800，再设 env=60 调用，管理器拿到的仍是 1800，
+    # 于是 `test_session_reaping` 单独跑 6 passed、整套里两条红（前面有测试启动过 app）。
+    current = StreamableHTTPSessionManager.__init__
+    installed = getattr(current, "_fd_reaping_timeout", None)
+    if timeout <= 0:
+        # 0 = 关闭。关掉必须**撤掉**已装的那层，否则旧值继续生效，"关闭"就是假的
+        # （与"配置在安装那一刻被固化"是同一个病的另一面）。
+        if installed is not None:
+            StreamableHTTPSessionManager.__init__ = getattr(
+                current, "_fd_reaping_origin", current
+            )
         return
-    origin = StreamableHTTPSessionManager.__init__
+    if installed == timeout:
+        return
+    # 重复安装时替换而不是套娃：始终包住最初的 __init__。
+    origin = getattr(current, "_fd_reaping_origin", current)
 
     def _init_with_idle_timeout(self, *args, **kwargs):
         kwargs.setdefault("session_idle_timeout", timeout)
         origin(self, *args, **kwargs)
 
     _init_with_idle_timeout._fd_reaping_patch = True
+    _init_with_idle_timeout._fd_reaping_timeout = timeout
+    _init_with_idle_timeout._fd_reaping_origin = origin
     StreamableHTTPSessionManager.__init__ = _init_with_idle_timeout
 
 

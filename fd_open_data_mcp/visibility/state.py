@@ -80,21 +80,33 @@ def set_scan_watermark(ts: float) -> None:
 
 
 # --- alerted-set -------------------------------------------------------------
-def _alerted_key(run_id: int, event: str) -> str:
+def _alerted_key(run_id: int | str, event: str) -> str:
     return f"{_ALERTED_PREFIX}:{run_id}:{event}"
 
 
-def already_alerted(run_id: int, event: str) -> bool:
-    """True if this (run, event) has already been pushed. False without Redis."""
+def already_alerted(run_id: int | str, event: str) -> bool:
+    """True if this (run, event) has already been pushed. False without Redis.
+
+    ``run_id`` is typed ``int | str`` because not every alert class is keyed by a
+    ``policy_runs.id``: the credential-expiry check keys on a cluster name
+    (``"credential:cheap"``). Same mechanism, different subject.
+    """
     r = _client()
     if r is None:
         return False  # best-effort: alert at least once when Redis is absent
     return bool(r.exists(_alerted_key(run_id, event)))
 
 
-def mark_alerted(run_id: int, event: str) -> None:
-    """Record that this (run, event) has been pushed (7-day TTL)."""
+def mark_alerted(run_id: int | str, event: str,
+                 ttl_sec: int = _ALERT_TTL_SEC) -> None:
+    """Record that this (run, event) has been pushed (default 7-day TTL).
+
+    ``ttl_sec`` is per-class because the useful reminder cadence differs: a failed
+    run never needs repeating, but a *condition* that stays true (a credential
+    drifting toward expiry) should re-nag — once a week is too quiet for a 10-day
+    runway.
+    """
     r = _client()
     if r is None:
         return
-    r.set(_alerted_key(run_id, event), "1", ex=_ALERT_TTL_SEC)
+    r.set(_alerted_key(run_id, event), "1", ex=ttl_sec)

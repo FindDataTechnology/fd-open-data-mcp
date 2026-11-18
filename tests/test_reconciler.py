@@ -832,6 +832,63 @@ def test_kubectl_poll_reads_json_not_positional_jsonpath(monkeypatch):
     assert launcher.poll("crawl-policy-1-x") == "unknown"
 
 
+def test_cancel_job_delete_cascades_so_the_crawler_pod_dies(monkeypatch):
+    """取消一次爬取要真的杀掉那个 pod。
+
+    `cancel_run` 删的是一个**还在跑**的 Job。裸 DELETE 不带 DeleteOptions 时
+    API 按 `propagationPolicy: Orphan` 处理：Job 消失，pod 被摘掉 ownerReference
+    继续跑 —— 那不是「取消」，是「换了个没人管的方式继续烧 CPU」。
+    2026-11-15 在登同一条链的登录站上实测过这个形态（三个 reclaim 留下三个
+    无 owner 的 pod），这里是同一行的另一半。
+
+    判据落在**请求本身**：集群侧「Job 已经没了」在改动前后一模一样。
+    """
+    from fd_open_data_mcp.refresh.reconciler import K8sJobLauncher
+
+    launcher = K8sJobLauncher()
+    calls: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    monkeypatch.setattr(
+        K8sJobLauncher, "_k8s_api",
+        lambda self, m, p, b=None: calls.append((m, p, b)) or {})
+
+    assert launcher.delete("crawl-policy-1-abc") is True
+    method, path, body = calls[-1]
+    assert method == "DELETE" and path.endswith("/jobs/crawl-policy-1-abc")
+    assert body is not None, (
+        "DELETE 没带 DeleteOptions —— API 默认 Orphan，爬虫 pod 会一直跑下去")
+    assert body.get("propagationPolicy") == "Background", (
+        f"传播策略是 {body.get('propagationPolicy')!r}，必须是 Background："
+        "Foreground 会让面板的取消请求阻塞到 pod 真正退出")
+
+    # kubectl 那半（本地/dev）也要级联，两个传输不许行为不一致
+    seen: list[tuple[str, ...]] = []
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: False)
+    monkeypatch.setattr(K8sJobLauncher, "_kubectl",
+                        lambda self, *a, **kw: seen.append(a) or "")
+    launcher.delete("crawl-policy-1-abc")
+    assert any(x.startswith("--cascade") for x in seen[-1]), (
+        f"kubectl delete 没带 --cascade（收到 {seen[-1]}）")
+
+
+def test_multicluster_cancel_job_delete_cascades(monkeypatch):
+    """多集群那条路（ClusterK8sClient.delete_job）同样要级联。"""
+    from types import SimpleNamespace
+
+    from fd_open_data_mcp.refresh.reconciler import ClusterK8sClient
+
+    client = ClusterK8sClient(SimpleNamespace(
+        name="cheap", api_server="https://x:6443", namespace="scraw"))
+    calls: list[tuple[str, str, dict | None]] = []
+    monkeypatch.setattr(ClusterK8sClient, "_api",
+                        lambda self, m, p, b=None: calls.append((m, p, b)) or {})
+
+    assert client.delete_job("crawl-policy-1-abc") is True
+    method, path, body = calls[-1]
+    assert method == "DELETE" and path.endswith("/jobs/crawl-policy-1-abc")
+    assert body and body.get("propagationPolicy") == "Background"
+
+
 def test_direct_job_command_carries_no_dsn(monkeypatch):
     """The DSN must never ride on the command line (stop-passing-dsn-on-argv).
 
@@ -900,3 +957,199 @@ def test_common_env_passes_the_retention_gate_through(monkeypatch):
     monkeypatch.delenv("FD_RETENTION_GATE", raising=False)
     env2 = {e["name"]: e for e in launcher._common_env(cluster)}
     assert "FD_RETENTION_GATE" not in env2, "不设档位时不要凭空写一个值进去"
+
+
+# ── 2026-11-14: 判不出的时候说「判不出」，不要替它编一个原因 ─────────────────
+def test_diagnosis_error_travels_into_the_detail(monkeypatch):
+    """API 查询失败时，detail 必须点名失败本身。
+
+    实况：policy 2659 连续三天失败，detail 全是「pod 已回收，无终态可抓」，
+    而上游其实是东财封机房出口——那句话把一次「问不到」写成了「没什么可问」，
+    让封禁多藏了三天。
+    """
+    from fd_open_data_mcp.refresh.reconciler import (
+        K8sJobLauncher, _synthesize_failure_detail,
+    )
+
+    launcher = K8sJobLauncher(namespace="scraw")
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+
+    def boom(self, m, p, b=None):
+        raise PermissionError("pods is forbidden: User cannot list resource")
+
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api", boom)
+    detail = _synthesize_failure_detail(launcher, "crawl-policy-2659-x")
+
+    assert "PermissionError" in detail
+    assert "诊断查询失败" in detail
+    assert "pod 已回收" not in detail
+
+
+def test_reclaimed_pod_keeps_the_original_wording(monkeypatch):
+    """pod 列表查得到但为空 = 真回收了：这条要保住原文案，别把两种情形混成一句。"""
+    from fd_open_data_mcp.refresh.reconciler import (
+        K8sJobLauncher, _synthesize_failure_detail,
+    )
+
+    launcher = K8sJobLauncher(namespace="scraw")
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api",
+                        lambda self, m, p, b=None: {"items": []})
+
+    detail = _synthesize_failure_detail(launcher, "crawl-policy-2659-x")
+    assert "pod 已回收" in detail
+
+
+def test_diagnose_that_raises_itself_is_reported_not_swallowed():
+    """launcher.diagnose 抛异常（不是返回 None）也要留下原因，且不能把关行打断。"""
+    from fd_open_data_mcp.refresh.reconciler import _synthesize_failure_detail
+
+    class Raising:
+        def diagnose(self, job_ref):
+            raise RuntimeError("client exploded")
+
+    detail = _synthesize_failure_detail(Raising(), "cheap/job-1")
+    assert "诊断未完成" in detail and "RuntimeError" in detail
+
+
+# ─── the Job object outlives the pod (2026-11-17) ────────────────────────────
+# Live evidence these fixtures come from: on 2026-11-17 two failed jobs on
+# cheap9/scraw had 0 pods left (reaped) while their own status.conditions still
+# named two DIFFERENT causes — crawl-policy-8 BackoffLimitExceeded,
+# crawl-policy-2659 DeadlineExceeded. Reading only the pods wrote the same
+# "pod 已回收，无终态可抓" for both, which crawl-run-telemetry forbids
+# ("该合成 SHALL NOT 因 pod 随后被回收而失效").
+
+_BACKOFF_JOB = {
+    "spec": {"activeDeadlineSeconds": 10800},
+    "status": {"conditions": [
+        {"type": "FailureTarget", "status": "True",
+         "reason": "BackoffLimitExceeded",
+         "message": "Job has reached the specified backoff limit"},
+        {"type": "Failed", "status": "True",
+         "reason": "BackoffLimitExceeded",
+         "message": "Job has reached the specified backoff limit"},
+    ]},
+}
+_DEADLINE_JOB = {
+    "spec": {"activeDeadlineSeconds": 10800},
+    "status": {"conditions": [
+        {"type": "FailureTarget", "status": "True",
+         "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"},
+        {"type": "Failed", "status": "True",
+         "reason": "DeadlineExceeded",
+         "message": "Job was active longer than specified deadline"},
+    ]},
+}
+
+
+def test_job_conditions_survive_pod_reclamation():
+    """No pod left, but the Job still names the cause and the deadline."""
+    line = reconciler._job_condition_summary("cheap9/crawl-policy-8-x", _BACKOFF_JOB)
+    assert line and "BackoffLimitExceeded" in line
+    assert "Job has reached the specified backoff limit" in line
+    assert "activeDeadlineSeconds=10800" in line
+
+
+def test_job_conditions_keep_the_two_causes_apart():
+    """Paired arm: the defect was that both runs read as ONE opaque sentence.
+
+    Asserting the strings that differ (and that the other cause's reason is
+    absent) is what makes this arm bite — an arm asserting only "non-empty"
+    stays green with the old fallback still in place.
+    """
+    backoff = reconciler._job_condition_summary("cheap9/j1", _BACKOFF_JOB)
+    deadline = reconciler._job_condition_summary("cheap9/j2", _DEADLINE_JOB)
+    assert backoff and deadline and backoff != deadline
+    assert "DeadlineExceeded" in deadline
+    assert "BackoffLimitExceeded" not in deadline
+    assert "BackoffLimitExceeded" in backoff
+    assert "DeadlineExceeded" not in backoff
+
+
+def test_job_conditions_absent_keeps_the_terse_fallback():
+    """No conditions / unreadable Job -> None, so the close path still writes
+    its terse non-empty note instead of inventing a reason."""
+    assert reconciler._job_condition_summary("cheap9/x", None) is None
+    assert reconciler._job_condition_summary("cheap9/x", {}) is None
+    assert reconciler._job_condition_summary(
+        "cheap9/x", {"status": {"conditions": [
+            {"type": "Complete", "status": "True"}]}}) is None
+    # a Failed condition that never went True carries no verdict
+    assert reconciler._job_condition_summary(
+        "cheap9/x", {"status": {"conditions": [
+            {"type": "Failed", "status": "False"}]}}) is None
+
+
+def test_k8s_launcher_diagnose_asks_the_job_when_pods_are_gone(monkeypatch):
+    """In-cluster transport: pods gone -> the Job body is read, not skipped.
+
+    Both transports get their own arm because a fallback wired into only one
+    of them leaves the other deployment shape as opaque as before.
+    """
+    from fd_open_data_mcp.refresh.reconciler import K8sJobLauncher
+
+    calls: list[str] = []
+
+    def fake_api(self, method, path, body=None):
+        calls.append(path)
+        if "/pods" in path:
+            return {"items": []}
+        assert path.endswith("/jobs/crawl-policy-8-x"), path
+        return _BACKOFF_JOB
+
+    monkeypatch.setattr(K8sJobLauncher, "_in_cluster", lambda self: True)
+    monkeypatch.setattr(K8sJobLauncher, "_k8s_api", fake_api)
+
+    detail = K8sJobLauncher(namespace="scraw").diagnose("crawl-policy-8-x")
+    assert detail and "BackoffLimitExceeded" in detail
+    assert "pod 已回收" not in detail
+    assert any("/jobs/crawl-policy-8-x" in c for c in calls)
+
+
+def test_multi_cluster_diagnose_falls_back_to_the_job(monkeypatch):
+    """Wiring: when the cluster has no pods left, diagnose must ask the Job.
+
+    The pod-only version returned None here, and `_synthesize_failure_detail`
+    then wrote the opaque note while the Job object still held the reason.
+    """
+    from types import SimpleNamespace
+
+    from fd_open_data_mcp.refresh.reconciler import MultiClusterLauncher
+
+    class _FakeClient:
+        def __init__(self, cluster):
+            self.cluster = cluster
+
+        def pods_for_job(self, name):
+            return []
+
+        def job_body(self, name):
+            assert name == "crawl-policy-8-x"
+            return _BACKOFF_JOB
+
+        def pod_log_tail(self, pod, lines=0):
+            raise AssertionError("no pod to read")
+
+    class _FakeSession:
+        def query(self, *a, **k):
+            return self
+
+        def filter_by(self, **k):
+            return self
+
+        def first(self):
+            return SimpleNamespace(name="cheap9", namespace="scraw",
+                                   id=9, runtime_hints=None)
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(reconciler, "ClusterK8sClient", _FakeClient)
+    monkeypatch.setattr(MultiClusterLauncher, "_session", lambda self: _FakeSession())
+
+    detail = MultiClusterLauncher().diagnose("cheap9/crawl-policy-8-x")
+    assert detail and "BackoffLimitExceeded" in detail
+    assert "pod 已回收" not in detail
+

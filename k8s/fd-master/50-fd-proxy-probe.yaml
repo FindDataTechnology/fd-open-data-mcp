@@ -1,0 +1,74 @@
+# CANONICAL RECORD of the fd-master/fd-proxy-probe CronJob — generated from the LIVE
+# object on 2026-11-11 (kube context xinru). Like its siblings this CronJob was
+# applied ad hoc and no repo tracked it, so the object's own
+# `last-applied-configuration` annotation is the only other record — and it is
+# STALE (it still names a retired registry / older image). Re-applying from that
+# annotation would silently roll this CronJob back.
+#
+# Regenerate / check for drift:
+#   kubectl --context xinru -n fd-master get cronjob fd-proxy-probe -o yaml
+#   # diff the `spec` block against this file
+#
+# Secret values are references only (secretKeyRef) — nothing sensitive is inlined.
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  labels:
+    app: fd-proxy-probe
+  name: fd-proxy-probe
+  namespace: fd-master
+spec:
+  concurrencyPolicy: Forbid
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata: {}
+    spec:
+      activeDeadlineSeconds: 300
+      template:
+        metadata: {}
+        spec:
+          containers:
+          - command:
+            - python
+            - -m
+            - fd_open_data_mcp.probe.job
+            env:
+            - name: FD_OPEN_DATA_MCP_DATABASE_URL
+              valueFrom:
+                secretKeyRef:
+                  key: DATABASE_URL
+                  name: fd-db-secret
+            - name: PROXY_REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  key: PROXY_REDIS_URL_CONTROL
+                  name: fd-db-secret
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  key: REDIS_URL
+                  name: fd-db-secret
+            - name: PYTHONUNBUFFERED
+              value: '1'
+            image: ccr.ccs.tencentyun.com/finddata/scraw-fd-open-data-mcp:sha-e157799
+            imagePullPolicy: IfNotPresent
+            name: probe
+            resources:
+              limits:
+                cpu: 500m
+                memory: 512Mi
+              requests:
+                cpu: 100m
+                memory: 128Mi
+            terminationMessagePath: /dev/termination-log
+            terminationMessagePolicy: File
+          dnsPolicy: ClusterFirst
+          imagePullSecrets:
+          - name: fd-harbor-pull
+          restartPolicy: OnFailure
+          schedulerName: default-scheduler
+          securityContext: {}
+          terminationGracePeriodSeconds: 30
+  schedule: '*/1 * * * *'
+  successfulJobsHistoryLimit: 3
+  suspend: false

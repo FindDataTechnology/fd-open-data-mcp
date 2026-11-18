@@ -76,3 +76,31 @@ def test_violation_reports_location(tmp_path):
     v = scan(tmp_path)
     cred = [x for x in v if x["kind"] == "credential"]
     assert cred and cred[0]["file"] == "leak.py" and cred[0]["line"] == 2
+
+
+def test_the_scanner_does_not_flag_its_own_rulebook(tmp_path):
+    """扫描器自己的规则表必须含那些字符串，扫自己必然命中。
+
+    2026-11-14 实测：`Build Check` 在 main 上连红多个提交，其中 3 条就是
+    `scripts/oss_sanitize.py` 命中了它自己的规则（文档字符串里的 tailnet 网段、
+    规则列表里的两个私有主机名）。这 3 条假红把 72 条真命中压在了下面。
+    排除规则本不是放宽策略——规则本自己就是要公开的，里面装的是检测器不是秘密。
+    """
+    repo = Path(__file__).resolve().parent.parent
+    src = (repo / "scripts" / "oss_sanitize.py").read_text(encoding="utf-8")
+    assert "lawcraw_business" in src          # 规则表里确实有这些串
+    assert "100.64" in src
+
+    _write(tmp_path, "scripts/oss_sanitize.py", src)
+    assert scan(tmp_path) == []
+
+
+def test_the_rulebook_does_not_hide_a_real_violation(tmp_path):
+    """反面对照：排除的是「文件自己」，不是「文件所在目录」——
+    同目录里另放一个真泄漏必须照样抓到。"""
+    repo = Path(__file__).resolve().parent.parent
+    src = (repo / "scripts" / "oss_sanitize.py").read_text(encoding="utf-8")
+    _write(tmp_path, "scripts/oss_sanitize.py", src)
+    _write(tmp_path, "scripts/leak.py", "HOST = 'guangzhou-xinru'\n")
+    found = scan(tmp_path)
+    assert [v["file"] for v in found] == ["scripts/leak.py"]

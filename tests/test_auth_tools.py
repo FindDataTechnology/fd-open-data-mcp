@@ -241,3 +241,30 @@ def test_mcp_login_request_is_the_shared_operation(session):
         assert any("by mcp" in d for d in details)
     finally:
         s.close()
+
+
+def test_launch_login_payload_never_carries_the_egress_credential(session, monkeypatch):
+    """`proxy_url` 是 http://user:pass@host:port 形态的真口令。
+
+    面板显示与日志早就走 `mask_proxy_url`，但 MCP 的 `auth_launch_login` 返回里
+    曾经原样带着它——调用方是 agent，凭据会进它的上下文与日志。2026-11-14 实历：
+    正是我用 `select *` 查登录站表时把一行明文出口打到了屏幕上，才顺着找到这里。
+
+    判据是「整个载荷里不许出现 `user:pass@`」，不是「有一个 masked 字段」——
+    后者在同时保留原字段时也成立。
+    """
+    import json
+    from fd_open_data_mcp import station_ops as so
+
+    monkeypatch.setattr(so, "ensure_identity_with_egress",
+                        lambda *a, **k: {"status": "queued", "identity_id": 1,
+                                         "egress_ref": "proxy:55",
+                                         "proxy_url": "http://u:p@10.0.0.7:3128"})
+    monkeypatch.setattr(so, "create_station",
+                        lambda *a, **k: {"status": "launched", "station_id": 7,
+                                         "vnc_path": "/panel/auth/station/7/vnc/vnc.html"})
+    out = _call("auth_launch_login",
+                {"source": "rmfyalk", "account_alias": "acc-egress"})
+    blob = json.dumps(out, ensure_ascii=False, default=str)
+    assert "u:p@" not in blob, blob
+    assert out["proxy_url_masked"] == "http://••••@10.0.0.7:3128"

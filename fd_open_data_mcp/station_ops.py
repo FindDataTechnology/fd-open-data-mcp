@@ -62,6 +62,7 @@ CREATE TABLE IF NOT EXISTS crawl_login_stations (
 STATION_NAMESPACE = "fd-mcp"        # ns with the station-launcher Role (SA fd-panel)
 STATION_PORT = 6080                 # station websockify/noVNC port (login_station.py WS_PORT)
 STATION_DEADLINE_SECONDS = 3600     # 60 min default: row deadline, Job activeDeadline and runtime backstop
+STATION_JOB_TTL_SECONDS = 3600      # Job ttlSecondsAfterFinished (Services have no TTL — see reap_station_services)
 STATION_IMAGE_DEFAULT = "fd-industry-runner:latest"  # placeholder when STATION_IMAGE is unset
 STATION_TERMINAL = ("completed", "failed", "timeout", "reclaimed")
 STATION_OPEN = ("launching", "waiting_operator")
@@ -428,20 +429,44 @@ class StationK8sClient:
         return manifest
 
     def delete(self, kind: str, name: str) -> bool:
-        """DELETE the object; False when it is already gone (404)."""
+        """DELETE the object; False when it is already gone (404).
+
+        **Always cascades.** A bare ``DELETE`` carries no ``DeleteOptions``, and
+        the API's default propagation for that is ``Orphan``: the Job vanishes
+        while its pod keeps **running with its ownerReference stripped**, so
+        nothing can ever collect it — no Job left to carry a TTL, the reaper
+        only owns Services, the row is already terminal, and ``pod-gc`` refuses
+        bare pods by design. Measured 2026-11-15 while smoke-testing the station
+        release: three ``reclaim_station`` calls left three
+        ownerReference-less pods still running three minutes later.
+
+        That is the panel's own "close this station" button leaking a container
+        (512Mi request / 2Gi limit, one pinned image) on every use — the same
+        quota-and-image family that keeps taking nodes down. ``Background``
+        removes the Job first and lets the GC take its pods with it.
+
+        Services have no dependents, so the same options body is harmless there.
+        """
         import urllib.error
 
+        # Background, not Foreground: the caller is a 5-minute loop, and a
+        # Foreground delete blocks until the pod is really gone — one slow
+        # termination would stall the whole pre-arm pass behind it.
+        options = {"apiVersion": "v1", "kind": "DeleteOptions",
+                   "propagationPolicy": "Background"}
         if self._in_cluster():
             prefix, plural = self._PLURAL[kind]
             try:
                 self._api("DELETE",
-                          f"/{prefix}/namespaces/{self.namespace}/{plural}/{name}")
+                          f"/{prefix}/namespaces/{self.namespace}/{plural}/{name}",
+                          options)
                 return True
             except urllib.error.HTTPError as e:
                 if e.code == 404:
                     return False
                 raise
-        self._kubectl("delete", kind.lower(), name, "--ignore-not-found=true")
+        self._kubectl("delete", kind.lower(), name, "--ignore-not-found=true",
+                      "--cascade=background")
         return True
 
     def list_names(self, kind: str, label_selector: str) -> list[str]:
@@ -527,7 +552,7 @@ def build_station_manifests(
         "spec": {
             "backoffLimit": 0,
             "activeDeadlineSeconds": deadline_seconds,
-            "ttlSecondsAfterFinished": 3600,
+            "ttlSecondsAfterFinished": STATION_JOB_TTL_SECONDS,
             "template": {
                 "metadata": {"labels": labels},
                 "spec": {
@@ -601,9 +626,16 @@ def create_station(
                 "reason": (f"no identity {source}/{account_alias} — register "
                            f"it first (ensure_identity_with_egress)")}
     proxy_url = proxy_url_for_ref(session, ident.egress_ref)
+    # 行里只存**脱敏**的 egress：`proxy_url` 是 `http://user:pass@host:port` 形态，
+    # 带真口令。它唯一的用途是显示「这站走哪个出口」——主机端口就够了；真正的口令
+    # 只走 Job 的 env（下一行 `proxy_url=proxy_url`，那是 pod 需要的，不进库）。
+    # 2026-11-14 实历：库里躺了 70+ 行明文 egress 口令，而我用 `select *` 查证时
+    # 直接把一行打到了屏幕上——「凭据不过会话输出」那条规矩需要一个更硬的落点。
     station = CrawlLoginStation(
         identity_id=ident.id, source=source, account_alias=account_alias,
-        status="launching", proxy_url=proxy_url, created_at=now,
+        status="launching",
+        proxy_url=(mask_proxy_url(proxy_url) if proxy_url else None),
+        created_at=now,
         deadline_at=now + dt.timedelta(seconds=station_deadline_seconds()))
     session.add(station)
     session.flush()  # station.id -> STATION_ID env + labels
@@ -861,8 +893,21 @@ def prearm_plan(session: Session,
         # for one login unit: pre-arm/dispatcher key identities by
         # auth_profile, while the panel's manual form posts the crawl source
         # name. A crawl source has one profile, so nothing else is suppressed.
+        #
+        # `deadline_at > now` 是 2026-11-14 补的，它是这条判据的**全部漏洞**：
+        # 超时兜底 `_apply_timeouts` 是「读时生效」（panel 列站/打开 VNC 才跑），
+        # 而这个 5 分钟的后台循环**从不读站表**，于是任何一次「Job 被 deadline
+        # 杀掉、没来得及上报终态」都会留下一行 waiting_operator 永不过期——预拉起
+        # 从此永远认为「操作者正看着」，再也不开新站，源就这么静默断流。
+        # 实历：station #72（rmfyalk/acct001，11-10T18:28 建、19:28 过期、
+        # finished_at 一直为空）把 11-10 之后的每一次预拉起都吃掉；panel 日志每
+        # 5 分钟一句 "prearm: no station needed this pass"，而 rmfyalk 从 11-05
+        # 起零产出、pending_runs 里 19 次 failed。
+        # 判据因此要按「有效窗口」表达，不是「行状态」：过了 deadline 的站等于已关。
         open_station = (session.query(CrawlLoginStation)
                         .filter(CrawlLoginStation.status.in_(STATION_OPEN),
+                                CrawlLoginStation.deadline_at.isnot(None),
+                                CrawlLoginStation.deadline_at > now,
                                 CrawlLoginStation.source.in_(
                                     (profile, src.source)))
                         .first())
@@ -900,6 +945,25 @@ def prearm_tick(session: Session, now: dt.datetime | None = None,
     """
     now = _as_aware(now) or _utcnow()
     client = client or get_station_client()
+    # 先跑一次超时兜底，把「Job 被 deadline 杀掉、没来得及上报终态」的僵尸站从
+    # waiting_operator 收成 timeout（留痕 + 事件）。理由与 prearm_plan 里那条
+    # `deadline_at > now` 是同一件事的两半：那条保证**决策**不被僵尸站挡住，这条
+    # 保证**状态**真的被关掉（否则 Console 上永远挂着一个「等待操作者」的窗口，
+    # 让人以为还有人在登录）。两处都要，缺一条就会出现「计划放行、面板仍显示在飞」。
+    closed = _apply_timeouts(session, now)
+    if closed:
+        logger.warning("prearm: closed %d expired login station(s) before "
+                       "planning (deadline passed with no terminal report)",
+                       closed)
+    # 顺手把已结束站点留在集群里的 Service 收掉（Jobs 有自己的 TTL，Services 没有）。
+    # 单列 try：清扫失败绝不许拖垮预拉起——那才是它要防的那类静默死亡。
+    try:
+        reaped = reap_station_services(session, client=client, now=now)
+        if reaped:
+            logger.info("prearm: reaped %d leftover station Service(s)",
+                        reaped)
+    except Exception:  # noqa: BLE001 - cleanup must never stop the pass
+        logger.exception("prearm: station Service reap failed (ignored)")
     launched: list[dict] = []
     for item in prearm_plan(session, now=now):
         source, alias = item["source"], item["account_alias"]
@@ -992,3 +1056,93 @@ def reclaim_station(
         created_at=now))
     session.commit()
     return {"status": "reclaimed", "station_id": station_id, "deleted": deleted}
+
+
+# ── finished-station object reaper ───────────────────────────────────────────
+# A station owns two cluster objects and only one of them has a lifecycle that
+# ends by itself: the Job carries ``ttlSecondsAfterFinished``
+# (STATION_JOB_TTL_SECONDS), Services have no TTL field at all, and
+# ``reclaim_station`` is a manual panel click. So every station that ever ran
+# left its Service behind — measured 2026-11-15: fd-mcp held **53 station
+# Services and 54 Services total**, dated back to 2026-10-08 (one per pre-arm
+# night), while `kubectl get jobs -l station-id` was empty. The TTL half worked;
+# the Service half had no owner.
+#
+# Nothing is broken *today*: an endpoint-less ClusterIP answers nothing, and
+# `_station_upstream` checks the row status before it resolves a name. It is
+# still unbounded garbage at one object per night, which is the exact shape that
+# becomes a quota refusal months later — and a refused `client.create(service)`
+# marks the row `failed` **after** the Job was already accepted, i.e. pre-arm
+# dies with a live pod and no page to look at. That is the same silent-death
+# family this module's other fixes come from, so the sweep lives here.
+#
+# Scope is deliberately the Service only: the Job already has a TTL, and adding
+# it would double the per-station API calls to cover a case that does not occur
+# (zero station Jobs in the namespace at measurement time).
+_REAPED_STATION_IDS: set[int] = set()
+
+
+def reap_station_services(
+    session: Session,
+    client: StationK8sClient | None = None,
+    now: dt.datetime | None = None,
+    grace_seconds: int | None = None,
+    limit: int = 40,
+) -> int:
+    """Delete the Services of finished stations (bounded, idempotent).
+
+    Only terminal rows are touched, and only once they are older than the grace
+    window (default = the Job's own TTL) so the pair disappears together
+    instead of the Service vanishing while a finished Job still holds the page.
+    Callers run ``_apply_timeouts`` first, so an expired-but-unreported station
+    is already terminal by the time the sweep sees it.
+
+    Each station is visited at most once per process (``_REAPED_STATION_IDS``),
+    so steady-state cost is one list call per newly finished station; the first
+    pass after a restart pays one call per historical row, hence ``limit``.
+
+    Best-effort by design: a failed delete is logged and **not** marked reaped,
+    so the next tick retries it — a cleanup that can break the pre-arm pass it
+    rides on would be worse than the garbage it removes. Names are deleted only
+    when resolved from the ``station-id`` label *and* prefixed ``login-``, never
+    by pattern.
+    """
+    now = _as_aware(now) or _utcnow()
+    client = client or get_station_client()
+    grace = dt.timedelta(
+        seconds=STATION_JOB_TTL_SECONDS if grace_seconds is None else grace_seconds)
+    candidates: list[CrawlLoginStation] = []
+    for st in (session.query(CrawlLoginStation)
+               .filter(CrawlLoginStation.status.in_(STATION_TERMINAL))
+               .order_by(CrawlLoginStation.id).all()):
+        if st.id in _REAPED_STATION_IDS:
+            continue
+        ended = _as_aware(st.finished_at) or _as_aware(st.created_at)
+        if ended is not None and ended + grace > now:
+            continue  # inside the Job's TTL: let the pair expire together
+        candidates.append(st)
+    deleted = 0
+    for st in candidates[:limit]:
+        try:
+            names = client.list_names("Service", f"station-id={st.id}")
+        except Exception as e:  # noqa: BLE001 - listed again next tick
+            logger.warning("station %s: reap list failed: %s", st.id, e)
+            continue
+        ok = True
+        for name in names:
+            if not name.startswith("login-"):
+                logger.warning("station %s: refusing to delete %r — not a "
+                               "station Service", st.id, name)
+                continue
+            try:
+                if client.delete("Service", name):
+                    deleted += 1
+                logger.info("station %s: reaped leftover Service %s",
+                            st.id, name)
+            except Exception as e:  # noqa: BLE001 - retry next tick
+                logger.warning("station %s: delete Service %s failed: %s",
+                               st.id, name, e)
+                ok = False
+        if ok:
+            _REAPED_STATION_IDS.add(st.id)
+    return deleted

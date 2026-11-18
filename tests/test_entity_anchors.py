@@ -140,5 +140,43 @@ def test_entity_detail_shows_anchors(session, country):
 def test_list_entities_shows_anchors(session, country):
     add_identifier(session, "country", country["id"], "wikidata", "Q148")
 
-    (row,) = list_entities("country")
+    # 工具面 3.2 起返回分页信封（rows/truncated），不再是裸列表。
+    (row,) = list_entities("country")["rows"]
     assert row["anchors"] == [{"source": "wikidata", "identifier": "Q148"}]
+
+
+def test_list_entities_caps_the_payload_and_says_how_to_get_more(session):
+    """harden-fleet-tool-face-and-queue 3.2: one call must not dump the whole type.
+
+    Live 2026-11-09: `list_entities(limit=100)` put 100 rows × six fields
+    (metadata JSONB included) into a single tool/result; together with the
+    60-entry skills list it pushed a 128k-window model into repeated
+    compactions. The tool face now pages, and says how to get the rest.
+    """
+    # 行数与上限都是**字面值**，故意不跟 `LIST_ENTITIES_MAX_ROWS` 走。
+    # 2026-11-16 实测：原版把常量 import 进来同时当夹具规模与期望值，于是
+    # 「把默认改回 100」时两边一起变大、19 条全绿 —— 那条突变验证什么都没证。
+    # 判据钉在不会跟着实现移动的数上，改动上限就必须来改这条。
+    ROWS = 57
+    CEILING = 50
+
+    for i in range(ROWS):
+        add_entity("country", f"T{i:03d}", name_en=f"Test {i}")
+
+    page = list_entities("country")
+    assert page["count"] <= CEILING, (
+        f"默认一次回了 {page['count']} 行（上限应 ≤{CEILING}）——3.2 的压缩退回去了"
+    )
+    assert page["total_count"] == ROWS
+    assert page["truncated"]["returned"] == page["count"]
+    assert "offset=" in page["truncated"]["how_to_get_more"]
+    assert "metadata" not in page["rows"][0], "默认不带 metadata 字段"
+
+    rest = list_entities("country", offset=page["count"], limit=page["count"])
+    assert rest["count"] == ROWS - page["count"]
+    assert "truncated" not in rest, "翻到最后一页就不再喊截断"
+
+    # 要全字段就显式要 —— 上限可以被显式提高，不能被静默绕过。
+    full = list_entities("country", limit=ROWS, include_metadata=True)
+    assert full["count"] == ROWS
+    assert "metadata" in full["rows"][0]
