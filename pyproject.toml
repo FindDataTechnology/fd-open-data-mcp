@@ -91,6 +91,10 @@ include = ["fd_open_data_mcp", "fd_open_data_mcp.*"]
 # load_registry() 直接 FileNotFoundError，且只在发版后才暴露。
 [tool.setuptools.package-data]
 "fd_open_data_mcp.price_sources" = ["*.yaml"]
+# 公开面声明（public-face-read-surface）：运行时读它决定注册哪些工具。**必须随包发货**——
+# 同一个坑在本仓已经踩过一次（上面 price_sources 的那段注释）。缺了它的后果是公开面
+# 拒绝启动（这是有意的：宁可不起，也不带着缩水的面服务访客）。
+"fd_open_data_mcp" = ["tool-surface.public.json"]
 
 [project.urls]
 Homepage = "https://github.com/FindDataTechnology/fd-open-data-mcp"

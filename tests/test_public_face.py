@@ -221,3 +221,23 @@ def test_registry_only_indicator_by_code_is_admitted():
         pf.assert_concept_visible(_Session({}), "SPY_ma5")  # non-numeric → admitted
     finally:
         pf.set_active_face("full")
+
+
+def test_declaration_ships_inside_the_package():
+    """The wheel is what runs in production; a path outside the package is absent there.
+
+    This repo has already paid for this lesson once (price_sources/declarations.yaml
+    was undeclared and the wheel shipped 0 yaml files). The failure mode here is a
+    public face that refuses to start — intended, but discovered late.
+    """
+    from pathlib import Path
+
+    import fd_open_data_mcp
+
+    pkg_dir = Path(fd_open_data_mcp.__file__).resolve().parent
+    decl = pkg_dir / "tool-surface.public.json"
+    assert decl.is_file(), f"declaration must live inside the package: {decl}"
+    # And the shipped default must point at exactly that file.
+    from fd_open_data_mcp.public_face import DEFAULT_DECLARATION
+
+    assert DEFAULT_DECLARATION.resolve() == decl.resolve()

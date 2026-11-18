@@ -44,9 +44,12 @@ FACE_ENV = "FD_OPEN_DATA_FACE"
 #: Faces this server knows how to run. `full` is the implicit default.
 FACES = ("full", "public")
 
-#: The declaration file, resolved beside the package so a source checkout and an
-#: installed wheel both find it.
-DEFAULT_DECLARATION = Path(__file__).resolve().parent.parent / "tool-surface.public.json"
+#: The declaration file, shipped INSIDE the package so a source checkout and an
+#: installed wheel resolve the same path. It must be declared in
+#: `[tool.setuptools.package-data]` — an undeclared data file is absent from the
+#: wheel, and the face then refuses to start (which is the intended failure: a
+#: silently shrunken public face is worse than no public face).
+DEFAULT_DECLARATION = Path(__file__).resolve().parent / "tool-surface.public.json"
 
 
 class FaceConfigError(RuntimeError):
