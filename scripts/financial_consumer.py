@@ -8,7 +8,10 @@ import json
 import traceback
 from sqlalchemy import create_engine, text
 
-REDIS_URL = os.environ.get("REDIS_URL", "redis://fd-open-redis.scraw:6379/0")
+# 没有默认值：这是集群内服务名，写在这里既公布拓扑又让漏配的部署"看起来能跑"。
+REDIS_URL = os.environ.get("REDIS_URL")
+if not REDIS_URL:
+    raise SystemExit("REDIS_URL must be set")
 DB_URL = os.environ.get(
     "FD_OPEN_DATA_MCP_DATABASE_URL",
     "postgresql+psycopg2://postgres:admin123@fd-open-pg.scraw:5432/postgres"

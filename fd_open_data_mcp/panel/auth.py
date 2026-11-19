@@ -80,7 +80,16 @@ def required_role() -> str | None:
 
 # ── HMAC signing (session + state cookies share the secret) ─────────────────
 def _secret() -> bytes:
-    return os.environ.get("PANEL_SESSION_SECRET", "insecure-dev-secret").encode()
+    """HMAC signing key for session and state cookies.
+
+    No fallback. A built-in default here means anyone who reads this source can forge a
+    session cookie for any deployment that forgot to set the variable — and the default
+    would have to be published for the code to run at all.
+    """
+    value = os.environ.get("PANEL_SESSION_SECRET")
+    if not value:
+        raise RuntimeError("PANEL_SESSION_SECRET must be set (panel session signing key)")
+    return value.encode()
 
 
 def _sign(payload: str) -> str:
