@@ -17,8 +17,11 @@ from sqlalchemy.orm import sessionmaker
 from fd_open_data_mcp.catalog.providers import finddata_root
 
 
-# Connection string for the remote ontology DB
-PG_HOST = os.environ.get("PG_HOST", "guangzhou-xinru")
+# Connection string for the remote ontology DB.
+# PG_HOST has no default: the database lives on one specific host in one specific
+# deployment. A name here would publish the topology and silently point a fresh install
+# at a machine it cannot reach.
+PG_HOST = os.environ.get("PG_HOST", "")
 PG_PORT = int(os.environ.get("PG_PORT", 30432))
 PG_USER = os.environ.get("PG_USER", "fd")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
