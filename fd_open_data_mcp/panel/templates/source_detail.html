@@ -53,6 +53,14 @@
   {{ pipeline.updated_at or '—' }}{% if pipeline.model_used %}（{{ t('模型 model') }}: {{ pipeline.model_used }}）{% endif %} —
   <a href="/panel/funnel">{{ t('查看漏斗 view funnel') }}</a></span></p>
 {% endif %}
+{# Mapping status is a DIFFERENT question from "did we ingest it": the badge
+   above says the crawler has a row; this one says whether anyone knows which
+   part of the ontology the source fills. Three states, never two — "unknown"
+   (could not read the platform) must not look like "unmapped" (checked, none). #}
+{% if mapping_badge %}
+<p><span class="badge {{ mapping_badge.tone }}">{{ mapping_badge.label }}</span>
+  <span class="muted">{{ mapping_badge.detail }}</span></p>
+{% endif %}
 <p>
   <button type="button" class="btn btn-primary"
           hx-post="/panel/sources/{{ src.source }}/trigger"

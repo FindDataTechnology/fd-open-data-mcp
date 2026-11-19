@@ -87,6 +87,36 @@ DATE_POLICY_MODES = ["since_last", "trailing", "explicit"]
 # liveness banner threshold (design: a suspended scheduler must be visible).
 POLL_SECONDS = 15
 RECONCILER_QUIET_HOURS = 24
+
+
+def _ontology_reader():
+    """A reader for the platform's crosswalk read face, or ``None``.
+
+    Deliberately returns ``None`` unless `BENCH_CROSSWALK_READ_FACE` is set: the
+    panel must not acquire a second HTTP dependency (and a second availability
+    domain) just to render a badge. Unset means "unknown", which the template
+    shows as unknown — not as "unmapped".
+
+    When set, the reader is a plain ``urllib`` GET so there is no new library in
+    this package; the URL is operator-configured, never user-supplied.
+    """
+    import json as _json
+    import os as _os
+    import urllib.request as _url
+
+    base = _os.environ.get("BENCH_CROSSWALK_READ_FACE", "").strip().rstrip("/")
+    if not base:
+        return None
+    domain = _os.environ.get("BENCH_CROSSWALK_DOMAIN", "erp")
+
+    def _read(source: str) -> dict:
+        url = f"{base}/d/{domain}/crosswalks?entity={_url.quote(source)}"
+        with _url.urlopen(url, timeout=3) as resp:  # noqa: S310 - env-configured
+            return _json.loads(resp.read().decode("utf-8"))
+
+    return _read
+
+
 # census rows older than this show a staleness marker (add-shard-aware-coverage)
 CENSUS_STALE_HOURS = 24
 # coverage cache rows older than this show a staleness marker
@@ -1352,10 +1382,17 @@ def create_app() -> FastAPI:
             # discovery-pipeline provenance (query-time fact, no FK): the
             # latest approved manifest whose source_name equals this source
             pipeline = _snapshot.source_pipeline_link(s, source)
+            # Mapping status reads the *ontology* side, which lives in another
+            # database. The reader is injected so this panel keeps a single DB
+            # dependency and degrades to "unknown" when the platform is not
+            # configured or not reachable — never to "unmapped".
+            from . import mapping_status as _mapping
+            mapping = _mapping.status_for(source, reader=_ontology_reader())
             return templates.TemplateResponse(
                 request, "source_detail.html",
                 {"src": src.toDict(), "health": row,
-                 "runs": runs, "pending": pending, "pipeline": pipeline})
+                 "runs": runs, "pending": pending, "pipeline": pipeline,
+                 "mapping": mapping, "mapping_badge": _mapping.badge(mapping)})
         finally:
             s.close()
 
