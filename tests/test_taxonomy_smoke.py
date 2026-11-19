@@ -32,7 +32,7 @@ def _host_resolves(host: str) -> bool:
 # 六条用例就会以红色出现，而它们要证明的（远端库能连）根本没被证伪。
 _NO_CREDENTIALS = not (os.environ.get("PG_PASSWORD") or "").strip()
 pytestmark = pytest.mark.skipif(
-    _NO_CREDENTIALS or not _host_resolves(os.environ.get("PG_HOST", "guangzhou-xinru")),
+    _NO_CREDENTIALS or not _host_resolves(os.environ.get("PG_HOST", "")),
     reason="remote taxonomy Postgres not usable from here "
            "(host unreachable, or PG_PASSWORD unset)",
 )
@@ -42,7 +42,7 @@ pytestmark = pytest.mark.skipif(
 def _require_usable_taxonomy_db():
     """主机名解析得开，不代表能连上。
 
-    `guangzhou-xinru` 在 tailnet 内是可解析的（100.64.0.3），但没有口令时
+    PG_HOST 在内网是可解析的，但没有口令时
     每条用例都会红 —— 那是环境缺失，不是代码坏了。这里真连一次，连不上就跳过，
     而不是留六条 red 让人反复怀疑是不是自己改坏了。
     """

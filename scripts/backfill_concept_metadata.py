@@ -12,7 +12,7 @@ import os
 from sqlalchemy import create_engine, text
 
 # Connection to the remote ontology DB
-PG_HOST = os.environ.get("PG_HOST", "guangzhou-xinru")
+PG_HOST = os.environ.get("PG_HOST", "")
 PG_PORT = int(os.environ.get("PG_PORT", 30432))
 PG_USER = os.environ.get("PG_USER", "fd")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "")

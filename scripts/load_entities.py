@@ -2,7 +2,7 @@
 """Load entity definitions from PostgreSQL database for manifest generation.
 
 This module provides functions to load entity definitions from the remote
-PostgreSQL database (guangzhou-xinru:30432) for use in datasource manifests.
+PostgreSQL database (the ontology host, see PG_* env) for use in datasource manifests.
 """
 
 import os
@@ -11,7 +11,7 @@ from typing import Optional
 from sqlalchemy import create_engine, text
 
 # Database connection configuration
-PG_HOST = os.environ.get("PG_HOST", "guangzhou-xinru")
+PG_HOST = os.environ.get("PG_HOST", "")
 PG_PORT = int(os.environ.get("PG_PORT", 30432))
 PG_USER = os.environ.get("PG_USER", "fd")
 PG_PASSWORD = os.environ.get("PG_PASSWORD", "")
