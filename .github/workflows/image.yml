@@ -1,6 +1,5 @@
-# Container image publish — GitHub Actions → Tencent TCR personal edition.
-# Standard channel per openspec tcr-image-pipeline (2026-09-30 user directive).
-# Jenkins→Harbor remains the fallback channel for this repo.
+# 共享实现见 FindDataTechnology/fd-ci（openspec: extract-shared-ci-workflow）。
+# 本文件只声明「出什么镜像」，构建逻辑不在这里。
 name: image
 
 on:
@@ -8,124 +7,11 @@ on:
     branches: [main]
   workflow_dispatch:
 
-concurrency:
-  group: image-${{ github.ref }}
-  cancel-in-progress: true
-
-permissions:
-  contents: read
-
-env:
-  REGISTRY: hkccr.ccs.tencentyun.com
-  NAMESPACE: finddata
-  IMAGE_NAME: fd-open-data-mcp
-  DOCKERFILE: Dockerfile.torch
-
 jobs:
-  build-push:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: docker/setup-buildx-action@v3
-
-      - uses: docker/login-action@v3
-        with:
-          registry: ${{ env.REGISTRY }}
-          username: ${{ secrets.TCR_USERNAME }}
-          password: ${{ secrets.TCR_PASSWORD }}
-
-      # hf-mirror's relative redirects break under buildx on GitHub runners
-      # (httpx UnsupportedProtocol), so the MiniLM model is ferried as a
-      # prebuilt hub cache instead of fetched during the image build. The
-      # same hub layout serves fastembed (the snapshot includes the ONNX
-      # graph) — no torch wheel ferry since image-slimming.
-      - name: Ferry MiniLM embedding model into build context
-        env:
-          HF_HOME: ${{ github.workspace }}/hf-cache
-        run: |
-          pip install -q huggingface_hub
-          python - <<'EOF'
-          import os
-          from huggingface_hub import snapshot_download
-          # fastembed resolves this model from qdrant/all-MiniLM-L6-v2-onnx
-          # (model.onnx at repo root) — its HF source, NOT the
-          # sentence-transformers repo; the ferry must cache exactly that or
-          # the offline bake misses.
-          repo = "qdrant/all-MiniLM-L6-v2-onnx"
-          last = None
-          for endpoint in ("https://huggingface.co", "https://hf-mirror.com"):
-              os.environ["HF_ENDPOINT"] = endpoint
-              try:
-                  p = snapshot_download(repo)
-                  print("fetched via", endpoint, "->", p)
-                  break
-              except Exception as e:
-                  print("fetch via", endpoint, "failed:", e)
-                  last = e
-          else:
-              raise SystemExit(f"model ferry failed via both endpoints: {last}")
-          EOF
-          du -sh hf-cache/
-
-      - id: prev
-        name: 读 main 当前 digest（内容基线）
-        run: |
-          img="$REGISTRY/$NAMESPACE/${{ env.IMAGE_NAME }}"
-          cur=$(docker buildx imagetools inspect "$img:main" \
-                --format '{{.Manifest.Digest}}' 2>/dev/null || true)
-          echo "digest=$cur" >> "$GITHUB_OUTPUT"
-          echo "${{ env.IMAGE_NAME }} main 当前 digest: ${cur:-<不存在，本次为首次构建>}"
-
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ${{ env.REGISTRY }}/${{ env.NAMESPACE }}/${{ env.IMAGE_NAME }}
-          tags: |
-            type=raw,value=main
-
-      - id: build
-        uses: docker/build-push-action@v6
-        with:
-          context: .
-          file: ${{ env.DOCKERFILE }}
-          platforms: linux/amd64
-          push: true
-          provenance: false
-          tags: ${{ steps.meta.outputs.tags }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-      # 内容闸门：digest 变了才铸 sha-<commit>，让「同内容多 tag」结构上不可能。
-      - name: 内容变了才铸不可变 tag
-        env:
-          NEW: ${{ steps.build.outputs.digest }}
-          OLD: ${{ steps.prev.outputs.digest }}
-        run: |
-          set -euo pipefail
-          img="$REGISTRY/$NAMESPACE/${{ env.IMAGE_NAME }}"
-          [ -n "$NEW" ] || { echo "::error::构建未产出 digest"; exit 1; }
-          if [ "$NEW" = "$OLD" ]; then
-            echo "内容未变（$NEW）：不铸新 tag"
-            {
-              echo "### 内容未变，未产出新 tag"
-              echo ""
-              echo "本次构建与 \`main\` 当前指向完全一致。"
-              echo ""
-              echo "- 可直接 pin：\`$img@$NEW\`"
-              echo "- 滚动引用：\`$img:main\`"
-            } >> "$GITHUB_STEP_SUMMARY"
-            exit 0
-          fi
-          tag="sha-${GITHUB_SHA::7}"
-          docker buildx imagetools create -t "$img:$tag" "$img@$NEW"
-          echo "已铸 $tag → $NEW"
-          {
-            echo "### 内容有变化，已铸不可变 tag"
-            echo ""
-            echo "| 字段 | 值 |"
-            echo "|---|---|"
-            echo "| tag | \`$tag\` |"
-            echo "| digest | \`$NEW\` |"
-            echo "| 上一内容 digest | \`${OLD:-<无>}\` |"
-          } >> "$GITHUB_STEP_SUMMARY"
+  fd-open-data-mcp:
+    uses: FindDataTechnology/fd-ci/.github/workflows/image-build.yml@main
+    secrets: inherit
+    with:
+      image: fd-open-data-mcp
+      namespace: finddata
+      dockerfile: Dockerfile.torch
