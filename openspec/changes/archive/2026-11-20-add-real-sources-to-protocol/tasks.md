@@ -69,8 +69,8 @@
 
 ## 10. Testing and deployment
 
-- [ ] 10.1 Run E2E tests on staging environment
-- [ ] 10.2 Monitor proxy pool sync for 1 week (verify validation success rates)
-- [ ] 10.3 Monitor failover events (should be rare unless sources are actually banned)
-- [ ] 10.4 Deploy to production
-- [ ] 10.5 Monitor post-deployment: check for errors, alert if issues arise
+- [~] 10.1 Run E2E tests on staging environment — 归档时未独立核验（需 staging 环境与一周观测窗）；代码路径已在生产（deploy 清单 pin sha，real_sources 在役），此项为运维观测，2026-11-20 标 deferred
+- [~] 10.2 Monitor proxy pool sync for 1 week (verify validation success rates) — 归档时未独立核验（需 staging 环境与一周观测窗）；代码路径已在生产（deploy 清单 pin sha，real_sources 在役），此项为运维观测，2026-11-20 标 deferred
+- [~] 10.3 Monitor failover events (should be rare unless sources are actually banned) — 归档时未独立核验（需 staging 环境与一周观测窗）；代码路径已在生产（deploy 清单 pin sha，real_sources 在役），此项为运维观测，2026-11-20 标 deferred
+- [~] 10.4 Deploy to production — 归档时未独立核验（需 staging 环境与一周观测窗）；代码路径已在生产（deploy 清单 pin sha，real_sources 在役），此项为运维观测，2026-11-20 标 deferred
+- [~] 10.5 Monitor post-deployment: check for errors, alert if issues arise — 归档时未独立核验（需 staging 环境与一周观测窗）；代码路径已在生产（deploy 清单 pin sha，real_sources 在役），此项为运维观测，2026-11-20 标 deferred

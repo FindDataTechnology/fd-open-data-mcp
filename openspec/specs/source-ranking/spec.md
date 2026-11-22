@@ -1,4 +1,9 @@
-## MODIFIED Requirements
+# source-ranking Specification
+
+## Purpose
+TBD - created by archiving change add-real-sources-to-protocol. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: Per-(source × concept) multi-dimensional ranking
 
@@ -34,8 +39,6 @@ The system SHALL adjust a source's `accessibility` score from recorded fetch out
 - **THEN** eastmoney's `accessibility` score decreases
 - **AND** tencent's `accessibility` score is unchanged
 - **AND** dispatch SHALL prefer tencent over eastmoney on the next fetch
-
-## ADDED Requirements
 
 ### Requirement: Per-real-source fetch_log tracking
 The `fetch_log` table SHALL record the `real_source` used for each fetch (in addition to the library-level `source`). When a function declares `real_sources`, the `fetch_log` row SHALL include the specific `real_source` that was actually called (e.g., "eastmoney"). When a function does not declare `real_sources`, the `real_source` field SHALL be NULL (backward compatibility).

@@ -7,7 +7,7 @@ name = "fd-open-data-mcp"
 dynamic = ["version"]
 description = "Open-data ontology MCP: a semantic concept layer over multi-datasource financial/economic data"
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "MIT" }
 authors = [{ name = "FindDataOfficial" }]
 classifiers = [
@@ -19,7 +19,7 @@ dependencies = [
     "click>=8.0",
     "sqlalchemy>=2.0,<2.1",  # 2.1 drops the psycopg2 fallback for postgresql:// (init crash 09-29)
     "pydantic>=2.0",
-    "fastmcp>=3.4,<4",
+    "fastmcp>=4.2.4,<5",
     "pandas>=2.0",
     "fd-open-data-protocol>=0.3.2",
     "pyyaml>=6.0",

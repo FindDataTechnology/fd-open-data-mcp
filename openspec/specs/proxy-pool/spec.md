@@ -1,4 +1,9 @@
-## MODIFIED Requirements
+# proxy-pool Specification
+
+## Purpose
+TBD - created by archiving change add-real-sources-to-protocol. Update Purpose after archive.
+
+## Requirements
 
 ### Requirement: Proxy pool sync CronJob
 A k8s CronJob SHALL periodically (every 10 minutes) synchronize proxies from the proxy pool service to the `proxies` table in PostgreSQL. The CronJob SHALL validate each proxy against real data sources (if declared in function manifests), not library-level sources. When a function declares `real_sources` (e.g., eastmoney, tencent), the CronJob SHALL validate the proxy against each real source's endpoint. When a function does not declare `real_sources`, the CronJob SHALL fall back to library-level validation (backward compatibility).
@@ -59,8 +64,6 @@ The circuit breaker SHALL track health per `(real_source, proxy_id)`, not per `(
 - **AND** `circuit:tencent:2` is CLOSED (healthy)
 - **THEN** a function with `real_sources: [{name: eastmoney}, {name: tencent}]` SHALL failover to tencent
 - **AND** the tencent circuit state is unchanged
-
-## ADDED Requirements
 
 ### Requirement: Real source name registry
 The system SHALL maintain a canonical list of real source names (e.g., "eastmoney", "tencent", "sina", "yahoo_finance"). The list SHALL be documented in the `fd-open-data-protocol` package. Manifest authors SHALL use names from this list when declaring `real_sources`.

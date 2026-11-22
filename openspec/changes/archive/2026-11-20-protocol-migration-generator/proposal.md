@@ -1,5 +1,18 @@
 # Protocol Migration Generator for Datasource Catalogs
 
+> **2026-11-20 处置：废弃（不实施）**
+>
+> 本 change 的全部价值前提是「给 `fd-akshare` / `fd-yfinance` / `fd-edgar` / `fd-wbgapi`
+> 这四个包自动生成 protocol 合规的 CATALOG」。复核工作区：**这四个包一个都不存在**
+> （`fd-akshare`/`fd-yfinance` 早期已删，`fd-world`/`fd-polygon` 2026-09-29 入 attic，
+> `workspace-inventory.json` 无对应条目）。目标对象没了，生成器没有输入。
+>
+> 现行做法已经换了路径：新包在 `catalog.py` 里手写 `CATALOG` dict + setuptools entry-point
+> （`fd_open_data_mcp.datasources`），由 `register-discovered` 发现——这是 CLAUDE.md 的
+> CATALOG requirement，不是自动生成。本 change 的 41 个任务中有 23 个未做，做也没有对象。
+>
+> 归档时 `--skip-specs`：其 delta 名为 `catalog-generator`，为一个不存在的工具建能力没有意义。
+
 ## Why
 
 External datasource packages (fd-akshare, fd-yfinance, fd-edgar, fd-wbgapi) maintain their own registries but don't expose protocol-compliant CATALOG declarations. Manual maintenance of catalog.py files is prohibitively expensive due to 600+ functions in akshare alone and frequent upstream changes.
