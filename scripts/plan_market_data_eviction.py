@@ -6,7 +6,7 @@
 盘的容量被"随时能从第三方再取"的数据占着，而它同时还要付备份/DR 成本——这是净损失。
 用户判断（2026-11-11）：行情这类容易获取的数据，没必要自己长期存。
 
-实测（100.64.0.3 / fd_open_data，2026-11-11）：
+实测（canonical PG / fd_open_data，2026-11-11）：
 
     db_size 4,632 MB，semantic_observations 3,379 MB
     akshare / quarter  7,304,318 行（73.2%）

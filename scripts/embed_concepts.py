@@ -14,7 +14,7 @@ from sentence_transformers import SentenceTransformer
 from fd_open_data_mcp import db as dbmod
 
 # Force remote Postgres connection (canonical PG; from the
-# Mac via tunnel: ssh -N -L 30432:127.0.0.1:30432 ubuntu@134.175.46.69)
+# Mac via tunnel: ssh -N -L 30432:127.0.0.1:30432 <user>@<pg-host>)
 DATABASE_URL = "postgresql://fd:FD_PG_PASSWORD@127.0.0.1:30432/fd_open_data"
 os.environ["FD_OPEN_DATA_MCP_DATABASE_URL"] = DATABASE_URL
 
