@@ -173,7 +173,7 @@ spec:
           - name: fd-harbor-pull
           containers:
           - name: incremental-crawl
-            image: harbor.local/lawcraw_business/scraw-fd-open-data-mcp:latest
+            image: <local-registry>/lawcraw_business/scraw-fd-open-data-mcp:latest
             imagePullPolicy: IfNotPresent
             command: ["scraw-fd-open-data-mcp", "crawl"]
             args: ["/plans/incremental_plan.json"]

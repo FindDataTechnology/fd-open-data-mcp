@@ -217,7 +217,7 @@ All notable changes to this project will be documented in this file.
 
 ## [0.5.47] - 2026-11-08
 - **feat(add-yfinance-proxy-lane)**: yfinance 在本舰队**完全不可用**——所有直连出口都被封。
-  实测 2026-11-08：`fd-deploy`(124.220.7.175)/`cheap3` 回 429（23 字节 `Edge: Too Many Requests`，
+  实测 2026-11-08：`fd-deploy`(chengsi)/`cheap3` 回 429（23 字节 `Edge: Too Many Requests`，
   `server: ATS`），cheap 七个节点回 403（3369 字节页），fd-master 上 `urllib`/`requests`/`curl_cffi`
   （chrome124/chrome/safari17_0/无指纹）**一律 429**。**换节点 IP 无效**（9 个出口、两种封锁形态、零成功）。
   有效的路是**代理池 + 浏览器指纹**：`curl_cffi impersonate="chrome124"` 经池内代理对 chart 端点

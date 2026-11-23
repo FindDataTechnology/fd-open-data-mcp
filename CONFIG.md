@@ -219,7 +219,7 @@ SCRAW_PLAN_DIR=plans
 
 # k8s launcher
 SCRAW_K8S_NAMESPACE=scraw
-SCRAW_K8S_IMAGE=harbor.local/lawcraw_business/scraw-fd-open-data-mcp
+SCRAW_K8S_IMAGE=<local-registry>/lawcraw_business/scraw-fd-open-data-mcp
 SCRAW_K8S_DATABASE_URL=postgresql://...
 SCRAW_K8S_REDIS_URL=redis://...
 

@@ -3,12 +3,12 @@
 #
 # 2026-11-05 口令轮换：原内联口令已泄入 git 历史（见净化台账），HARBOR_PASS
 # 改为流水线私密参数（流水线 → 参数管理 → 敏感参数）注入。注意：本流水线目标
-# America Harbor (23.144.68.246:30880) 与 cheap 本地 Harbor (172.16.0.186:30880)
+# America Harbor (<america-ip>:30880) 与 cheap 本地 Harbor (<cheap4-ip>6:30880)
 # 均已下线（2026-11-05 实测连接拒绝），本文件当前为休眠配置，仅保留作历史参照；
 # 现役出片线 = GitHub Actions → hkccr → cheap-3 tcr-relay → ccr（.github/workflows/image.yml）。
 # 历史参数说明：
 #   HARBOR_HOST — 云端流水线: 23.144.68.246:30880 (America Harbor，公网可达)
-#                 cheap 私有构建机: 172.16.0.186:30880 (cheap 集群本地 Harbor)
+#                 cheap 私有构建机: <cheap4-ip>:30880 (cheap 集群本地 Harbor)
 #   HARBOR_USER — gitee-ci-push（两个 Harbor 都已建好，finddata 项目 developer）
 #
 # 与 GitHub 版的差异：GitHub 一次产出 latest+sha+v* 三个 tag；Gitee 的
