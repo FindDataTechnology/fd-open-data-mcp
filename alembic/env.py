@@ -21,7 +21,7 @@ config = context.config
 # Set database URL from env var or default
 database_url = os.environ.get(
     "FD_OPEN_DATA_MCP_DATABASE_URL",
-    "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
+    ""  # 不内置内部库地址：生产经 fd-mcp-env Secret 注入，缺失即报错
 )
 config.set_main_option("sqlalchemy.url", database_url)
 

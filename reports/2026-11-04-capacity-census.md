@@ -1,7 +1,7 @@
 # 容量普查报告：semantic_observations 与爬取链路（P0）
 
 - 日期：2026-11-04
-- 目标库：生产 `fd_open_data`（cheap 集群，100.64.0.3:30432，fd-open-data-mcp pod 现役）
+- 目标库：生产 `fd_open_data`（cheap 集群，canonical PG pod 现役）
 - 变更：add-data-stream-engine Task 1.1（只读测量，未写任何生产数据）
 
 ## 1. 总量与形态

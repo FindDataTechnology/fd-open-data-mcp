@@ -1,6 +1,6 @@
-"""Entity taxonomy lookup against live Postgres (guangzhou-xinru).
+"""Entity taxonomy lookup against live Postgres (canonical fd_open_data).
 
-Entities are stored in the live ontology database at guangzhou-xinru:30432. This module
+Entities are stored in the live ontology database (canonical fd_open_data). This module
 looks up an entity by type + code and returns its row (including id), so that
 ``entity_source_identifiers`` can reference it by ``(entity_type, entity_id)``.
 """

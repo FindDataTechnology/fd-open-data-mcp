@@ -1,7 +1,7 @@
 # Fund data operations (add-fund-crawl-control-center)
 
 Operational runbook for the fund/person ontology on the live DB
-(`guangzhou-xinru:30432/fd_open_data`; from the Mac via SSH tunnel
+(`fd_open_data` on the canonical PG; from the Mac via SSH tunnel
 `ssh -N -L 30432:127.0.0.1:30432 ubuntu@134.175.46.69` → `127.0.0.1:30432`).
 Seeding scripts are idempotent; the *edge
 cases* below are the manual interventions.

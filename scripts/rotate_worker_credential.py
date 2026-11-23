@@ -20,15 +20,15 @@
 
     # 只打印计划（安全，默认不做任何改动）
     python3 scripts/rotate_worker_credential.py --cluster cheap \\
-        --api-server https://100.64.0.13:6443 --dry-run
+        --api-server https://<kube-api-server>:6443 --dry-run
 
     # 只验当前状态（只读）
     python3 scripts/rotate_worker_credential.py --cluster cheap \\
-        --api-server https://100.64.0.13:6443 --verify-only
+        --api-server https://<kube-api-server>:6443 --verify-only
 
     # 真跑（会改集群：旧凭据立即失效）
     python3 scripts/rotate_worker_credential.py --cluster cheap \\
-        --api-server https://100.64.0.13:6443 --mode bound --apply
+        --api-server https://<kube-api-server>:6443 --mode bound --apply
 
 退出码：0 成功且成对验证通过 / 1 验证失败 / 2 输入或前置条件不满足。
 """

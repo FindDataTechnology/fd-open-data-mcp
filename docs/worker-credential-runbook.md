@@ -51,7 +51,7 @@ reminder 也只有一条：`crawl-watcher-scan` 在剩余寿命 < 1/3（30d 寿�
 ```bash
 # 一条命令完成「签 → 写两处 → 成对实测」（加法：旧值仍然可用，无断派发窗口）
 python3 scripts/rotate_worker_credential.py --cluster cheap9 \
-    --api-server https://100.64.0.17:6443 --mode bound --duration 720h --apply
+    --api-server https://<kube-api-server>:6443 --mode bound --duration 720h --apply
 # 只验当前值（只读）： 换 --verify-only
 # 只打印计划（不动任何东西）：换 --dry-run
 ```

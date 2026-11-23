@@ -13,7 +13,7 @@
 #
 # 与 GitHub 版的差异：GitHub 一次产出 latest+sha+v* 三个 tag；Gitee 的
 # build@docker 每步只能产出一个 tag，故用两个步骤（v<构建号> + latest）。
-# cheap 集群拉取 America 镜像走 registries.yaml 的 100.64.0.5:30880 mirror
+# cheap 集群拉取 America 镜像走 registries.yaml 的 <mesh-registry>:30880 mirror
 # + fd-mcp 命名空间里的 harbor-finddata-pull imagePullSecret。
 
 version: '1.0'
