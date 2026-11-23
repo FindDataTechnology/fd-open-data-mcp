@@ -9,6 +9,7 @@ concurrency). New sources declare their own ban signals here at onboarding.
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 
@@ -220,12 +221,12 @@ _DEFAULT_EGRESS_AUTH = "fdproxy:CHANGE_ME"
 # Per-server gost forward-proxy endpoints. Each gost pod runs ``hostNetwork``
 # so its egress IS the server's own IP; the NodePort 30080 lets any worker in
 # ANY cluster reach ANY gost cross-cluster → egress IP is decoupled from where
-# the worker pod lands. baidu (cluster_id=4) is disabled + IP TBD; append once
-# enabled.
-EGRESS_PODS: list[dict] = [
-    {"name": "tencent", "host": "124.220.7.175", "port": 30080, "cluster_id": 1},
-    {"name": "aliyun",  "host": "47.99.94.85",   "port": 30080, "cluster_id": 3},
-]
+# the worker pod lands.
+#
+# 主机 IP 不写进源码：那是机队的出网节点公网地址，进公开仓等于暴露出口拓扑。
+# 由部署面经 env 提供（JSON：[{"name","host","port","cluster_id"}]）。
+# 未配置时 pool 为空——seed 是手动运维动作，缺 env 时应当显式为空而不是连错地址。
+EGRESS_PODS: list[dict] = json.loads(os.environ.get("FD_EGRESS_PODS", "[]"))
 
 
 def register_egress_pod(session: Session, name: str, host: str, port: int,
