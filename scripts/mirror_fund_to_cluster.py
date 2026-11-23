@@ -1,7 +1,7 @@
 """Mirror the fund/person ontology + crawl policies from the live DB to the
 in-cluster fd-open-pg (which the reconciler + crawl Jobs actually use).
 
-The cluster cannot reach the canonical DB (guangzhou-xinru:30432) directly,
+The cluster cannot reach the canonical DB (mesh address via env) directly,
 so the reconciler's DB is the
 in-cluster fd-open-pg. This copies the fund/person concepts, entities,
 identifiers, relationships, bindings and crawl_policies/policy_runs (creating

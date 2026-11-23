@@ -16,7 +16,7 @@ from sqlalchemy import text
 from fd_open_data_mcp import db as dbmod
 
 # Force remote Postgres connection
-DATABASE_URL = "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
+DATABASE_URL = ""  # 必须经环境提供（不内置内部库地址）
 os.environ["FD_OPEN_DATA_MCP_DATABASE_URL"] = DATABASE_URL
 
 

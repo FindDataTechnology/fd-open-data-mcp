@@ -17,7 +17,7 @@ if len(sys.argv) > 1:
 else:
     DATABASE_URL = os.environ.get(
         "FD_OPEN_DATA_MCP_DATABASE_URL",
-        "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
+        ""  # 不内置内部库地址
     )
 
 def migrate():

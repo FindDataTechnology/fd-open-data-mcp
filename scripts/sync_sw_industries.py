@@ -8,7 +8,7 @@ Usage:
     PYTHONPATH=. python scripts/sync_sw_industries.py
 
 Environment variables:
-    FD_OPEN_DATA_MCP_DATABASE_URL - Database URL (default: postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data — placeholder creds; set the real URL via env)
+    FD_OPEN_DATA_MCP_DATABASE_URL - Database URL (no built-in default — set via env)
 
 Schedule: Run daily or weekly via cron to keep industry assignments fresh.
 """

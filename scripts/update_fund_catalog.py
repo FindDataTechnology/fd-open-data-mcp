@@ -39,7 +39,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from fd_open_data_mcp.models import Function, FunctionColumn, Source
 
-DEFAULT_URL = "postgresql://fd:FD_PG_PASSWORD@guangzhou-xinru:30432/fd_open_data"
+DEFAULT_URL = ""  # 必须经 --db-url 或 FD_OPEN_DATA_MCP_DATABASE_URL 提供（不内置内部库地址）
 
 # command -> real_sources JSON (RealSourceSpec shape)
 REAL_SOURCES: dict[str, list[dict]] = {
