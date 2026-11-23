@@ -158,7 +158,7 @@ sources:
   # `daas_akshare_{klass}_{adjust}`）——registry 是唯一入口，未登记即拒。
   #
   # access.kind=daas_local_sqlite：文件只在 fd-daas-mcp 的 pod 里
-  # （local-path PVC，钉 cheap-5），本服务挂不到——这是**可达边界的声明**，
+  # （local-path PVC，钉在特定节点），本服务挂不到——这是**可达边界的声明**，
   # 不是缺陷。口径闸的探针试开文件、开不到就如实记"判不出"
   # （checked.daas_local_watermark_unreachable），绝不编造水位。
   #

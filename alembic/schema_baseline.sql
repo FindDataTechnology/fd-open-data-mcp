@@ -11,7 +11,7 @@
 --     python -c 'from fd_open_data_mcp import db; db.get_database()'
 --   pg_dump --schema-only --no-owner --no-privileges <db> > alembic/schema_baseline.sql
 --
--- Verified 2026-09-18 against the canonical fd_open_data on guangzhou-xinru:
+-- Verified 2026-09-18 against the canonical fd_open_data on the canonical PG:
 -- 27 tables, zero column/type/nullability differences across every shared table.
 -- The canonical database additionally holds 4 tables no model describes —
 -- mig_concept_map, mig_entity_map, migration_orphans (no code references) and

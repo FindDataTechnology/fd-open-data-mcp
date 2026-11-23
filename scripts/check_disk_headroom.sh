@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 磁盘余量告警：根分区可用空间低于阈值即非零退出。
 #
-# 为什么需要它：100.64.0.7 曾把根分区写到 100%，表现不是"磁盘满"这种直白错误，而是
+# 为什么需要它：一个节点曾把根分区写到 100%，表现不是"磁盘满"这种直白错误，而是
 # 该机 PostgreSQL 连进来就报
 #   FATAL: could not write init file
 # 进而让 semantic_observations_read（UNION ALL 了它的 fdw 外表）整个视图失败，

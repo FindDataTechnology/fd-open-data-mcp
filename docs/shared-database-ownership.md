@@ -1,4 +1,4 @@
-# Shared database ownership: `fd_open_data` on guangzhou-xinru
+# Shared database ownership: `fd_open_data` on the canonical PG
 
 The canonical ontology database has **two owning services**. This document is
 the table-ownership map and the rules both deploy steps must follow

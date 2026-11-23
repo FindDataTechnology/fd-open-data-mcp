@@ -6,7 +6,7 @@ different sources COEXIST, never merged or overwritten; a plain read returns
 the highest-ranked source's row (source_rankings at query time, so ranking
 churn takes effect without rewriting rows).
 
-Sharded reads: on the Postgres coordinator (guangzhou-xinru) the dedup view
+Sharded reads: on the Postgres coordinator (canonical PG) the dedup view
 ``semantic_observations_read`` unions the local base table with the FDW-backed
 shards (e.g. astock_daily on xinru3), preferring a fresh local row over a stale
 shard row per (concept, entity, date, granularity) key. The READ path

@@ -16,7 +16,7 @@ pod 已回收，无终态可抓 (pod reclaimed, no terminal state)
 
 两处原因叠着：
 
-1. **分片库不可用**：`xinru3`（100.64.0.7）宿主机 `/` 100% 满 → PG 写不进 WAL →
+1. **分片库不可用**：`xinru3` 宿主机 `/` 100% 满 → PG 写不进 WAL →
    反复 crash 进 recovery → 张量表 `ft_sem_obs_xinru3` 连不上，
    报 `FATAL: the database system is in recovery mode`。
 2. **限流被硬打放大**：eastmoney 对单 IP 限流后，旧 `fetch_frame` 的三次重试之间
@@ -104,7 +104,7 @@ kubectl --context cheap9 -n scraw get cm crawl-policy-…-script -o jsonpath='{.
 
 ## 分片依赖
 
-`shard_xinru2`（100.64.0.6）、`shard_xinru3`（100.64.0.7），都是 39G 盘且
+`shard_xinru2`、`shard_xinru3`，都是 39G 盘且
 **备份与迁移前旧数据在同一块盘上**（2026-11-12 实测 xinru3：`/srv/fd-backup` 13G +
 迁移前 PG18 卷 11G + 活库 pgdata 4G ⇒ 只剩 300M）。盘满会直接把 PG 打进 recovery。
 探活在 `shard-health-alerts`（fd-prod，`*/15`），报文里带原始连接错误。

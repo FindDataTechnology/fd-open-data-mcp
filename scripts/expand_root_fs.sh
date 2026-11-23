@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # 把云盘扩容后新增的空间并入根分区并扩展文件系统。
 #
-# 背景：100.64.0.7（VM-0-13-debian）根分区 39.5G 曾打到 100%、可用 0，
+# 背景：一台节点（VM-0-13-debian）根分区 39.5G 曾打到 100%、可用 0，
 # 导致该机上的 PostgreSQL 在建立连接时直接报
 #   FATAL: could not write init file
 # 而 semantic_observations_read 视图 UNION ALL 了挂在它上面的 fdw 外表
