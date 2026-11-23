@@ -615,7 +615,7 @@ Layer 3 used PostgreSQL-only `ANY()` / `DISTINCT ON`; now portable expanding
   psycopg2 fallback for `postgresql://` and crashed the migrate-schema
   initContainer; pin restores the tested dialect.
 - Reference k8s manifest aligned with the live fd-official-web deployment
-  (was a stale zihan-era copy: 512Mi / harbor.local / NodePort 30801).
+  (was a stale zihan-era copy: 512Mi / <local-registry> / NodePort 30801).
 
 ## [0.5.16] - 2026-09-18
 

@@ -7,7 +7,7 @@
 # 均已下线（2026-11-05 实测连接拒绝），本文件当前为休眠配置，仅保留作历史参照；
 # 现役出片线 = GitHub Actions → hkccr → cheap-3 tcr-relay → ccr（.github/workflows/image.yml）。
 # 历史参数说明：
-#   HARBOR_HOST — 云端流水线: 23.144.68.246:30880 (America Harbor，公网可达)
+#   HARBOR_HOST — 云端流水线: <america-harbor>:30880 (America Harbor，公网可达)
 #                 cheap 私有构建机: <cheap4-ip>:30880 (cheap 集群本地 Harbor)
 #   HARBOR_USER — gitee-ci-push（两个 Harbor 都已建好，finddata 项目 developer）
 #
@@ -34,7 +34,7 @@ stages:
   - step: build@docker
     name: build_image_versioned
     displayName: 构建镜像 (v<构建号>)
-    repository: 23.144.68.246:30880
+    repository: <america-harbor>:30880
     username: gitee-ci-push
     password: "${HARBOR_PASS}"  # ROTATED 2026-11-05: set as pipeline secret, never inline
     tag: finddata/fd-open-data-mcp:v${GITEE_PIPELINE_BUILD_NUMBER}
@@ -44,7 +44,7 @@ stages:
     name: build_image_latest
     displayName: 构建镜像 (latest)
     dependsOn: build_image_versioned
-    repository: 23.144.68.246:30880
+    repository: <america-harbor>:30880
     username: gitee-ci-push
     password: "${HARBOR_PASS}"  # ROTATED 2026-11-05: set as pipeline secret, never inline
     tag: finddata/fd-open-data-mcp:latest
