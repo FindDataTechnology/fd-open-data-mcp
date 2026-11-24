@@ -57,9 +57,32 @@ def main() -> None:
     rules = m.get("rules", {})
     if set(rules.get("commercial_tools", [])) != {t for t, lv in levels.items() if lv == "commercial"}:
         problems.append("rules.commercial_tools 与组级 level=commercial 的工具集不一致")
+
+    # commercial ⊆ 只读 ∪ 豁免（mcp-surface-contract「selfcheck 双向断言」，
+    # 判据正文=mcp-surface-truth「商业可引用集必须落在只读工具之内」）。
+    # 只看集合相等会让一个写工具悄悄进商业面而闸恒绿——2026-11-24 实测
+    # 12 个控制面 + consume_concepts/fetch 就这样躺在 commercial 里。
+    from fd_open_data_mcp.annotations import annotations_for
+    exempt = {e["tool"] for e in rules.get("commercial_exemptions", []) if e.get("tool")}
+    not_readonly, unknown = [], []
+    for t in sorted(rules.get("commercial_tools", [])):
+        try:
+            ro = annotations_for(t)["readOnlyHint"]
+        except KeyError:
+            unknown.append(t)
+            continue
+        if not ro and t not in exempt:
+            not_readonly.append(t)
+    if not_readonly:
+        problems.append(
+            "commercial 集含非只读工具且未登记豁免："
+            f"{not_readonly}（修法：补 rules.commercial_exemptions 并写理由，或移出 commercial）")
+    if unknown:
+        problems.append(f"commercial 集含无行为属性的工具：{unknown}")
     if problems:
         fail(problems)
-    print(f"SELFCHECK OK：{len(declared)} 工具，commercial={len([t for t in levels if levels[t]=='commercial'])}")
+    print(f"SELFCHECK OK：{len(declared)} 工具，commercial={len([t for t in levels if levels[t]=='commercial'])}"
+          f"（只读 {len([t for t in rules.get('commercial_tools', []) if t not in exempt])} + 豁免 {len(exempt)}）")
 
 
 if __name__ == "__main__":

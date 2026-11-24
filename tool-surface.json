@@ -7,7 +7,7 @@
     "shared-instance"
   ],
   "visibility": "public",
-  "description": "DaaS 开放数据核心 MCP（主面 87 工具）：概念/实体/关系与已核验指标的检索与取数（read/list/semantic/graph/四垂类读数），加上注册、策略、范围、爬取编排等控制写面。主面之外另有公开只读切面 `tool-surface.public.json`（FD_OPEN_DATA_FACE=public，14 工具），两者并存、互不替代。",
+  "description": "DaaS 开放数据核心 MCP（主面 87 工具（商业可引用 35））：概念/实体/关系与已核验指标的检索与取数（read/list/semantic/graph/四垂类读数），加上注册、策略、范围、爬取编排等控制写面。主面之外另有公开只读切面 `tool-surface.public.json`（FD_OPEN_DATA_FACE=public，14 工具），两者并存、互不替代。",
   "naming_convention": {
     "order": "verb_noun",
     "applies_to": "new_tools",
@@ -19,14 +19,9 @@
       "level": "commercial",
       "tools": [
         "ai_search",
-        "auth_events",
-        "auth_status",
-        "consume_concepts",
         "coverage_report",
-        "crawl_status",
         "crossborder_merchant_status",
         "data_stats",
-        "fetch",
         "flower_company_financials",
         "flower_planted_area",
         "flower_price_series",
@@ -34,7 +29,6 @@
         "flower_universe",
         "get_entity",
         "graph_search",
-        "hotel_benchmark",
         "hotel_company_events",
         "hotel_kpi",
         "hotel_series",
@@ -48,12 +42,6 @@
         "list_registry_entries",
         "list_relationships",
         "list_schedules",
-        "platform_runs",
-        "platform_sources",
-        "policy_estimate",
-        "policy_get",
-        "policy_list",
-        "policy_runs",
         "read",
         "read_series",
         "resolve_entity",
@@ -62,9 +50,6 @@
         "restaurant_sampling_notices",
         "restaurant_series",
         "restaurant_universe",
-        "scope_list",
-        "scope_list_bindings",
-        "scope_stats",
         "semantic_search",
         "semantic_search_entities",
         "semantic_search_unified"
@@ -78,21 +63,33 @@
         "add_entity",
         "add_entity_identifier",
         "add_relationship",
+        "auth_events",
         "auth_launch_login",
         "auth_request_login",
+        "auth_status",
         "confirm_binding",
+        "consume_concepts",
+        "crawl_status",
         "enumerate_wbgapi_indicators",
+        "fetch",
         "generate_refresh_schedules",
+        "hotel_benchmark",
         "import_catalog",
         "import_crosswalks",
         "plan_crawl",
         "platform_cancel_pending",
         "platform_cancel_run",
+        "platform_runs",
+        "platform_sources",
         "platform_trigger",
         "policy_create",
         "policy_delete",
         "policy_disable",
         "policy_enable",
+        "policy_estimate",
+        "policy_get",
+        "policy_list",
+        "policy_runs",
         "policy_trigger_now",
         "policy_update",
         "propose_bindings",
@@ -106,6 +103,9 @@
         "scope_bind_caller",
         "scope_create",
         "scope_delete",
+        "scope_list",
+        "scope_list_bindings",
+        "scope_stats",
         "scope_unbind_caller",
         "scope_update",
         "seed_entity_identifiers",
@@ -119,14 +119,9 @@
   "rules": {
     "commercial_tools": [
       "ai_search",
-      "auth_events",
-      "auth_status",
-      "consume_concepts",
       "coverage_report",
-      "crawl_status",
       "crossborder_merchant_status",
       "data_stats",
-      "fetch",
       "flower_company_financials",
       "flower_planted_area",
       "flower_price_series",
@@ -134,7 +129,6 @@
       "flower_universe",
       "get_entity",
       "graph_search",
-      "hotel_benchmark",
       "hotel_company_events",
       "hotel_kpi",
       "hotel_series",
@@ -148,12 +142,6 @@
       "list_registry_entries",
       "list_relationships",
       "list_schedules",
-      "platform_runs",
-      "platform_sources",
-      "policy_estimate",
-      "policy_get",
-      "policy_list",
-      "policy_runs",
       "read",
       "read_series",
       "resolve_entity",
@@ -162,9 +150,6 @@
       "restaurant_sampling_notices",
       "restaurant_series",
       "restaurant_universe",
-      "scope_list",
-      "scope_list_bindings",
-      "scope_stats",
       "semantic_search",
       "semantic_search_entities",
       "semantic_search_unified"
@@ -173,21 +158,33 @@
       "add_entity",
       "add_entity_identifier",
       "add_relationship",
+      "auth_events",
       "auth_launch_login",
       "auth_request_login",
+      "auth_status",
       "confirm_binding",
+      "consume_concepts",
+      "crawl_status",
       "enumerate_wbgapi_indicators",
+      "fetch",
       "generate_refresh_schedules",
+      "hotel_benchmark",
       "import_catalog",
       "import_crosswalks",
       "plan_crawl",
       "platform_cancel_pending",
       "platform_cancel_run",
+      "platform_runs",
+      "platform_sources",
       "platform_trigger",
       "policy_create",
       "policy_delete",
       "policy_disable",
       "policy_enable",
+      "policy_estimate",
+      "policy_get",
+      "policy_list",
+      "policy_runs",
       "policy_trigger_now",
       "policy_update",
       "propose_bindings",
@@ -201,6 +198,9 @@
       "scope_bind_caller",
       "scope_create",
       "scope_delete",
+      "scope_list",
+      "scope_list_bindings",
+      "scope_stats",
       "scope_unbind_caller",
       "scope_update",
       "seed_entity_identifiers",
@@ -208,6 +208,560 @@
       "update_concept",
       "update_entity"
     ],
-    "note": "判据=是否只读。只读检索/取数进 commercial；任何改注册表或触发抓取的进 internal。公开只读切面见 tool-surface.public.json。"
+    "note": "判据=是否只读。只读检索/取数进 commercial；任何改注册表或触发抓取的进 internal。公开只读切面见 tool-surface.public.json。",
+    "commercial_exemptions": [
+      {
+        "tool": "read",
+        "reason": "写透明记忆化缓存与 (scope, day) 命中计数，不改变面向用户的数据"
+      },
+      {
+        "tool": "read_series",
+        "reason": "写透明记忆化缓存与 (scope, day) 命中计数，不改变面向用户的数据"
+      },
+      {
+        "tool": "ai_search",
+        "reason": "写透明记忆化缓存与 (scope, day) 命中计数，不改变面向用户的数据"
+      },
+      {
+        "tool": "semantic_search",
+        "reason": "写透明记忆化缓存与 (scope, day) 命中计数，不改变面向用户的数据"
+      },
+      {
+        "tool": "semantic_search_entities",
+        "reason": "写透明记忆化缓存与 (scope, day) 命中计数，不改变面向用户的数据"
+      },
+      {
+        "tool": "semantic_search_unified",
+        "reason": "写透明记忆化缓存与 (scope, day) 命中计数，不改变面向用户的数据"
+      },
+      {
+        "tool": "list_registry_entries",
+        "reason": "分页浏览全量指标注册表；带 scope 时记一条 (scope, day) 命中计数，不改变面向用户的数据（同 read 系）"
+      }
+    ]
+  },
+  "tool_annotations": {
+    "add_entity": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "add_entity_identifier": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "add_relationship": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "ai_search": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "auth_events": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "auth_launch_login": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "auth_request_login": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "auth_status": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "confirm_binding": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "consume_concepts": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "coverage_report": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "crawl_status": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "crossborder_merchant_status": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "data_stats": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "enumerate_wbgapi_indicators": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "fetch": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "flower_company_financials": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "flower_planted_area": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "flower_price_series": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "flower_trade": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "flower_universe": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "generate_refresh_schedules": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "get_entity": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "graph_search": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "hotel_benchmark": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "hotel_company_events": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "hotel_kpi": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "hotel_series": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "hotel_universe": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "import_catalog": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "import_crosswalks": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_bindings": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_cnreport_rules": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_concept_families": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_concept_mappings": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_concepts": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_entities": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_registry_entries": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_relationships": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "list_schedules": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "plan_crawl": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "platform_cancel_pending": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "platform_cancel_run": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "platform_runs": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "platform_sources": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "platform_trigger": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "policy_create": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "policy_delete": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "policy_disable": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "policy_enable": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "policy_estimate": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "policy_get": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "policy_list": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "policy_runs": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "policy_trigger_now": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "policy_update": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "propose_bindings": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "rank_sources": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "re_embed_concept": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "read": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "read_series": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": true
+    },
+    "record_concept_mapping": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "register_datasource": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "register_discovered": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "resolve_entity": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "restaurant_company_events": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "restaurant_company_financials": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "restaurant_sampling_notices": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "restaurant_series": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "restaurant_universe": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "review_bindings": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "run_schedule": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": true
+    },
+    "scope_bind_caller": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "scope_create": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "scope_delete": {
+      "readOnlyHint": false,
+      "destructiveHint": true,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "scope_list": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "scope_list_bindings": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "scope_stats": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "scope_unbind_caller": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": false,
+      "openWorldHint": false
+    },
+    "scope_update": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "seed_entity_identifiers": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "semantic_search": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "semantic_search_entities": {
+      "readOnlyHint": true,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "semantic_search_unified": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "update_binding": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "update_concept": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    },
+    "update_entity": {
+      "readOnlyHint": false,
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false
+    }
   }
 }
