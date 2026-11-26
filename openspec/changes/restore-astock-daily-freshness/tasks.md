@@ -39,7 +39,7 @@
       验证：`510300` 的 provider `get_quote` 时间戳进入 4 天窗口内。
 - [x] 3.4（已做：4 个指数 2560 行，provider 现在可读；顺带修了 .SS 撞码）指数（依 1.1 结论）：若缺实体/概念先补注册，再对 `000300 / 000905 / 000001 / 399001` 跑补数。
       验证：`get_bars("000300","1d",5)` 返回非空且报价非 `no_quote`。
-- [ ] 3.5 补数后复核：`python scripts/check_policy_freshness.py`（在 fd-master 的 Job 形态或本地对真库）；
+- [ ] 3.5 补数后复核（2659 的 37min 修复需出片滚 scraw 执行镜像才生效；本机未验）：`python scripts/check_policy_freshness.py`（在 fd-master 的 Job 形态或本地对真库）；
       记录哪些策略转绿、哪些仍是带位置的失败。
 
 ## 4. 交易侧解锁验证（跨仓，只读）
@@ -57,4 +57,5 @@
       需要换出口/换源（另立 change）。**不得**用「补了一次」冒充「修好了」。
 - [ ] 5.2 若属 (b)：在 `docs/astock-daily-increment.md` 写明封禁判据与下一步，并在
       `fd-infra-deploy/tools/chain-probes.json` 视角下该线保持红（诚实红，不声明 expected_red）。
+- [ ] 5.2b 出片并滚 scraw-fd-open-data-mcp 执行镜像，跑一次 2659 确认真在 180min 内完成
 - [ ] 5.3 `openspec validate restore-astock-daily-freshness --strict` 通过，任务逐项勾选后归档。
