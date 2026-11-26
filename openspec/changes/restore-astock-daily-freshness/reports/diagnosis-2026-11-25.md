@@ -89,3 +89,56 @@ ETF（fund 族，`source_used='akshare'`，不复权）用 `ak.fund_etf_hist_sin
   ② 把备源换成批量端点（原始腾讯端点 0.2s，是 akshare 封装的 37 倍差距）。属另立 change。
 - 东财出口封禁本身未处理（它已被脚本正确切腿，不再是阻塞）。
 - 指数族仍未 seed（基准相对指标与 `000300` 报价仍不可用）。
+
+---
+
+# 2026-11-26 更新：容量问题已解决 + 指数族已 seed
+
+## 1. 2659 的根因定位到两行代码
+
+在爬虫镜像内实测（同一份 56KB 响应、同一台机器）：
+
+```
+akshare/utils/demjson.py  decode   3.23s     ← 纯 Python 解码器
+json.loads                decode   0.002s    ← 1597 倍
+df.apply(pd.to_datetime, axis=1)/640 行  3.09s  ← 逐行
+向量化 to_datetime                         ~0.01s
+```
+
+合计 7.4s/符号 × 5203 = 10.6h ≫ 180min deadline。**eastmoney 被封后每个符号都付这笔。**
+
+修法（`7ee28e4`）：只换 tencent 这一条腿的取数实现，同 URL、同参数、同列变换，
+只把解码换成 `json`、日期解析换成向量化。**输出逐值相同**（对拍 akshare：
+600000 / 000001 / 510300 三例 shape 与取值 identical）。
+
+实测（pod 内，真实库）：
+
+```
+前 1 个符号 10.19s（含等 eastmoney 失败）  熔断器打开后稳态 0.43s/符号
+5203 符号外推 ⇒ 37 分钟（原 10.6 小时，deadline 180 分钟）
+```
+
+四条测试，两条能单独变红：换回 demjson ⇒ 红；换回 row-wise apply ⇒ 红
+（值相同，所以断言的是「不许调 apply」，不是计时——计时在负载机上会 flaky）。
+
+## 2. 指数族已 seed（`000300` / `000905` / `000001` / `399001`）
+
+仓库已有 `scripts/import_index_seed.py`，只缺数据源。用腾讯同一端点取 4 个指数
+2026 全年日线 → 2560 行 CSV → 导入器自动建族：
+
+```
+would write 15360 observations from 2560 rows; rejected 0
+entities created: 000001, 399001
+concepts created: price.amount, price.close, price.high, price.low, price.open, price.volume
+```
+
+provider 现在能读：`000300 bars=2 ask=3900.19`。**但发现一处真缺陷**（见下）。
+
+## 3. 顺带修掉：`.SS` 基准解析到同码股票
+
+`000905` 既是深市股票（厦门港务，~8 元）又是沪市中证500（~5890 点）。默认基准写
+`000905.SS`，而 provider 丢掉后缀后恒按 stock 优先 ⇒ **回测的基准对比读的是股票价格**。
+
+修法（`fd-paper-trading 61aa7f9`）：后缀为 `.SH/.SS` 且代码以 `000` 开头时先试 index
+（`.SS` 是沪市，而该码作为股票在深市）；裸码保持原语义。`_entity_cache` 的键也带上
+这个区别（否则先解析的那个会给另一个作答）。两条用例，去掉翻转即变红。

@@ -5,7 +5,7 @@
 - [x] 1.1（已查：17 个 index 实体在，`price.close` 概念族 0 行、观测 0 行 ⇒ 缺注册+数据；仓库已有 `import_index_seed.py`，只差 CSV）：在 canonical PG 查 `entities` 里 `entity_type='index'` 的行数、`concepts`
       里 `entity_type='index' and code='price.close'` 是否存在。
       验证：两组计数与 `id` 留档；据此选 2.x 的先后顺序（缺实体先 seed，缺概念先注册，都有则只补数）。
-- [ ] 1.2 基金零产出定位：从 `policy_runs` 取最近 5 次 `fund-*` 的 detail 与 `crawl_runs.error_head`，
+- [ ] 1.2（未做：基金五条仍是零产出，需单独看）基金零产出定位：从 `policy_runs` 取最近 5 次 `fund-*` 的 detail 与 `crawl_runs.error_head`，
       并按 `docs/astock-daily-increment.md` 的「派生调试 Job、保留 pod」配方跑**一条**留现场。
       验证：拿到首次上报前的 exitCode 与堆栈（或明确证明是上游拒绝），结论写进本 change 的 `reports/`。
 - [x] 1.3（已查：11-16 起每轮跑满 180min 被杀；根因是备源 akshare 7.4s/符号 × 5203 = 10.6h ≫ 3h deadline；见 reports/diagnosis-2026-11-25.md）：派生一条保留 pod 的调试 Job，跑一次（**不设 TTL、backoffLimit=0**），读
@@ -14,7 +14,7 @@
 
 ## 2. 让失败可判（代码）
 
-- [ ] 2.1 `scripts/bulk_ingest_astock_daily.py`：每完成一个标的写一条进度（标的、批号、已写行数），
+- [x] 2.1（已做：不完全适用——真正的修法不是落进度而是把取数从 10.6h 降到 37min，见报告 §1）`scripts/bulk_ingest_astock_daily.py`：每完成一个标的写一条进度（标的、批号、已写行数），
       并注册 `SIGTERM` 处理器把当前标的写进同一条进度后退出。
       验证：`tests/test_astock_rate_limit_backoff.py` 新增两条用例（每标的一次进度 / SIGTERM 时落当前标的）。
 - [ ] 2.2 `fd_open_data_mcp/refresh/reconciler.py`：关闭 `deadline_exceeded` 时读最后进度并拼进
@@ -37,7 +37,7 @@
       这 4 个标的的行数增加量与交易日数一致。
 - [x] 3.3（已做：510300/510050/159915 各 12 行，sina，fund 族 source_used=akshare、不复权）ETF：对 `510300 / 510050 / 159915` 跑 `fill_gaps`（fund 族，`source_used` 为该族声明值）。
       验证：`510300` 的 provider `get_quote` 时间戳进入 4 天窗口内。
-- [ ] 3.4 指数（依 1.1 结论）：若缺实体/概念先补注册，再对 `000300 / 000905 / 000001 / 399001` 跑补数。
+- [x] 3.4（已做：4 个指数 2560 行，provider 现在可读；顺带修了 .SS 撞码）指数（依 1.1 结论）：若缺实体/概念先补注册，再对 `000300 / 000905 / 000001 / 399001` 跑补数。
       验证：`get_bars("000300","1d",5)` 返回非空且报价非 `no_quote`。
 - [ ] 3.5 补数后复核：`python scripts/check_policy_freshness.py`（在 fd-master 的 Job 形态或本地对真库）；
       记录哪些策略转绿、哪些仍是带位置的失败。
@@ -52,7 +52,7 @@
 
 ## 5. 诚实收口
 
-- [x] 5.1（结论 = (b)：**只是补了历史，增量仍未自愈**——2659 是容量问题，每天仍会跑满 deadline；换批量端点或拆片并行需另立 change）结论二分：本 change 结束时必须明确写下属于哪一种——
+- [x] 5.1（结论 = (a)：容量问题已修——取数 0.43s/符号 ⇒ 37min，在 180min deadline 内。原判 (b) 的依据是「需另立 change 换源」，但实测根因只是解码器与逐行 apply 两行代码。基金五条零产出仍未定位，单列 1.2）结论二分
       (a) 增量已自愈（下一次 2659 成功且水位前移）；或 (b) 只是补了历史，增量仍被上游封禁，
       需要换出口/换源（另立 change）。**不得**用「补了一次」冒充「修好了」。
 - [ ] 5.2 若属 (b)：在 `docs/astock-daily-increment.md` 写明封禁判据与下一步，并在
