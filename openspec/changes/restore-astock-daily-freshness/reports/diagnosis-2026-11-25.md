@@ -142,3 +142,27 @@ provider 现在能读：`000300 bars=2 ask=3900.19`。**但发现一处真缺陷
 修法（`fd-paper-trading 61aa7f9`）：后缀为 `.SH/.SS` 且代码以 `000` 开头时先试 index
 （`.SS` 是沪市，而该码作为股票在深市）；裸码保持原语义。`_entity_cache` 的键也带上
 这个区别（否则先解析的那个会给另一个作答）。两条用例，去掉翻转即变红。
+
+---
+
+# 2026-11-26 追加：基金五条 zero_yield 的定位（部分结论）
+
+**已排除**（每一步都实测）：
+
+| 假设 | 判据 | 结论 |
+|---|---|---|
+| fund 概念没有 bindings | `concept_bindings` 对 378/379/383-388 共 24 条 | ✗ 排除 |
+| fund function 没有 bulk_history | fn485/486/487/489 全为 `True` | ✗ 排除 |
+| fund 实体没有 source 标识符 | `entity_source_identifiers` fund/akshare = 504 | ✗ 排除 |
+| planner 生成不出 plan | `plan_crawl` 实测：p3 = 10 cells / 2 concepts / 0 unroutable；p5 = 3024 cells / 6 concepts | ✗ 排除 |
+| 上游取不到数据 | 爬虫出口实测：`fund_open_fund_info_em` 1793 行 0.56s、`fund_etf_hist_sina` 3523 行 0.28s（仅 eastmoney 那面限流） | ✗ 排除 |
+
+**共同点**：所有 zero_yield 的策略都是 `executor=scrapy`（含 `p2487 macro-cn-money-monthly`），
+而唯一能取到数的是 `executor=direct`（2659）。Job **确实被创建了**
+（`job_ref = cheap9/crawl-policy-3-20261126065206`），但 TTL 回收后无现场可读，
+且 `crawl_runs` 表里**没有任何 fund 执行记录** —— 说明 pod 起来后没走到上报那一步。
+
+**结论**：这五条是 scrapy 执行器的形态问题，不是数据/绑定/计划问题。要继续必须**保留现场**：
+把该策略的 `ttlSecondsAfterFinished` 临时去掉（或从 cronjob 派生一个不删 pod 的 Job），
+跑一轮读 `containerStatuses[0].state.terminated` 与完整日志。这需要改跳板的 launcher 行为，
+不宜顺手改生产 —— 留给下一个 change 按 pinned-pod 配方做。
