@@ -169,13 +169,35 @@ def _reset_provider_state() -> None:
 
 
 def _provider_fn(name: str):
+    """Resolve ONE provider, lazily, without building the whole table.
+
+    The table used to be built in one expression, so a single missing akshare
+    symbol killed every leg: 2026-11-26 the image shipped akshare 1.20.46+ where
+    `stock_zh_a_hist` was renamed `stock_zh_a_hist_em`, and the AttributeError
+    fired while BUILDING the dict — tencent (our own HTTP, no akshare at all)
+    never got a chance to answer, and every symbol failed three times over.
+
+    Also accepts the renamed symbol: the leg is the same endpoint either way.
+    """
     global _PROVIDER_FNS
     if _PROVIDER_FNS is None:
-        import akshare as ak
-        _PROVIDER_FNS = {"eastmoney": ak.stock_zh_a_hist,
-                         "tencent": _tencent_direct,
-                         "sina": ak.stock_zh_a_daily}
-    return _PROVIDER_FNS[name]
+        _PROVIDER_FNS = {"tencent": _tencent_direct}
+    if name in _PROVIDER_FNS:
+        return _PROVIDER_FNS[name]
+    import akshare as ak
+    if name == "eastmoney":
+        fn = getattr(ak, "stock_zh_a_hist_em", None) or getattr(ak, "stock_zh_a_hist", None)
+        if fn is None:
+            raise RuntimeError("akshare has neither stock_zh_a_hist_em nor stock_zh_a_hist")
+    elif name == "sina":
+        # renamed in akshare 1.20.46 (same endpoint); accept either spelling.
+        fn = getattr(ak, "stock_zh_a_hist_sina", None) or getattr(ak, "stock_zh_a_daily", None)
+        if fn is None:
+            raise RuntimeError("akshare has neither stock_zh_a_hist_sina nor stock_zh_a_daily")
+    else:
+        raise KeyError(f"unknown provider {name!r}")
+    _PROVIDER_FNS[name] = fn
+    return fn
 
 
 # Tencent's kline endpoint returns valid JSON, but akshare decodes it with its own
