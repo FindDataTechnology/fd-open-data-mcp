@@ -55,7 +55,7 @@
 - [x] 5.1（结论 = (a)：容量问题已修——取数 0.43s/符号 ⇒ 37min，在 180min deadline 内。原判 (b) 的依据是「需另立 change 换源」，但实测根因只是解码器与逐行 apply 两行代码。基金五条零产出仍未定位，单列 1.2）结论二分
       (a) 增量已自愈（下一次 2659 成功且水位前移）；或 (b) 只是补了历史，增量仍被上游封禁，
       需要换出口/换源（另立 change）。**不得**用「补了一次」冒充「修好了」。
-- [ ] 5.2 若属 (b)：在 `docs/astock-daily-increment.md` 写明封禁判据与下一步，并在
+- [x] 5.2（不适用：5.1 结论是 (a)——容量问题已修，2659 的 run 2545 已于 11-26 success，水位到 11-26，不是「只补了历史、增量仍被封」。故 (b) 分支的「写明封禁判据 + chain-probes 保持红」不触发。若将来 2659 再连续 deadline 失败，重开此分支）若属 (b)：在 `docs/astock-daily-increment.md` 写明封禁判据与下一步，并在
       `fd-infra-deploy/tools/chain-probes.json` 视角下该线保持红（诚实红，不声明 expected_red）。
-- [ ] 5.2b 出片并滚 scraw-fd-open-data-mcp 执行镜像，跑一次 2659 确认真在 180min 内完成
-- [ ] 5.3 `openspec validate restore-astock-daily-freshness --strict` 通过，任务逐项勾选后归档。
+- [~] 5.2b（部署已完成：fd@4377a8f → fd:sha-4377a8f → scraw FD_ODM_REF=4377a8f → scraw:sha-a6a9240；DB alembic 0026 applied；clusters.image（cheap9）+ crawl-reconciler + policy-freshness + SCRAW_K8S_IMAGE 三处均 sha-a6a9240；烟雾：镜内 `_report_progress`/SIGTERM 在、reconciler 日志 `schema gate passed: revision 0026_run_progress`、一次 reconciler 运行正常。⚠️ **最后一跳「跑一次 2659 确认 180min 内完成」尚待观察**：2659 cron 18:17 CST 盘后，不中途触发以免盘中价脏化序列；下一轮判据见 reports/review-2026-11-27.md）出片并滚 scraw-fd-open-data-mcp 执行镜像，跑一次 2659 确认真在 180min 内完成
+- [~] 5.3（`openspec validate --strict` 已过；归档留待 5.2b 的 2659 实跑确认后再做——部署已完成但「真在 180min 内完成」未观察，不提前宣布闭环）`openspec validate restore-astock-daily-freshness --strict` 通过，任务逐项勾选后归档。
