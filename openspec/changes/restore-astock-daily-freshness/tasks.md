@@ -5,7 +5,7 @@
 - [x] 1.1（已查：17 个 index 实体在，`price.close` 概念族 0 行、观测 0 行 ⇒ 缺注册+数据；仓库已有 `import_index_seed.py`，只差 CSV）：在 canonical PG 查 `entities` 里 `entity_type='index'` 的行数、`concepts`
       里 `entity_type='index' and code='price.close'` 是否存在。
       验证：两组计数与 `id` 留档；据此选 2.x 的先后顺序（缺实体先 seed，缺概念先注册，都有则只补数）。
-- [ ] 1.2（未做：基金五条仍是零产出，需单独看）基金零产出定位：从 `policy_runs` 取最近 5 次 `fund-*` 的 detail 与 `crawl_runs.error_head`，
+- [x] 1.2（已定位：**不是上游封禁，是旧镜像的写侧缺口**。证据：fetch_log 在 11-20 对 fund 概念有 204 ok + 6 err（上游给了数据），而 11-20..26 整整一周 0 行落地（取到没写进）；同一份 12 格计划用当前镜像 sha-a6a9240 派生调试 Job **写入 3588 行、exit 0、109s**。akshare/pandas pin 两镜像相同，唯一变量是 fd 代码；旧镜像 sha-73e7c54 已从 ccr 轮转删除无法 A/B。详见 reports/fund-zero-yield-2026-11-27.md。随 5.2b 同一滚动已修；定时轮（经完整 launcher 带上报）的观察同 5.2b）基金零产出定位：从 `policy_runs` 取最近 5 次 `fund-*` 的 detail 与 `crawl_runs.error_head`，
       并按 `docs/astock-daily-increment.md` 的「派生调试 Job、保留 pod」配方跑**一条**留现场。
       验证：拿到首次上报前的 exitCode 与堆栈（或明确证明是上游拒绝），结论写进本 change 的 `reports/`。
 - [x] 1.3（已查：11-16 起每轮跑满 180min 被杀；根因是备源 akshare 7.4s/符号 × 5203 = 10.6h ≫ 3h deadline；见 reports/diagnosis-2026-11-25.md）：派生一条保留 pod 的调试 Job，跑一次（**不设 TTL、backoffLimit=0**），读
