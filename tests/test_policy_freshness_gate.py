@@ -97,6 +97,34 @@ def test_a_real_reason_is_not_opaque():
     assert (1, "opaque_reason") not in rules
 
 
+def test_a_located_deadline_is_not_opaque():
+    """restore-astock-daily-freshness D1 的反面：带位置的 deadline 已经回答了
+    「死在哪」，不该再被算成「没留原因」——即使 pod 诊断还附在后面。
+
+    旧判据会误判：它扫 "before the runner checked in"，而 reconciler 合成的 detail
+    里那条 pod 摘要必然包含它。收紧后以 "while processing <标的>" 为准。"""
+    detail = ("deadline exceeded after 10800s while processing 600519 (820/5203 done); "
+              "job cheap9/crawl-policy-2659-x failed before the runner checked in; "
+              "pod scraw/x container=crawler exitCode=143 reason=Error")
+    f, _, _ = _judge([_state(1, [_run("failed", 26, detail)])])
+    rules = _rules(f)
+    assert (1, "latest_failed") in rules
+    assert (1, "opaque_reason") not in rules, (
+        "a deadline kill that names its symbol is decidable, not opaque")
+
+
+def test_an_unlocated_deadline_is_opaque():
+    """同一条失败的**负例**：没有任何进度时 detail 只有 "reason-opaque" 标记——
+    这才是要单独计数的那一类（根治：让执行体报进度，而不是调大 deadline）。"""
+    detail = ("deadline exceeded after 10800s (reason-opaque: the body reported no "
+              "progress before the kill); job cheap9/crawl-policy-2659-x failed before "
+              "the runner checked in; pod scraw/x container=crawler exitCode=143")
+    f, _, _ = _judge([_state(1, [_run("failed", 26, detail)])])
+    rules = _rules(f)
+    assert (1, "latest_failed") in rules
+    assert (1, "opaque_reason") in rules
+
+
 def test_dangling_open_run_counts():
     """2026-11-13 实历：一条 running 行挂了 5.2 小时，整天没有新行。"""
     f, _, _ = _judge([_state(1, [_run("running", 6.0)])])

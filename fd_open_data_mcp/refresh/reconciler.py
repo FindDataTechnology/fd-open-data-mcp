@@ -196,11 +196,18 @@ def _failed_condition(status: dict) -> bool:
     return False
 
 
-def _deadline_detail(launcher, job_ref: str) -> str:
+def _deadline_detail(launcher, job_ref: str, progress: str | None = None) -> str:
     """policy_runs.detail for a Job killed by its activeDeadlineSeconds.
 
     Distinguishes "process wedged" from "upstream slow" on the ledger, and
-    carries the ceiling that fired plus whatever pod evidence still exists."""
+    carries the ceiling that fired plus whatever pod evidence still exists.
+
+    ``progress`` is the last ``"<item>|<done>/<planned>"`` the execution body
+    reported before the kill (restore-astock-daily-freshness D1). When present
+    the detail names *where* it died; when absent it is marked ``reason-opaque``
+    so a gate can count "deadline with a location" separately from "no location
+    at all" — the two have different remedies (widen the ceiling vs. make the
+    body report)."""
     seconds = None
     getter = getattr(launcher, "deadline_seconds", None)
     if callable(getter):
@@ -213,6 +220,9 @@ def _deadline_detail(launcher, job_ref: str) -> str:
         detail += f" after {seconds}s"
     else:
         detail += f" (activeDeadlineSeconds={_active_deadline_seconds()}s)"
+    location = _progress_location(progress)
+    if location:
+        detail += f" while processing {location}"
     summary = ""
     diagnose = getattr(launcher, "diagnose", None)
     if callable(diagnose):
@@ -223,7 +233,27 @@ def _deadline_detail(launcher, job_ref: str) -> str:
                            job_ref, exc_info=True)
     if summary:
         detail += f"; {summary}"
+    if not location:
+        # No progress was ever recorded: name that explicitly so the opaque
+        # marker is a positive statement, not a guess from a terse string.
+        detail += " (reason-opaque: the body reported no progress before the kill)"
     return detail[:FAILURE_DETAIL_MAX_CHARS]
+
+
+def _progress_location(progress: str | None) -> str:
+    """Human-readable half of a ``"<item>|<done>/<planned>"`` progress string.
+
+    Returns ``"600000 (820/5203 done)"`` for ``"600000|820/5203"``; an empty
+    string when the item half is missing so callers keep the opaque path."""
+    item, _, tail = (progress or "").partition("|")
+    item = item.strip()
+    if not item:
+        return ""
+    done, _, planned = tail.partition("/")
+    done, planned = done.strip(), planned.strip()
+    if not done and not planned:
+        return item
+    return f"{item} ({done or '?'}/{planned or '?'} done)"
 
 
 def _cap_tail(text: str, limit: int) -> str:
@@ -2029,7 +2059,11 @@ def reconcile_once(
                 # activeDeadlineSeconds ceiling. Write a detail that names the
                 # ceiling so a wedged crawler is distinguishable from a slow
                 # upstream on the ledger (and in the crawl_runs error_head).
-                run.detail = _deadline_detail(launcher, run.job_ref)
+                # restore-astock-daily-freshness D1: also fold in the last item
+                # the body reported, so a deadline kill has a *location* — and
+                # clear it so the next run starts from a clean slate.
+                run.detail = _deadline_detail(launcher, run.job_ref, run.progress)
+                run.progress = None
             elif (state == "failed" and not run.detail
                     and run.rows_attempted is None and run.rows_new is None):
                 # 2026-10-05 incident: a container crash BEFORE the runner's

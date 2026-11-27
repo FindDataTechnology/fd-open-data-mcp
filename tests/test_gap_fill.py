@@ -325,6 +325,60 @@ def test_a_failed_interval_stays_retryable(session, cid) -> None:
 
 
 # ---------------------------------------------------------------------------
+# a failed fill says *why* (restore-astock-daily-freshness D-gapfill)
+# ---------------------------------------------------------------------------
+
+
+def _cache_mid(session, cid) -> None:
+    covered = _weekdays("2026-01-01", "2026-06-30")
+    write_cache_range(
+        session, cid, T, EID, {d: 10.0 for d in covered}, "currency", SRC
+    )
+
+
+def test_upstream_refusal_is_named_as_such(session, cid) -> None:
+    """All providers refused (the 2026-11-09 eastmoney-ban shape): the reason
+    must say "upstream refused", not a bare boolean."""
+    _cache_mid(session, cid)
+
+    def rate_limited(start, end):
+        raise RuntimeError("RemoteDisconnected('Remote end closed connection')")
+
+    out = fill_gaps(
+        session, cid, T, EID, "2025-01-01", "2026-10-17", fetch_range=rate_limited,
+    )
+    assert out["fill_failed"] is True
+    assert out["fill_failure_reason"] == "upstream_refused"
+    assert "RemoteDisconnected" in out["fill_error_summary"], (
+        "a raw summary must survive for the operator")
+
+
+def test_a_local_bug_is_not_reported_as_an_upstream_refusal(session, cid) -> None:
+    """The opposite arm: a local exception (e.g. a serialization bug) must NOT
+    read as "upstream refused" — the two have opposite remedies."""
+    _cache_mid(session, cid)
+
+    def broken(start, end):
+        raise ValueError("cannot serialize Decimal to JSON")
+
+    out = fill_gaps(
+        session, cid, T, EID, "2025-01-01", "2026-10-17", fetch_range=broken,
+    )
+    assert out["fill_failed"] is True
+    assert out["fill_failure_reason"] == "other"
+    assert "cannot serialize" in out["fill_error_summary"]
+
+
+def test_a_successful_fill_carries_no_failure_reason(session, cid) -> None:
+    out = fill_gaps(
+        session, cid, T, EID, "2025-01-01", "2026-10-17",
+        fetch_range=Recorder({d: 1.0 for d in _weekdays("2025-01-01", "2026-10-17")}),
+    )
+    assert out["fill_failed"] is False
+    assert "fill_failure_reason" not in out
+
+
+# ---------------------------------------------------------------------------
 # the real fetch path (``_fetch_interval``): answered-empty vs could-not-ask
 # ---------------------------------------------------------------------------
 

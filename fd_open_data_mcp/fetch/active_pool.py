@@ -25,7 +25,7 @@ read, so a pool that is empty, stale or broken cannot change what a reader sees.
 from __future__ import annotations
 
 from datetime import datetime, timezone
-from typing import Optional
+from typing import Callable, Optional
 
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -187,12 +187,21 @@ def prewarm(
     *,
     concept_code: str = "price.close",
     limit: Optional[int] = None,
+    on_progress: Optional[Callable[[dict], None]] = None,
 ) -> dict:
     """Fill the recent window for every pool member.
 
     One symbol failing must not stop the others — a pre-warm that aborts on the
     first unreachable symbol would leave an operator unable to tell a network
     blip from a broken pool. Each result is recorded with its own outcome.
+
+    ``on_progress`` (restore-astock-daily-freshness D-pool) is called **as the
+    run advances** with ``{"processing": <item>, "done": n, "planned": total}``,
+    never only at the end. That is what lets a zero-yield be read as "had not
+    started" versus "processed items, all failed" — today both look like 0. It is
+    invoked once before any item with ``processing=None`` (the "not started"
+    reading) and again before each item, so ``done=0, processing=<x>`` and
+    ``processing=None`` are distinct snapshots. Never raises.
 
     Returns a per-symbol report plus counts, so "the pool is warm" is a
     checkable statement rather than a hope.
@@ -202,8 +211,17 @@ def prewarm(
     from fd_open_data_mcp.fetch.gapfill import fill_gaps
     from fd_open_data_mcp.models import Concept
 
+    def _emit(processing: Optional[str], done: int, planned: int) -> None:
+        if on_progress is None:
+            return
+        try:
+            on_progress({"processing": processing, "done": done, "planned": planned})
+        except Exception:  # noqa: BLE001 - a progress reader must not kill a run
+            pass
+
     concept = session.query(Concept).filter_by(code=concept_code).one_or_none()
     if concept is None:
+        _emit(None, 0, 0)
         return {
             "ok": False, "reason": f"concept {concept_code!r} not found",
             "results": [], "succeeded": 0, "failed": 0, "days": days,
@@ -213,10 +231,13 @@ def prewarm(
         members = members[:limit]
     end = date.today().isoformat()
     start = (date.today() - timedelta(days=days)).isoformat()
+    planned = len(members)
+    _emit(None, 0, planned)          # "not started": processing is None
 
     results = []
     succeeded = failed = 0
-    for member in members:
+    for idx, member in enumerate(members):
+        _emit(str(member["entity_id"]), idx, planned)
         try:
             out = fill_gaps(
                 session, concept.id, member["entity_type"],

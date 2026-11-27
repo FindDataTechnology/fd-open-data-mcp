@@ -753,6 +753,34 @@ def test_deadline_exceeded_closes_run_with_detail(session):
     assert "deadline exceeded" in run.detail
     assert "10800s" in run.detail
     assert "DeadlineExceeded" in run.detail      # pod evidence appended
+    # No progress was ever reported -> the close must say so positively, so a
+    # gate can count "deadline with no location" separately (opaque marker).
+    assert "reason-opaque" in run.detail
+
+
+def test_deadline_close_carries_the_last_progress_location(session):
+    """restore-astock-daily-freshness D1: a deadline kill must name where it died.
+
+    The body writes ``"<item>|<done>/<planned>"`` on every completed symbol; the
+    reconciler folds that into the detail and clears the stale value so the next
+    run does not inherit it."""
+    cid = _register(session)
+    p = _policy(session, cid, cron_expr="0 0 1 1 *")
+    run = PolicyRun(policy_id=p.id, status="running", job_ref="cheap/crawl-policy-1-x",
+                    started_at=NOW - timedelta(hours=4), progress="600519|820/5203")
+    session.add(run)
+    session.commit()
+
+    class _DeadlineLauncher(_FakeLauncher):
+        def deadline_seconds(self, job_ref):
+            return 10800
+
+    launcher = _DeadlineLauncher(poll_state="deadline_exceeded")
+    reconcile_once(session, launcher, now=NOW)
+    assert "600519" in run.detail, "the symbol being processed must be named"
+    assert "820/5203" in run.detail, "the completed count must be readable"
+    assert "reason-opaque" not in run.detail, "a located deadline is not opaque"
+    assert run.progress is None, "stale progress must not leak into the next run"
 
 
 def test_k8s_launcher_poll_deadline_without_failed_counter(monkeypatch):

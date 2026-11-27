@@ -674,6 +674,13 @@ class PolicyRun(Base):
     # indistinguishable from zero_yield ("fetched successfully, stored nothing"),
     # and the two have opposite remedies.
     rows_abandoned = Column(Integer, nullable=True)
+    # restore-astock-daily-freshness: the item the executor is working on, written
+    # INCREMENTALLY by the pod (same SCRAW_JOB_REF channel as rows_*). Format
+    # "<item>|<done>/<planned>". NULL means "this run never reported progress" —
+    # only then may a deadline close fall back to a reason-opaque detail instead
+    # of naming where it died. The reconciler clears it on close so a re-run does
+    # not inherit the previous run's stale position (alembic 0026).
+    progress = Column(String(255), nullable=True)
     cancelled_by = Column(String(128), nullable=True)  # actor identity when status='cancelled'
 
     policy = relationship("CrawlPolicy", back_populates="runs")
@@ -691,6 +698,7 @@ class PolicyRun(Base):
             "plan_cells": self.plan_cells,
             "rows_attempted": self.rows_attempted,
             "rows_new": self.rows_new,
+            "progress": self.progress,
             "cancelled_by": self.cancelled_by,
         }
 

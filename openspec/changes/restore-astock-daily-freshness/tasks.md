@@ -17,19 +17,19 @@
 - [x] 2.1（已做：不完全适用——真正的修法不是落进度而是把取数从 10.6h 降到 37min，见报告 §1）`scripts/bulk_ingest_astock_daily.py`：每完成一个标的写一条进度（标的、批号、已写行数），
       并注册 `SIGTERM` 处理器把当前标的写进同一条进度后退出。
       验证：`tests/test_astock_rate_limit_backoff.py` 新增两条用例（每标的一次进度 / SIGTERM 时落当前标的）。
-- [ ] 2.2 `fd_open_data_mcp/refresh/reconciler.py`：关闭 `deadline_exceeded` 时读最后进度并拼进
+- [x] 2.2（已做：新增 `policy_runs.progress` 列 + alembic 0026；`yield_report.report_run_progress` 写 `"<标的>|<done>/<planned>"`；`_deadline_detail` 拼进 `while processing X (n/m done)`，无进度才加 `reason-opaque`；关闭时清空 progress。`tests/test_reconciler.py` 两例：无进度→opaque、有进度→带位置且清空）`fd_open_data_mcp/refresh/reconciler.py`：关闭 `deadline_exceeded` 时读最后进度并拼进
       detail;无进度时按 `reason-opaque` 标记。
       验证：`tests/test_policy_freshness_gate.py` 新增「带位置的 deadline」与「opaque 被单独计数」两例。
-- [ ] 2.3 `scripts/check_policy_freshness.py`：`opaque_reason` 的判据按新标记收紧（有位置的
+- [x] 2.3（已做：`_is_opaque` 先认 `reason-opaque` 正向标记、再以 `while processing ` 短路为非 opaque，旧指纹降为兜底。`--self-test` 加正反两臂；`test_policy_freshness_gate.py` 加「带位置不 opaque」与「reason-opaque 才 opaque」两例，34 passed）`scripts/check_policy_freshness.py`：`opaque_reason` 的判据按新标记收紧（有位置的
       deadline 不再算 opaque）。验证：该脚本 `--self-test`/既有用例全绿，且新形态各有一条正负例。
-- [ ] 2.4 `active_pool.prewarm`：处理期间可读进度（当前标的、已完成/计划）。
+- [x] 2.4（已做：`prewarm(..., on_progress=)` 在首项前发 `{processing:None,done:0,planned:N}`（未开始），每项前发 `{processing:<id>,done:n,planned:N}`；回调异常不影响运行。`tests/test_active_pool.py` 两例，17 passed）`active_pool.prewarm`：处理期间可读进度（当前标的、已完成/计划）。
       验证：单测断言「未开始」与「处理第一项中」两种读数不同；`tests/` 里既有 prewarm 用例不回归。
-- [ ] 2.5 `fetch.gapfill.fill_gaps`：失败时返回可判原因（上游全拒 / 其它）+ 原始错误摘要。
+- [x] 2.5（已做：失败时 `_result` 带 `fill_failure_reason`(upstream_refused|other|unknown)+`fill_error_summary`；`_REFUSAL_MARKERS` 与执行器同一份文案。成功时不带该键。`tests/test_gap_fill.py` 三例，21 passed）`fetch.gapfill.fill_gaps`：失败时返回可判原因（上游全拒 / 其它）+ 原始错误摘要。
       验证：单测两条（全 provider 限流 vs 本地异常），断言原因不同。
 
 ## 3. 补数据（受控，不是全市场）
 
-- [ ] 3.1 写前体检：查 `guangzhou-xinru` 及其分片的磁盘与表水位；记录余量。若余量不足既定阈值，
+- [x] 3.1（已做：/dev/vda2 5.0G 可用/87%；fd_open_data 5285MB，最大 semantic_observations 3.4G；本次 insert-only 补数不触发扩容。见 reports/review-2026-11-27.md）写前体检：查 `guangzhou-xinru` 及其分片的磁盘与表水位；记录余量。若余量不足既定阈值，
       先扩容再做，不硬写。
 - [x] 3.2（已做：6 个标的 240 行，全部走 hfq 校准路径；tencent 6 次、eastmoney 熔断）个股：对 `600000 / 600036 / 600519 / 000001` 跑 `fill_gaps`（`price.stock.daily`，
       `start=2026-11-14`，`end=今天`）。
@@ -39,7 +39,7 @@
       验证：`510300` 的 provider `get_quote` 时间戳进入 4 天窗口内。
 - [x] 3.4（已做：4 个指数 2560 行，provider 现在可读；顺带修了 .SS 撞码）指数（依 1.1 结论）：若缺实体/概念先补注册，再对 `000300 / 000905 / 000001 / 399001` 跑补数。
       验证：`get_bars("000300","1d",5)` 返回非空且报价非 `no_quote`。
-- [ ] 3.5 补数后复核（2659 的 37min 修复需出片滚 scraw 执行镜像才生效；本机未验）：`python scripts/check_policy_freshness.py`（在 fd-master 的 Job 形态或本地对真库）；
+- [x] 3.5（已做：对真库跑 check_policy_freshness——2659 已转 success（run 2545, 11-26, 233310 行，水位到 11-26）；仍红的是 5 条 fund + 2487，全是 scrapy 执行器 zero_yield = 1.2 范畴，不受本 change 代码影响。见 reports/review-2026-11-27.md。⚠️ run 2545 恰好跑满 180.0min = deadline，所以 5.2b 滚镜像仍必须）补数后复核（2659 的 37min 修复需出片滚 scraw 执行镜像才生效；本机未验）：`python scripts/check_policy_freshness.py`（在 fd-master 的 Job 形态或本地对真库）；
       记录哪些策略转绿、哪些仍是带位置的失败。
 
 ## 4. 交易侧解锁验证（跨仓，只读）

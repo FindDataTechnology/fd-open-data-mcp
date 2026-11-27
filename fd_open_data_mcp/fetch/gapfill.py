@@ -160,6 +160,7 @@ def fill_gaps(
     )
     failed = False
     attempted = False
+    errors: list[str] = []
     # Only intervals not already known to be empty. A market holiday looks
     # exactly like a hole to the coverage judgment, but asking again is a wasted
     # round trip: measured six per read on a two-year A-share window.
@@ -173,6 +174,7 @@ def fill_gaps(
                 concept_id, entity_type, entity_id, gap_start, gap_end, exc,
             )
             failed = True
+            errors.append(f"[{gap_start}..{gap_end}] {type(exc).__name__}: {exc}")
             continue
         if not series:
             # Distinguish "asked and there is nothing" from "could not ask".
@@ -185,6 +187,7 @@ def fill_gaps(
                               gap_start, gap_end)
             else:
                 failed = True
+                errors.append(f"[{gap_start}..{gap_end}] every source refused")
             continue
         # Additive only: a stored value survives even if upstream now differs.
         write_cache_range_new_only(
@@ -203,7 +206,7 @@ def fill_gaps(
     # there) and unfetched ones alike, so a caller can always tell complete from
     # partial. Known-empty intervals are not a *failure*, which fill_failed says.
     return _result(merged, after.gaps, attempted, failed,
-                   known_empty=after.known_empty)
+                   known_empty=after.known_empty, errors=errors)
 
 
 def known_empty_intervals(
@@ -354,9 +357,35 @@ def _read(
     ]
 
 
+#: Markers that mean "the upstream refused us" rather than "our code broke"
+#: (restore-astock-daily-freshness D-gapfill). Mirrors the executor's own list
+#: (``scripts/bulk_ingest_astock_daily.RATE_LIMIT_MARKERS``) so the on-demand
+#: path and the scheduled path agree on what an IP ban looks like; kept local
+#: because this package must not import a script.
+_REFUSAL_MARKERS = ("限流", "断开了连接", "RemoteDisconnected", "Connection aborted",
+                    "timed out", "Timeout")
+
+
+def _failure_reason(errors: list[str]) -> str:
+    """One attributable cause for a fill that could not fetch (design D-gapfill).
+
+    The spec's requirement is "distinguish upstream-refused from everything
+    else, and keep a raw summary". A single boolean forced the operator to
+    re-run to learn which — the 2026-11-09 eastmoney ban read identically to a
+    local bug. With no per-interval errors the cause is genuinely unknown and
+    says so instead of guessing.
+    """
+    if not errors:
+        return "unknown"
+    text = " ".join(errors)
+    if any(m in text for m in _REFUSAL_MARKERS):
+        return "upstream_refused"
+    return "other"
+
+
 def _result(
     points: list[dict], gaps, attempted: bool, failed: bool,
-    known_empty=(),
+    known_empty=(), errors: Optional[list[str]] = None,
 ) -> dict:
     """Build the response, keeping the two kinds of absence distinguishable.
 
@@ -388,5 +417,11 @@ def _result(
         ],
         "fill_attempted": attempted,
         "fill_failed": failed,
+        # Only present on failure: a decidable cause plus a raw summary for the
+        # operator (which interval, what the upstream said). Absent on success
+        # so callers need no "ignore this on green" branch.
+        **({"fill_failure_reason": _failure_reason(errors or []),
+            "fill_error_summary": " | ".join(errors or [])[:1000]}
+           if failed else {}),
         "fingerprint": fingerprint(pairs),
     }

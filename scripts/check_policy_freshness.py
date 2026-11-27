@@ -162,6 +162,15 @@ OPAQUE_MARKERS = (
     "before the runner checked in",
     "pod 已回收",
 )
+#: 正向的「没留位置」标记（restore-astock-daily-freshness D1）：reconciler 在关闭一次
+#: **没有任何进度**的 deadline 时写这句。它是自证的——有位置的 deadline 不会带它，
+#: 所以判 opaque 不必再靠「detail 里有没有 before the runner…」这类可共存的指纹。
+#: 一个 `deadline exceeded ... while processing 600519 (820/5203 done)` 即使后面还跟着
+#: pod 诊断（含 "before the runner checked in"），也**不是** opaque：它已经回答了「死在
+#: 哪」。旧判据会把它误判成不透明，正是本 change 要收紧的那一处。
+REASON_OPAQUE_MARKER = "reason-opaque"
+#: 带位置的 deadline 指纹：进度被折进 detail 后必然出现其一。
+DEADLINE_LOCATED_MARKERS = ("while processing ",)
 
 
 # ---------------------------------------------------------------- 形状
@@ -245,9 +254,24 @@ def _as_utc(ts: datetime | None) -> datetime | None:
 # ---------------------------------------------------------------- 判据
 
 def _is_opaque(detail: str) -> bool:
+    """True when the failure detail still cannot be read for a cause.
+
+    Two positive signals settle it before the fingerprint scan:
+
+    * a located deadline (``while processing X`` / ``reported no progress``) has
+      already answered "where", so it is decidable even when pod diagnosis is
+      appended alongside it — the 2026-11-16..25 shape was opaque only because
+      the body never reported progress, which is a *different* remedy;
+    * the explicit ``reason-opaque`` marker the reconciler now writes is a
+      positive statement of "no location", so it is honored directly.
+    """
     if not (detail or "").strip():
         return True
     low = detail.lower()
+    if REASON_OPAQUE_MARKER in low:
+        return True
+    if any(m in low for m in DEADLINE_LOCATED_MARKERS):
+        return False
     return any(m.lower() in low for m in OPAQUE_MARKERS)
 
 
@@ -700,6 +724,17 @@ def _self_test() -> int:
     und_ok = any("p9 unknown-status" in u for u in undetermined)
     print(f"  {'✓' if und_ok else '✗'} p9 未知状态 aborted 进 undetermined（{len(undetermined)} 条）")
 
+    # 带位置的 deadline ≠ 不透明（restore-astock-daily-freshness D1）：正反两臂。
+    # 正臂：detail 含 "while processing <标的>"，即使 pod 摘要里也有 "before the
+    # runner checked in"（旧判据的指纹）也**不该**判 opaque；反臂：只有 "reason-opaque"
+    # 标记、没有位置，才判 opaque。少了反臂，「把 opaque 判据整个删掉」也能全绿。
+    located = ("deadline exceeded after 10800s while processing 600519 (820/5203 done); "
+               "job cheap9/x failed before the runner checked in")
+    opaque = "deadline exceeded after 10800s (reason-opaque: the body reported no progress before the kill)"
+    dl_ok = (not _is_opaque(located)) and _is_opaque(opaque)
+    print(f"  {'✓' if dl_ok else '✗'} deadline 带位置不判 opaque，只有 reason-opaque 才判"
+          f"（located={_is_opaque(located)}, opaque={_is_opaque(opaque)}）")
+
     # ── 放弃（surface-abandoned-cells-on-run-row）：三路夹具，每路断言**具体词与数字**。
     # 只断言「有事实行」会把「判据没跑、别的行顶上」读成绿。
     ab_facts = [f for f in facts if f.startswith("p10 all-abandoned")]
@@ -820,7 +855,7 @@ def _self_test() -> int:
         "yes" if _kinds(two_failed) else "no")
 
     return 0 if (ok and green and noop_fact and zy_fact and split_ok and und_ok
-                 and ab_all_ok and tz_ok and bad_ok and slow_ok) else 1
+                 and dl_ok and ab_all_ok and tz_ok and bad_ok and slow_ok) else 1
 
 
 # ---------------------------------------------------------------- main

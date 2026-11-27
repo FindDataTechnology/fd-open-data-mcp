@@ -167,6 +167,50 @@ def test_prewarm_respects_limit(session) -> None:
     assert len(out["results"]) == 2
 
 
+def test_prewarm_exposes_mid_run_progress(session) -> None:
+    """restore-astock-daily-freshness D-pool: progress must be readable *during*
+    the run, and "not started" must be distinguishable from "processing the
+    first item". Zero-yield used to be an undifferentiated 0."""
+    c = Concept(code="price.close", entity_type=T, frequency="daily",
+                unit="currency", verified=True)
+    session.add(c)
+    session.commit()
+    add_config_member(session, T, 1)
+    add_config_member(session, T, 2)
+
+    snapshots: list[dict] = []
+    prewarm(session, days=30, on_progress=snapshots.append)
+
+    assert snapshots, "a callback was given, so it must be called"
+    # The first snapshot is "not started": no item, done 0, a real plan count.
+    assert snapshots[0]["processing"] is None
+    assert snapshots[0]["done"] == 0
+    assert snapshots[0]["planned"] == 2
+    # Later snapshots name an item while done is still 0 — the "processing the
+    # first item" reading. This is the shape a zero-yield cannot produce
+    # otherwise: 0 done but an item named means it *did* start.
+    first_item = next(s for s in snapshots if s["processing"] is not None)
+    assert first_item["done"] == 0
+    assert first_item["processing"] in {"1", "2"}
+    assert snapshots[0] != first_item, "not-started and first-item must differ"
+
+
+def test_prewarm_progress_callback_errors_do_not_kill_the_run(session) -> None:
+    """A broken progress reader must never fail a pre-warm."""
+    c = Concept(code="price.close", entity_type=T, frequency="daily",
+                unit="currency", verified=True)
+    session.add(c)
+    session.commit()
+    add_config_member(session, T, 1)
+
+    def boom(_snap):
+        raise RuntimeError("reader exploded")
+
+    out = prewarm(session, days=30, on_progress=boom)
+    assert out["ok"] is True
+    assert len(out["results"]) == 1
+
+
 def test_defaults_are_aligned_with_the_backtest_window() -> None:
     """730 days is the engine's window cap; warming deeper would be unread."""
     assert DEFAULT_PREWARM_DAYS == 730

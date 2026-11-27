@@ -48,3 +48,38 @@ def report_run_yield(attempted: int, new: int, job_ref: str | None = None) -> No
             )
     except Exception:  # noqa: BLE001 - never let accounting break the ingest
         logger.warning("yield report failed (job_ref=%s)", job_ref, exc_info=True)
+
+
+def report_run_progress(item: str, done: int | None = None,
+                        planned: int | None = None,
+                        job_ref: str | None = None) -> None:
+    """Record the item the run is working on, by the same SCRAW_JOB_REF channel.
+
+    Written on every completed item and again on SIGTERM, so a kill at any point
+    leaves the most recent item behind. That string is the only thing that lets a
+    ``deadline_exceeded`` close name *where* it died instead of falling back to a
+    reason-opaque detail (restore-astock-daily-freshness D1).
+
+    ``planned`` is optional — the executor may not know the plan size. Never
+    raises: losing a progress note must not fail an ingest.
+    """
+    job_ref = job_ref or os.environ.get("SCRAW_JOB_REF")
+    if not job_ref or not (item or "").strip():
+        return
+    tail = (f"{done if done is not None else ''}"
+            f"/{planned if planned is not None else ''}")
+    value = f"{item.strip()}|{tail}"[:255]
+    try:
+        from sqlalchemy import text
+
+        from fd_open_data_mcp.db import get_database
+
+        engine = get_database().engine
+        with engine.begin() as conn:
+            conn.execute(
+                text("UPDATE policy_runs SET progress = :v WHERE job_ref = :job_ref"),
+                {"v": value, "job_ref": job_ref},
+            )
+    except Exception:  # noqa: BLE001 - never let accounting break the ingest
+        logger.warning("progress report failed (job_ref=%s)", job_ref, exc_info=True)
+

@@ -55,6 +55,7 @@ import argparse
 import datetime
 import logging
 import os
+import signal
 import socket
 import statistics
 import sys
@@ -1205,6 +1206,21 @@ def _report_yield(attempted: int, new: int) -> None:
                     exc_info=True)
 
 
+def _report_progress(code: str, done: int, planned: int) -> None:
+    """Tell the reconciler which symbol we are on (restore-astock-daily-freshness D1).
+
+    Called on every completed symbol and again on SIGTERM, so a deadline kill
+    (or OOM, which keeps the last write) leaves the symbol behind instead of an
+    opaque "deadline exceeded" on the ledger. No-ops without SCRAW_JOB_REF, so
+    local runs are unaffected; never raises.
+    """
+    try:
+        from fd_open_data_mcp.refresh.yield_report import report_run_progress
+        report_run_progress(code, done, planned)
+    except Exception:  # noqa: BLE001
+        log.warning("progress report failed (code=%s)", code, exc_info=True)
+
+
 def main() -> int:
     import argparse
     ap = argparse.ArgumentParser()
@@ -1386,6 +1402,32 @@ def main() -> int:
 
     rate_limit_streak = 0            # consecutive rate-limited symbols, across slices
     aborted = False
+    # Total planned symbols across every slice, so the ledger reads "820/5203"
+    # rather than resetting per slice. Only SCRAW_JOB_REF runs write anything.
+    planned_total = sum(len(g) for _, g in groups)
+    progress_state = {"done": 0}
+
+    def _report_current(code: str) -> None:
+        _report_progress(code, progress_state["done"], planned_total)
+
+    # K8s sends SIGTERM before SIGKILL at the deadline (default 30s grace), so a
+    # handler that writes the *current* symbol is the difference between a
+    # deadline kill with a location and an opaque one (D1). OOM keeps the last
+    # per-symbol write, which the loop already emits.
+    _prev_term = None
+    if hasattr(signal, "SIGTERM"):
+        _prev_term = signal.getsignal(signal.SIGTERM)
+
+        def _on_term(signum, frame):
+            _report_progress(current_code.get() or "?", progress_state["done"],
+                             planned_total)
+            if callable(_prev_term) and _prev_term not in (
+                    signal.SIG_DFL, signal.SIG_IGN):
+                _prev_term(signum, frame)
+            raise SystemExit(143)
+
+        signal.signal(signal.SIGTERM, _on_term)
+    current_code = {"v": None}
     for gi, (label, grp) in enumerate(groups):
         if gi:
             log.info("slice %s: cooling down %.0fs before next slice",
@@ -1395,9 +1437,12 @@ def main() -> int:
         rows_before = stats["rows"]
 
         def _ingest(code, _now=now):
+            current_code["v"] = code
             ingest_symbol(engine, code, code_map[code], units, anchors.get(code_map[code]),
                           sym_starts.get(code_map[code], start), end, _now, existing,
                           args.dry_run or args.verify, stats, failed)
+            progress_state["done"] += 1
+            _report_current(code)
 
         def _tick(i, code, _label=label, _n=len(grp)):
             if i % 50 == 0 or i == _n:
